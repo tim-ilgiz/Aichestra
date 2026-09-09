@@ -319,7 +319,7 @@ Mode C architecture completion.
 
 ---
 
-## Phase 20: Architecture contract realignment (CURRENT)
+## Phase 20: Architecture contract realignment (COMPLETE / HISTORICAL)
 
 **Purpose**: Make spec/plan/tasks/tests the source of truth for single-Orca-Run
 Mode C. Then refactor production. **Do not mark feature complete until this
@@ -368,9 +368,13 @@ CI failures). Re-verified under Phase 21.
 - [x] T111 CRITICAL: Agent work via Orca only (MODE-C-003/004)
 - [x] T112 CRITICAL: Exactly one `run-create` / resume (MODE-C-002)
 - [x] T113 CRITICAL: Same-run association fail-closed (MODE-C-007; FR-068)
-- [x] T114 HIGH REOPENED: repository research must be a real Orca dispatch;
-      when local-worker selected by policy, dispatch Orca worker/task with
-      local agent (OpenCode) rather than metadata-only `research_agent`
+- [x] T114 HIGH SUPERSEDED by T163/T169–T175: repository research must be a
+      real Orca dispatch; when local-worker selected by policy, dispatch Orca
+      worker/task with local agent (OpenCode) rather than metadata-only
+      `research_agent`. Historical value: enforced real Orca dispatch (not
+      prompt metadata). Product-specific `local-worker` → OpenCode routing is
+      no longer the architectural contract; ExecutionTargets are
+      provider/runtime/model-agnostic.
 - [x] T115 HIGH: Writers via Orca under same run
 - [x] T116 HIGH: Final lead review via Orca
 - [x] T117 HIGH: No direct Mode C Codex/Cursor/local-worker fallback
@@ -384,19 +388,25 @@ CI failures). Re-verified under Phase 21.
       (run `34396617374`, evidence supplied in PR review). New fixes need fresh CI.
 
 **Checkpoint**: Architecture contract locked in docs+tests+production Mode C
-path. Live Orca smoke on developer machines remains optional for converge.
-Feature ready for maintainer architecture review after Phase 21 / T137.
+path. SUPERSEDED (optional live smoke): “Live Orca smoke on developer machines
+remains optional for converge.” Current contract: T168 real Mode C smoke is
+required for convergence / feature complete. Feature ready for maintainer
+architecture review after Phase 21 / T137.
 
 ---
 
-## Phase 21: Dual-orchestrator removal & fail-closed hardening (CURRENT)
+## Phase 21: Dual-orchestrator removal & fail-closed hardening (COMPLETE / HISTORICAL)
 
 **Purpose**: Close gaps that Phase 20 prematurely marked complete.
 
 - [x] T125 CRITICAL: Remove remaining Aichestra-owned Mode C agent phase
       scheduler (`run_all` thin coordinator; `run_phase` refuses agent phases)
-- [x] T126 CRITICAL: Real MEDIUM Spec Kit artifact lifecycle
-      (`.aichestra/speckit/` files; no `*_satisfied` metadata unlocks)
+- [x] T126 CRITICAL SUPERSEDED by T162 / current FR-070: Real MEDIUM Spec Kit
+      artifact lifecycle (`.aichestra/speckit/` files; no `*_satisfied`
+      metadata unlocks). Historical file-backed implementation may remain in
+      history, but the current contract requires preserving the canonical
+      target-project Spec Kit structure and must not create a competing
+      `.aichestra/speckit/`.
 - [x] T127 CRITICAL: LARGE Spec Kit clarify/plan/tasks lifecycle (file-backed)
 - [x] T128 CRITICAL: Provider disable authoritative for Orca dispatch
       (never invent disabled lead; never force opencode when local disabled)
@@ -418,7 +428,7 @@ Feature ready for maintainer architecture review after Phase 21 / T137.
 
 ---
 
-## Phase 22: Architect REQUEST CHANGES (CURRENT)
+## Phase 22: Architect REQUEST CHANGES (COMPLETE / HISTORICAL)
 
 **Purpose**: Close remaining gaps from maintainer architecture review
 (dual-orchestrator residual, Spec Kit via Orca, policy-only lead, dead seams,
@@ -449,7 +459,7 @@ gated on T137 GitHub CI.
 
 ---
 
-## Phase 23: Corrective alignment follow-up (CURRENT)
+## Phase 23: Corrective alignment follow-up (COMPLETE / HISTORICAL)
 
 **Purpose**: Close remaining contract gaps discovered after Phase 22:
 real Orca local-worker dispatch, wait-event correlation on mixed dispatch
@@ -553,8 +563,15 @@ security, deterministic gates and verification.
 
 ### Production realignment — ExecutionTarget / launch proof (OPEN)
 
-- [ ] T163 CRITICAL: Implement provider/runtime/model-agnostic ExecutionTarget
-      discovery and resolution.
+- [ ] T163 CRITICAL TRACKING:
+      Complete provider/runtime/model-agnostic ExecutionTarget support.
+
+      T163 is an umbrella acceptance task and MUST NOT cause a second duplicate
+      implementation path.
+
+      T163 closes only when T169–T175 are implemented, integrated into Mode C,
+      covered by required tests, and only proven runnable ExecutionTargets are
+      exposed to the coordinator.
 
       Aichestra must independently discover Agent Runtimes, Model
       Providers/models, compatibility and proven Orca launch strategies, and
@@ -671,7 +688,11 @@ security, deterministic gates and verification.
 
 - [ ] T175 CRITICAL: An ExecutionTarget may be advertised as runnable only when
       its launch strategy is proven to bind the actual agent process to the
-      intended runtime/provider/model/endpoint.
+      intended runtime + provider/model/endpoint where applicable.
+
+      Proof must cover the dimensions the concrete Agent Runtime exposes or
+      uses. Do not require provider/model/endpoint binding for a runtime that
+      does not expose or use those dimensions.
 
       The following are insufficient proof:
 
@@ -717,12 +738,26 @@ security, deterministic gates and verification.
 
 ### Validation gates (OPEN)
 
-- [ ] T167 CRITICAL: Re-run full local tests and GitHub CI matrix after the
-      current documentation/architecture HEAD.
+- [ ] T167 CRITICAL:
+      After T163/T169–T176 production implementation is complete, run the full
+      local test suite and a fresh GitHub Actions matrix on that final
+      implementation HEAD.
+
+      Required:
+      - Ubuntu green
+      - macOS green
+      - Windows green
+
+      Any subsequent production-code change invalidates the T167 evidence and
+      requires a new matrix run.
+
+      Docs-only / architecture-HEAD CI may be kept as intermediate sanity
+      evidence, but does NOT close T167.
       <!-- Evidence: do NOT reuse older HEAD (e.g. run 34396617374). Keep open
            until a fresh GitHub Actions matrix completes successfully on Ubuntu,
-           macOS, and Windows for the current HEAD. Update this comment only
-           after that green run. Local pytest alone is insufficient. -->
+           macOS, and Windows for the final implementation HEAD after
+           T163/T169–T176. Update this comment only after that green run.
+           Local pytest alone is insufficient. Docs-only CI does not close. -->
 
 - [ ] T168 CRITICAL: Run at least one real Mode C integration smoke proving:
 
@@ -745,10 +780,26 @@ security, deterministic gates and verification.
       Smoke must prove that Aichestra did NOT execute a fixed
       research→implement→writers→review Python pipeline.
 
-      If local-only support is claimed, add a separate local-only smoke where
-      Codex/Cursor are unavailable and a proven local ExecutionTarget performs
-      real work through Orca.
-      <!-- NOT VALIDATED: no fresh live Mode C smoke on current HEAD. -->
+      Before local-only Mode C is considered validated/feature-complete, run a
+      separate real smoke on a machine with a proven local ExecutionTarget:
+
+      ```text
+      Codex unavailable/disabled
+      Cursor unavailable/disabled
+      → local ExecutionTarget
+      → Orca Task/Dispatch
+      → real repository change
+      → worker_done
+      → cleanup
+      → verification
+      → canonical success
+      ```
+
+      If no suitable local target is available on the current machine, keep
+      local-only live validation explicitly NOT VALIDATED rather than silently
+      passing it.
+      <!-- NOT VALIDATED: no fresh live Mode C smoke on current HEAD.
+           Local-only Mode C live validation: NOT VALIDATED. -->
 
 Do not mark T163/T169–T176 complete merely because documentation describes the
 architecture. Coordinator bootstrap, project-context, and workflow-ownership
@@ -834,7 +885,8 @@ are complete.
    Orca owns canonical lifecycle — Aichestra is not a fixed agent-phase engine
    and must not treat legacy `local-worker` as the canonical abstraction
 3. Do not mark T167 `[x]` until a **fresh** GitHub CI matrix is green on the
-   current HEAD (Ubuntu + macOS + Windows); do not reuse older HEAD evidence
+   final implementation HEAD after T163/T169–T176 (Ubuntu + macOS + Windows);
+   do not reuse older HEAD or docs-only CI evidence
 4. Do not claim Windows/Linux live validation from macOS-only execution
 5. Do not reintroduce `while current_phase: launch Orca worker` or a universal
    research→implement→writers→review `run_all()` pipeline
