@@ -46,7 +46,7 @@ def test_verification_failure_fails_workflow(tmp_path: Path) -> None:
         research_useful=False,
         bindings=WorkflowBindings(
             orca=fake_orca("success"),
-            lead=fake_codex("success"),
+            providers=[(fake_codex("success")).probe()],
             project_root=str(tmp_path),
             task_prompt="noop",
             maintenance_kwargs={"change_summary": "noop", "touches_behavior": False},
@@ -139,7 +139,7 @@ def test_maintenance_uses_change_signals_not_defaults(tmp_path: Path) -> None:
         research_useful=False,
         bindings=WorkflowBindings(
             orca=fake_orca("success"),
-            lead=fake_codex("success"),
+            providers=[(fake_codex("success")).probe()],
             project_root=str(tmp_path),
             task_prompt="change authorization behavior",
             # No maintenance_kwargs — must infer from summary / paths.
@@ -164,7 +164,7 @@ def test_maintenance_gate_records_required_tests_without_writer_roles(
         research_useful=False,
         bindings=WorkflowBindings(
             orca=orca,
-            lead=fake_codex("success"),
+            providers=[(fake_codex("success")).probe()],
             project_root=str(tmp_path),
             task_prompt="feature",
             maintenance_kwargs={

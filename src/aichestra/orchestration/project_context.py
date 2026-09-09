@@ -8,6 +8,7 @@ be explicit policy/context payload.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -238,7 +239,15 @@ def _discover_agents_files(root: Path) -> list[Path]:
                         found.append(child.resolve())
             except OSError:
                 pass
-    return found
+    excluded = {".git", "node_modules", ".venv", "venv", "__pycache__", "target", "dist", "build"}
+    for directory, dirs, files in os.walk(root, followlinks=False):
+        dirs[:] = sorted(d for d in dirs if d not in excluded and not (Path(directory) / d).is_symlink())
+        for name in sorted(files):
+            if name.lower() == "agents.md":
+                path = Path(directory) / name
+                if not path.is_symlink():
+                    found.append(path.resolve())
+    return list(dict.fromkeys(p for p in found if p.is_relative_to(root)))
 
 
 def _read_excerpts(paths: list[Path], *, limit: int) -> dict[str, str]:

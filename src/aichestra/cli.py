@@ -330,8 +330,7 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
     from aichestra.orchestration.verification import verification_commands_from_config
     from aichestra.orchestration.workflow import ModeCRunController, WorkflowBindings
     from aichestra.providers.discovery import discover_providers, enabled_map_from_config
-    from aichestra.providers.fakes import fake_local_worker, fake_orca
-    from aichestra.providers.local_worker import LocalWorkerProvider
+    from aichestra.providers.fakes import fake_orca
     from aichestra.providers.orca import OrcaProvider
     from aichestra.providers.quota_guard import real_provider_execution_blocked
 
@@ -374,35 +373,14 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
     selection = select_lead(providers, preferred=preferred, fallback=fallback)
     attachments = tuple(str(Path(p).expanduser().resolve()) for p in (args.attach or []))
 
-    if use_fakes:
-        orca = fake_orca() if enabled.get("orca", True) else None
-        local = fake_local_worker(enabled=enabled_local) if enabled_local else None
-        # Mode C: do not construct Codex/Cursor adapters — policy only.
-        lead = None
-    else:
-        orca = OrcaProvider() if enabled.get("orca", True) else None
-        local = (
-            LocalWorkerProvider(
-                local_enabled=enabled_local,
-                ollama_host=str(ollama_host) if ollama_host else None,
-                preferred_ids=preferred_ids,
-                allowed_ids=allowed_ids,
-                config=cfg,
-            )
-            if enabled_local
-            else None
-        )
-        # Mode C: lead adapters are Mode A only. Pass discovery + preferred/fallback
-        # policy; Orca owns worker selection under the Mode C Run.
-        lead = None
+    orca = (fake_orca() if use_fakes else OrcaProvider()) if enabled.get("orca", True) else None
 
-    # Mode C: Orca is the control plane. lead/local_worker are optional discovery
-    # probes only — never Mode C execute_task targets. Model/endpoint/capabilities
-    # are policy data for Orca, not Aichestra worker scheduling.
+    # Model discovery supplies policy facts; Mode C never constructs worker adapters.
+    selected_model = None
     local_model_ref = None
     local_capabilities: tuple[str, ...] = ()
     installed_models: tuple[dict, ...] = ()
-    if enabled_local and local is not None:
+    if enabled_local:
         try:
             from aichestra.local_runtime.discovery import discover_local_runtime_report
             from aichestra.local_runtime.model_selector import select_model
@@ -448,6 +426,7 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
                 allowed_ids=allowed_ids,
             )
             if model_selection.model is not None:
+                selected_model = model_selection.model
                 local_model_ref = model_selection.model.id
                 local_capabilities = tuple(
                     c.value for c in model_selection.model.capabilities
@@ -457,8 +436,6 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
 
     bindings = WorkflowBindings(
         orca=orca,  # type: ignore[arg-type]
-        lead=lead,  # type: ignore[arg-type]
-        local_worker=local,  # type: ignore[arg-type]
         providers=providers,
         project_root=str(project_root),
         task_prompt=args.prompt,
@@ -470,6 +447,7 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         fallback_lead=fallback,
         local_enabled=enabled_local,
         local_endpoint=str(ollama_host) if ollama_host else None,
+        local_model=selected_model,
         local_model_ref=local_model_ref,
         local_capabilities=local_capabilities,
         installed_models=installed_models,

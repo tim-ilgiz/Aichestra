@@ -246,9 +246,6 @@ class WorkflowBindings:
     local_model_ref: str | None = None
     local_capabilities: tuple[str, ...] = ()
     installed_models: tuple[dict[str, Any], ...] = ()
-    # Deprecated discovery-only fields (ignored for Mode C execute_task).
-    lead: ProviderAdapter | None = None
-    local_worker: ProviderAdapter | None = None
 
 
 @dataclass
@@ -666,7 +663,7 @@ class ModeCRunController:
                 **package.to_dict(),
                 "policy_package": package.to_dict(),
                 "project_context": package.project_context,
-                "worktree": "orca-owned",
+                "worktree": "current",
                 # Capability hints for Orca — not Aichestra worker scheduling.
                 "capabilities": {
                     "preferred_lead": package.preferred_lead,
@@ -860,34 +857,11 @@ class ModeCRunController:
                 preferred=self.bindings.preferred_lead,
                 fallback=self.bindings.fallback_lead,
             )
-        # Probe deprecated lead/local_worker bindings only for capability facts.
-        lead_kind = None
-        if self.bindings.lead is not None:
-            try:
-                st = self.bindings.lead.probe()
-                if st.available:
-                    lead_kind = self.bindings.lead.kind.value
-            except Exception:  # noqa: BLE001
-                pass
-        if lead_kind is None and selection and selection.lead is not None:
-            lead_kind = selection.lead.value
-
-        local_available = False
-        if self.bindings.local_enabled:
-            if self.bindings.local_worker is not None:
-                try:
-                    st = self.bindings.local_worker.probe()
-                    local_available = bool(st.available)
-                except Exception:  # noqa: BLE001
-                    local_available = False
-            if not local_available:
-                for status in providers:
-                    if (
-                        status.kind is ProviderKind.LOCAL_WORKER
-                        and status.available
-                    ):
-                        local_available = True
-                        break
+        lead_kind = selection.lead.value if selection and selection.lead else None
+        local_available = self.bindings.local_enabled and any(
+            status.kind is ProviderKind.LOCAL_WORKER and status.available
+            for status in providers
+        )
 
         return {
             "preferred_lead": self.bindings.preferred_lead,
@@ -1120,6 +1094,15 @@ class ModeCRunController:
                 "source": "orca_run_plus_aichestra_gates",
             }
         )
+        run_id = self.state.metadata.get("orca_run_id")
+        if run_id and self.bindings.orca:
+            result = self.bindings.orca.execute_task(ProviderTaskRequest(
+                prompt="Read canonical Run state", role="run_status", read_only=True,
+                context={"run_id": run_id}, cwd=self.bindings.project_root,
+            ))
+            status["canonical_read"] = result.to_dict()
+            status["canonical_state"] = result.metadata.get("receipt") if result.ok else None
+            status["source"] = "orca_run_show_plus_aichestra_gates" if result.ok else "aichestra_gates_run_unverifiable"
         self.state.metadata["orca_run_status"] = status
 
     def _cleanup_attachment_staging(self) -> None:

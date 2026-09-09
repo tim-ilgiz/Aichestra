@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import json
 import re
-import tempfile
+import os
+from dataclasses import replace
 import time
 from pathlib import Path
 from typing import Any
@@ -296,7 +297,7 @@ def interpret_orca_wait_event(
                 ),
                 meta,
             )
-        status = str(event.get("status") or event.get("result") or "").lower()
+        status = str(event.get("outcome") or event.get("status") or event.get("result") or "").lower()
         if status in {"failed", "error", "cancelled"}:
             return False, f"worker_done with failure status: {status}", meta
         return True, "worker_done", meta
@@ -403,7 +404,8 @@ class OrcaProvider(ProviderAdapter):
             ),
             unavailable_detail="Orca binary unavailable",
         )
-        if not ping.ok:
+        runtime = _parse_orca_json(ping.output).get("result", {}).get("runtime", {})
+        if not ping.ok or runtime.get("reachable") is False:
             return ProviderTaskResult(
                 ok=False,
                 failure=FailureClass.UNAVAILABLE,
@@ -414,6 +416,49 @@ class OrcaProvider(ProviderAdapter):
 
         role = (request.role or "").strip().lower()
         agent = str(request.context.get("agent") or _DEFAULT_AGENT)
+        if role == "mode_c_handoff":
+            policy = request.context.get("provider_policy") or {}
+            available = policy.get("providers") or {}
+            agent = next((name for name in (
+                policy.get("preferred_lead"), policy.get("fallback_lead")
+            ) if name in {"codex", "cursor"} and available.get(name, {}).get("available")), "")
+            if not agent and policy.get("local_enabled") and policy.get("local_available"):
+                agent = "opencode"
+            if not agent:
+                return ProviderTaskResult(ok=False, failure=FailureClass.UNAVAILABLE,
+                    detail="No enabled, available coordinator provider", session_id=session.session_id)
+            # Preserve the complete policy; generic bounded_prompt truncates context.
+            contract = (
+                "You are the explicit Mode C coordinator. Inspect ProjectContext and read "
+                "the applicable project instructions (nested AGENTS.md applies only to its subtree). "
+                "Load Orca orchestration skill using this executable: " + binary + ". "
+                "Bind the existing Run with run-use; NEVER create another Run. "
+                "Decide the task graph yourself from the objective and project rules. "
+                "Create arbitrary Tasks/Dispatches using Orca task-create/worker-start, "
+                "placing child workers with supported Orca worktree selectors. "
+                "Use only available providers in policy; disabled providers must never run. "
+                "When local is selected, dispatch an actual Orca-owned OpenCode worker using "
+                "the supplied model/endpoint. Never substitute prompt metadata for execution. "
+                "Wait for all child Dispatches, process questions and outcomes, converge results "
+                "into the coordinator checkout, and report explicit failure for unresolved work. "
+                "Only then send worker_done using your live injected authority and outcome. "
+                "Aichestra runs deterministic gates after your completion.\n"
+            )
+            full_prompt = contract + "POLICY_PACKAGE: " + json.dumps(request.context) + "\n" + request.prompt
+            request = replace(request, prompt=full_prompt, context={**request.context, "worktree": "current"},
+                              max_prompt_chars=len(full_prompt) + 5000)
+
+        if role == "run_status":
+            result = run_cli_task(binary=binary,
+                argv=[binary, "orchestration", "run-show", "--id", str(request.context["run_id"]), "--json"],
+                session=session, request=request, unavailable_detail="Orca unavailable")
+            return replace(result, metadata={**result.metadata, "receipt": _parse_orca_json(result.output)})
+
+        if role in {"ensure_run", "control_plane", "classify", "mode_c_handoff"} and not os.environ.get("ORCA_TERMINAL_HANDLE", "").strip():
+            return ProviderTaskResult(ok=False, failure=FailureClass.UNAVAILABLE,
+                detail="Mode C requires a live Orca terminal identity. Run aichestra orchestrate inside an Orca terminal (ORCA_TERMINAL_HANDLE); an ordinary headless shell is unsupported.",
+                session_id=session.session_id)
+
 
         # Phase reports must never create Runs — local metadata only at adapter.
         if role in {"phase_report", "status_ping"}:
@@ -646,10 +691,7 @@ class OrcaProvider(ProviderAdapter):
         )
         # Do NOT stage into the parent project checkout. Prefer absolute paths
         # for Orca --attach; optionally stage under a temp dir outside the repo.
-        attach_stage_root: str | None = None
-        if request.attachments:
-            attach_stage_root = tempfile.mkdtemp(prefix="aichestra-orca-attach-")
-        delivery = stage_attachments(request.attachments, attach_stage_root)
+        delivery = stage_attachments(request.attachments, None)
         attach_flags = orca_attach_flags(
             delivery.staged or delivery.resolved or request.attachments
         )
@@ -670,6 +712,10 @@ class OrcaProvider(ProviderAdapter):
             *attach_flags,
             "--json",
         ]
+        if worktree not in {"new-child", "new-top-level"}:
+            for flag in ("--name", "--setup"):
+                index = worker_argv.index(flag)
+                del worker_argv[index:index + 2]
         worker_result = run_cli_task(
             binary=binary,
             argv=worker_argv,

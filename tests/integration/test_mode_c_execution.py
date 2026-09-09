@@ -28,7 +28,7 @@ def test_handoff_failed_does_not_complete_or_bypass_lead(tmp_path: Path) -> None
         mode=Mode.ORCHESTRATED,
         bindings=WorkflowBindings(
             orca=orca,
-            lead=lead,
+            providers=[(lead).probe()],
             task_prompt="implement feature",
             project_root=str(proj),
             maintenance_kwargs={"change_summary": "feature"},
@@ -55,7 +55,7 @@ def test_mode_c_without_orca_fails_at_validate(tmp_path: Path) -> None:
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         bindings=WorkflowBindings(
-            lead=fake_codex("success"),
+            providers=[(fake_codex("success")).probe()],
             task_prompt="implement feature",
             project_root=str(proj),
         ),
@@ -75,7 +75,7 @@ def test_mode_c_orca_unavailable_does_not_fallback_to_lead(tmp_path: Path) -> No
         mode=Mode.ORCHESTRATED,
         bindings=WorkflowBindings(
             orca=fake_orca("unavailable"),
-            lead=lead,
+            providers=[(lead).probe()],
             task_prompt="implement feature",
             project_root=str(proj),
         ),
@@ -94,7 +94,7 @@ def test_mode_c_resume_run_id(tmp_path: Path) -> None:
         mode=Mode.ORCHESTRATED,
         bindings=WorkflowBindings(
             orca=orca,
-            lead=fake_codex("success"),
+            providers=[(fake_codex("success")).probe()],
             task_prompt="resume me",
             project_root=str(proj),
             resume_run_id="existing-orca-run-42",
@@ -121,7 +121,7 @@ def test_maintenance_is_gate_not_writer_scheduler(tmp_path: Path) -> None:
         mode=Mode.ORCHESTRATED,
         bindings=WorkflowBindings(
             orca=orca,
-            lead=fake_codex("success"),
+            providers=[(fake_codex("success")).probe()],
             task_prompt="api change",
             project_root=str(proj),
             maintenance_kwargs={
@@ -153,8 +153,8 @@ def test_mode_c_wires_orca_only_end_to_end(fixture_project_a: Path) -> None:
         mode=Mode.ORCHESTRATED,
         bindings=WorkflowBindings(
             orca=orca,
-            lead=lead,
-            local_worker=worker,
+            providers=[(lead).probe()] + [p.probe() for p in [(worker)] if p is not None],
+
             project_root=str(fixture_project_a),
             task_prompt="ship portable bootstrap across 12 files in multi-package monorepo",
             research_query="README",

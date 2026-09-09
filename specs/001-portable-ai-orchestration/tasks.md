@@ -376,8 +376,8 @@ CI failures). Re-verified under Phase 21.
 - [x] T121 HIGH: Codex→Cursor handoff same-run executable UX (FR-035/036/073)
 - [x] T122 MEDIUM: Capability-based profiles; Windows CIM; macOS GPU harden
 - [x] T123 CRITICAL: Obsolete dual-orchestrator assertions removed
-- [ ] T124: Full suite + GitHub CI matrix green — local pytest green;
-      CI pending push/merge verification
+- [x] T124: Historical HEAD `6c83bc2` CI matrix green on macOS/Windows/Linux
+      (run `34396617374`, evidence supplied in PR review). New fixes need fresh CI.
 
 **Checkpoint**: Architecture contract locked in docs+tests+production Mode C
 path. Live Orca smoke on developer machines remains optional for converge.
@@ -407,8 +407,8 @@ Feature ready for maintainer architecture review after Phase 21 / T137.
 - [x] T134 HIGH: Bootstrap can honestly reach `bootstrap_complete=true`
 - [x] T135 MEDIUM: Orca wait completion correlated to expected dispatch_id
 - [x] T136 CRITICAL: Architecture tests against dual-orchestrator regression
-- [ ] T137 CRITICAL: Full green CI / convergence (local `pytest` green;
-      GitHub Actions macOS/Windows/Linux after push — do not claim until green)
+- [x] T137 CRITICAL: Historical HEAD CI matrix green (run `34396617374`,
+      evidence supplied in PR review); this is not evidence for subsequent fixes.
 
 **Checkpoint**: Do not merge until T124/T137 GitHub CI matrix is green.
 
@@ -501,7 +501,7 @@ workflow-specific.
 
 ### Production realignment — NOT COMPLETE
 
-- [x] T158 CRITICAL: Refactor Mode C production controller so `run_all()` no
+- [ ] T158 CRITICAL: Refactor Mode C production controller so `run_all()` no
       longer hard-codes a universal research/implement/writers/review workflow.
 
 - [x] T159 CRITICAL: Remove production dependence on fixed agent `Phase` values.
@@ -518,14 +518,14 @@ workflow-specific.
       structure when the target project already has a canonical Spec Kit
       lifecycle. Define compatibility/migration behavior.
 
-- [x] T163 HIGH: Make provider/capability selection policy data consumed by Orca
+- [ ] T163 HIGH: Make provider/capability selection policy data consumed by Orca
       rather than Aichestra-owned agent scheduling decisions.
 
-- [x] T164 HIGH: Derive Mode C execution status from Orca Run state plus
+- [ ] T164 HIGH: Derive Mode C execution status from Orca Run state plus
       deterministic Aichestra gate results; do not maintain a parallel agent
       workflow state machine.
 
-- [x] T165 HIGH: Add architecture contract tests proving two materially
+- [ ] T165 HIGH: Add architecture contract tests proving two materially
       different task/project workflows can execute without adding/changing
       Python `Phase` scheduling code.
 
@@ -536,14 +536,21 @@ workflow-specific.
       production refactor.
       <!-- Evidence: full local `pytest tests/` green (192 passed). CI workflow
            still runs the same matrix with AICHESTRA_FAKE_PROVIDERS; GitHub
-           Actions matrix execution awaits push/PR. -->
+           Actions run 34396617374 passed at reviewed HEAD (review-supplied evidence).
+           Subsequent coordinator fixes require a new matrix run. -->
 
 - [ ] T168 CRITICAL: Run at least one real Mode C integration smoke proving
       `task + project → one real Orca Run → real worker → worktree/result`
       without an Aichestra-owned fixed workflow.
-      <!-- NOT VALIDATED: live Orca run-create requires ORCA_TERMINAL_HANDLE /
-           --from <terminal-handle> (error no_active_sender_terminal). Binary
-           probed at /Applications/Orca.app/.../orca v1.4.198. -->
+      <!-- NOT VALIDATED: authority is now an explicit production precondition.
+           Current live status probe: app.running=false, runtime.reachable=false,
+           state=stale_bootstrap. No real coordinator DAG has been observed. -->
+
+Coordinator review fixes: explicit policy-selected coordinator contract, valid
+bootstrap placement, authority precondition, canonical run-show read, nested
+instruction discovery, vision model binding, and removal of duplicate attachment
+staging are implemented. Production adapter tests cover the handoff contract;
+T158/T163/T164/T165 remain open until live convergence is established.
 
 **Checkpoint**: Do not treat architecture as converged until T158–T168 are
 complete.
@@ -559,8 +566,8 @@ complete.
 - Phase 21 (T125–T137) closes dual-orchestrator / fail-closed gaps
 - Phase 22 (T138–T144) closes architect REQUEST CHANGES residuals
 - Phase 23 (T145–T153) closes corrective alignment follow-up
-- Phase 24 (T154–T167 done; T168 open — LIVE Orca smoke blocked on
-  `ORCA_TERMINAL_HANDLE` / `--from`) is the current architecture
+- Phase 24 (T158/T163/T164/T165 reopened pending coordinator convergence;
+  T168 live smoke still open) is the current architecture
   convergence gate for workflow ownership / project-execution control plane
 - T108–T124 depend on T103–T107; T124/T137/T144 gate merge
 - Converge / “feature complete” only after T137 + Phase 22 + Phase 24 T158–T168

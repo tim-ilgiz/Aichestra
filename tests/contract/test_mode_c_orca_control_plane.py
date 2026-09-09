@@ -59,7 +59,7 @@ def test_one_run_id_reused_across_handoff(tmp_path: Path) -> None:
         mode=Mode.ORCHESTRATED,
         bindings=WorkflowBindings(
             orca=orca,
-            lead=fake_codex("success"),
+            providers=[(fake_codex("success")).probe()],
             project_root=str(tmp_path),
             task_prompt="small fix",
             maintenance_kwargs={"touches_behavior": False},
@@ -86,7 +86,7 @@ def test_speckit_policy_without_competing_tree(tmp_path: Path) -> None:
         mode=Mode.ORCHESTRATED,
         bindings=WorkflowBindings(
             orca=orca,
-            lead=fake_codex("success"),
+            providers=[(fake_codex("success")).probe()],
             project_root=str(tmp_path),
             task_prompt="refactor across 12 files in multi-package monorepo",
             maintenance_kwargs={"touches_behavior": False},
@@ -110,7 +110,7 @@ def test_run_phase_is_early_validate_only(tmp_path: Path) -> None:
         mode=Mode.ORCHESTRATED,
         bindings=WorkflowBindings(
             orca=orca,
-            lead=fake_codex("success"),
+            providers=[(fake_codex("success")).probe()],
             project_root=str(tmp_path),
             task_prompt="small fix",
         ),
@@ -155,7 +155,7 @@ def test_worktree_adoption_switches_effective_root(tmp_path: Path) -> None:
         mode=Mode.ORCHESTRATED,
         bindings=WorkflowBindings(
             orca=orca,
-            lead=fake_codex("success"),
+            providers=[(fake_codex("success")).probe()],
             project_root=str(parent),
             task_prompt="implement",
             maintenance_kwargs={"touches_behavior": False},

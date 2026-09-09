@@ -168,7 +168,7 @@ def test_missing_verification_commands_fail_workflow(tmp_path: Path) -> None:
         research_useful=False,
         bindings=WorkflowBindings(
             orca=fake_orca("success"),
-            lead=fake_codex("success"),
+            providers=[(fake_codex("success")).probe()],
             project_root=str(tmp_path),
             task_prompt="noop typo",
             maintenance_kwargs={"change_summary": "noop", "touches_behavior": False},
@@ -194,7 +194,7 @@ def test_mode_c_does_not_use_edit_lock(tmp_path: Path) -> None:
         research_useful=False,
         bindings=WorkflowBindings(
             orca=fake_orca("success"),
-            lead=fake_codex("success"),
+            providers=[(fake_codex("success")).probe()],
             project_root=str(root),
             task_prompt="implement",
             maintenance_kwargs={"change_summary": "noop", "touches_behavior": False},
@@ -262,3 +262,69 @@ def test_cli_binds_writer_for_login_feature(
     assert "no writer executor" not in json.dumps(payload)
     assert code == 0
 
+
+
+@pytest.mark.parametrize("provider,local,expected", [("codex", False, "codex"), ("cursor", False, "cursor"), ("local-worker", True, "opencode")])
+def test_real_adapter_coordinator_contract(monkeypatch, tmp_path, provider, local, expected):
+    """Exercise production adapter command construction, not a fake workflow DAG."""
+    from aichestra.providers.orca import OrcaProvider
+    from aichestra.providers.base import ProviderSession
+    monkeypatch.setenv("ORCA_TERMINAL_HANDLE", "test-live-authority")
+    adapter = OrcaProvider()
+    monkeypatch.setattr(adapter, "probe", lambda: ProviderStatus(
+        kind=ProviderKind.ORCA, available=True, binary_path="orca"))
+    calls = []
+    def run(**kwargs):
+        argv = kwargs["argv"]
+        calls.append(argv)
+        command = argv[2] if argv[1] == "orchestration" else "status"
+        receipts = {
+            "status": {}, "run-use": {}, "task-create": {"id": "t1"},
+            "worker-start": {"dispatchId": "d1", "worktreePath": str(tmp_path)},
+            "check": {"type": "worker_done", "dispatchId": "d1", "outcome": "succeeded"},
+            "run-show": {"id": "r1", "state": "active"},
+        }
+        return ProviderTaskResult(ok=True, output=json.dumps(receipts[command]))
+    monkeypatch.setattr("aichestra.providers.orca.run_cli_task", run)
+    policy = {"preferred_lead": "codex", "fallback_lead": "cursor", "local_enabled": local,
+              "local_available": local, "providers": {provider: {"available": True}}}
+    attachment = tmp_path / "input.txt"
+    attachment.write_text("reference")
+    request = ProviderTaskRequest(prompt="Update the project", role="mode_c_handoff", attachments=(str(attachment),),
+        cwd=str(tmp_path), context={"run_id": "r1", "provider_policy": policy,
+        "project_context": {"instruction_excerpts": {"AGENTS.md": "x" * 5000}, "marker": "CONTEXT_END"}})
+    result = adapter.send(ProviderSession(session_id="s", kind=ProviderKind.ORCA), request)
+    assert result.ok
+    task = next(c for c in calls if "task-create" in c)
+    spec = task[task.index("--spec") + 1]
+    assert "explicit Mode C coordinator" in spec
+    assert "CONTEXT_END" in spec
+    assert "NEVER create another Run" in spec
+    assert "arbitrary Tasks/Dispatches" in spec
+    worker = next(c for c in calls if "worker-start" in c)
+    assert worker[worker.index("--agent") + 1] == expected
+    assert worker[worker.index("--worktree") + 1] == "current"
+    assert "--setup" not in worker and "--name" not in worker
+    assert worker[worker.index("--attach") + 1] == str(attachment)
+    assert result.metadata["attachment_delivery"]["staged"] == []
+    assert sum("task-create" in c for c in calls) == 1
+    assert not any("run-create" in c for c in calls)
+    state = adapter.send(ProviderSession(session_id="s", kind=ProviderKind.ORCA),
+        ProviderTaskRequest(prompt="state", role="run_status", context={"run_id": "r1"}, read_only=True))
+    assert state.metadata["receipt"] == {"id": "r1", "state": "active"}
+
+
+def test_orca_authority_precondition_before_mutations(monkeypatch):
+    from aichestra.providers.orca import OrcaProvider
+    from aichestra.providers.base import ProviderSession
+    monkeypatch.delenv("ORCA_TERMINAL_HANDLE", raising=False)
+    adapter = OrcaProvider()
+    monkeypatch.setattr(adapter, "probe", lambda: ProviderStatus(kind=ProviderKind.ORCA, available=True, binary_path="orca"))
+    calls = []
+    def run(**kwargs):
+        calls.append(kwargs["argv"])
+        return ProviderTaskResult(ok=True, output="{}")
+    monkeypatch.setattr("aichestra.providers.orca.run_cli_task", run)
+    result = adapter.send(ProviderSession(session_id="s", kind=ProviderKind.ORCA), ProviderTaskRequest(prompt="task", role="ensure_run"))
+    assert not result.ok and "ORCA_TERMINAL_HANDLE" in result.detail
+    assert calls == [["orca", "status", "--json"]]

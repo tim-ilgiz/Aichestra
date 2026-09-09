@@ -89,7 +89,7 @@ def test_workflow_classify_uses_speckit_and_binds_orca_run(tmp_path: Path) -> No
         research_useful=False,
         bindings=WorkflowBindings(
             orca=orca,
-            lead=lead,
+            providers=[(lead).probe()],
             project_root=str(tmp_path),
             task_prompt="fix one-line typo",
             maintenance_kwargs={"change_summary": "typo", "touches_behavior": False},
@@ -111,7 +111,7 @@ def test_mode_c_without_project_root_fails_before_orca() -> None:
         research_useful=False,
         bindings=WorkflowBindings(
             orca=orca,
-            lead=fake_codex("success"),
+            providers=[(fake_codex("success")).probe()],
             project_root=None,
             task_prompt="should not run",
         ),
@@ -134,7 +134,7 @@ def test_mode_c_handoff_includes_task_without_lead_review_role(tmp_path: Path) -
         research_useful=False,
         bindings=WorkflowBindings(
             orca=orca,
-            lead=lead,
+            providers=[(lead).probe()],
             project_root=str(proj),
             task_prompt="ACCEPTANCE: users can log in with SSO",
             maintenance_kwargs={
@@ -191,7 +191,7 @@ def test_quota_failure_prepares_manual_handoff(tmp_path: Path) -> None:
         research_useful=False,
         bindings=WorkflowBindings(
             orca=orca,
-            lead=fake_codex("success"),
+            providers=[(fake_codex("success")).probe()],
             project_root=str(proj),
             task_prompt="continue feature",
             maintenance_kwargs={"change_summary": "x"},

@@ -19,7 +19,7 @@ from tests.fakes.providers import fake_codex, fake_orca
 def _bindings(root: Path, *, prompt: str, orca) -> WorkflowBindings:
     return WorkflowBindings(
         orca=orca,
-        lead=fake_codex("success"),
+        providers=[(fake_codex("success")).probe()],
         project_root=str(root),
         task_prompt=prompt,
         maintenance_kwargs={"change_summary": "x", "touches_behavior": False},
@@ -27,14 +27,13 @@ def _bindings(root: Path, *, prompt: str, orca) -> WorkflowBindings:
     )
 
 
-def test_t165_two_projects_different_workflow_shapes_same_controller(
+def test_t165_two_project_contexts_same_controller(
     tmp_path: Path,
 ) -> None:
     """MODE-C-015 / T165: different Orca workflow shapes without Phase changes.
 
-    Two projects/tasks hand off through the same Python controller gates. Fake
-    Orca returns different ``simulated_workflow_shape`` values. No Aichestra
-    Phase/scheduler branch is required for the shape difference.
+    Two contexts pass through identical controller gates. This regression test
+    does not prove a live coordinator's dynamic DAG; T168 covers that evidence.
     """
     project_a = tmp_path / "project_a"
     project_b = tmp_path / "project_b"
@@ -87,14 +86,6 @@ def test_t165_two_projects_different_workflow_shapes_same_controller(
     handoff_b = next(r for r in orca_b.sent if (r.role or "") == MODE_C_HANDOFF_ROLE)
     assert (handoff_a.context or {}).get("project_context", {}).get("agents_files")
     assert not (handoff_b.context or {}).get("project_context", {}).get("agents_files")
-    receipt_a = state_a.metadata.get("orca_mode_c_handoff", {}).get("provider", {})
-    receipt_b = state_b.metadata.get("orca_mode_c_handoff", {}).get("provider", {})
-    shape_a = (receipt_a.get("metadata") or {}).get("simulated_workflow_shape")
-    shape_b = (receipt_b.get("metadata") or {}).get("simulated_workflow_shape")
-    assert shape_a == "project_instruction_driven"
-    assert shape_b == "speckit_medium"
-    assert shape_a != shape_b
-
     # Prove controller class / gate set did not grow Phase enum members.
     from aichestra.orchestration.workflow import GateKind as GK
 
@@ -154,3 +145,13 @@ def test_t166_project_instructions_discovered_and_authoritative(
     assert state.metadata.get("speckit_canonical", {}).get(
         "competing_aichestra_speckit_forbidden"
     )
+
+
+def test_nested_instructions_discovery_excludes_dependencies(tmp_path):
+    for rel in ("backend/AGENTS.md", "services/payments/AGENTS.md", "node_modules/pkg/AGENTS.md"):
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("Scoped instructions")
+    context = discover_project_context(tmp_path)
+    assert {Path(p).relative_to(tmp_path).as_posix() for p in context.agents_files} == {
+        "backend/AGENTS.md", "services/payments/AGENTS.md"}

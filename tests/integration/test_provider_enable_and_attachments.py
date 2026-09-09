@@ -75,7 +75,7 @@ def test_vision_attachment_delivered_and_wired(tmp_path: Path) -> None:
         research_useful=False,
         bindings=WorkflowBindings(
             orca=orca,
-            lead=fake_codex("success"),
+            providers=[(fake_codex("success")).probe()],
             project_root=str(tmp_path),
             task_prompt="fix UI from screenshot",
             attachments=(str(img),),

@@ -88,7 +88,7 @@ def test_workflow_skips_writers_when_none(tmp_path) -> None:
         research_useful=False,
         bindings=WorkflowBindings(
             orca=orca,
-            lead=fake_codex("success"),
+            providers=[(fake_codex("success")).probe()],
             project_root=str(tmp_path),
             task_prompt="noop typo",
             maintenance_kwargs={"change_summary": "noop"},

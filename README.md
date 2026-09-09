@@ -51,7 +51,8 @@ python -m aichestra update          # after git pull; preserves machine-local
 
 1. **Native** — run `codex` / Cursor IDE / `cursor` as usual (unchanged).
 2. **Orca interactive** — open Orca app; work with one agent (`orca open` / UI).
-3. **Mode C** — start explicitly (requires Orca **and** `--project-root`):
+3. **Mode C** — start explicitly from a live Orca terminal (requires Orca,
+   its runtime-issued `ORCA_TERMINAL_HANDLE`, **and** `--project-root`):
    `python -m aichestra orchestrate --prompt "…" --project-root /path/to/target`
    Creates **one Orca Run**; agent work goes through Orca tasks/workers/worktrees;
    Aichestra applies policy + deterministic gates on the adopted worktree.
@@ -154,3 +155,13 @@ pytest
 Fixture projects under `fixtures/project_a` (Python) and `fixtures/project_b`
 (Node) prove isolation. CI sets `AICHESTRA_FAKE_PROVIDERS=1` and
 `AICHESTRA_NO_REAL_QUOTA=1`.
+
+Mode C bootstraps one explicit coordinator in the current Orca checkout using
+an available provider from policy. The coordinator reads project context,
+including scoped nested AGENTS.md, owns child Tasks/Dispatches and worktree
+placement in the same Run, waits for their outcomes and converges their results
+before completing. Aichestra then applies deterministic gates and reads
+`orchestration run-show`; gate results and canonical state are reported separately.
+An ordinary headless shell without Orca terminal authority is unsupported and
+fails before Run creation. Do not invent or reuse a stale terminal handle.
+Adapter contract tests validate this handoff, not a live coordinator's DAG.

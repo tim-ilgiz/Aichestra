@@ -57,9 +57,9 @@ def _small_bindings(
         root = project_root  # type: ignore[assignment]
     return WorkflowBindings(
         orca=orca,
-        lead=lead if lead is not None else fake_codex("success"),
-        local_worker=local_worker,
-        providers=list(providers or []),
+
+
+        providers=list(providers) if providers is not None else [p.probe() for p in [lead if lead is not None else fake_codex("success"), local_worker] if p is not None],
         project_root=root,
         task_prompt=task_prompt,
         research_query=research_query,
@@ -96,7 +96,7 @@ def test_mode_c_requires_project_root() -> None:
         mode=Mode.ORCHESTRATED,
         bindings=WorkflowBindings(
             orca=orca,
-            lead=lead,
+            providers=[(lead).probe()],
             project_root=None,
             task_prompt="should not run",
         ),
@@ -354,7 +354,7 @@ def test_disabled_lead_never_dispatched(tmp_path: Path) -> None:
         mode=Mode.ORCHESTRATED,
         bindings=WorkflowBindings(
             orca=orca,
-            lead=disabled,
+
             providers=[
                 fake_orca("success").probe(),
                 disabled.probe(),
@@ -508,7 +508,7 @@ def test_mode_c_orca_is_canonical_lifecycle_owner(tmp_path: Path) -> None:
     assert state.metadata["orca_run_id"]
     assert state.metadata.get("orchestration_shape_agnostic") is True
     status = state.metadata.get("orca_run_status") or {}
-    assert status.get("source") == "orca_run_plus_aichestra_gates"
+    assert status.get("source") == "orca_run_show_plus_aichestra_gates"
     assert status.get("ok") is True
 
 
@@ -568,7 +568,7 @@ def test_disabled_codex_is_never_dispatched(tmp_path: Path) -> None:
         mode=Mode.ORCHESTRATED,
         bindings=WorkflowBindings(
             orca=orca,
-            lead=codex,
+
             providers=[orca.probe(), codex.probe(), cursor.probe()],
             project_root=str(tmp_path),
             task_prompt="fix",
@@ -593,7 +593,7 @@ def test_disabled_cursor_is_never_dispatched(tmp_path: Path) -> None:
         mode=Mode.ORCHESTRATED,
         bindings=WorkflowBindings(
             orca=orca,
-            lead=codex,
+
             providers=[orca.probe(), codex.probe(), cursor.probe()],
             project_root=str(tmp_path),
             task_prompt="fix",
@@ -614,7 +614,7 @@ def test_no_available_lead_does_not_default_to_codex(tmp_path: Path) -> None:
         mode=Mode.ORCHESTRATED,
         bindings=WorkflowBindings(
             orca=orca,
-            lead=None,
+
             providers=[
                 fake_orca("success").probe(),
                 fake_codex("unavailable").probe(),

@@ -33,8 +33,9 @@ For a Mode C invocation Aichestra is responsible for:
 3. discovering available/enabled providers and machine capabilities;
 4. building portable orchestration policy and bounded project context;
 5. creating or resuming exactly one Orca Run;
-6. handing the task, policy, capabilities, project context and attachments to
-   Orca;
+6. launching one explicit coordinator through Orca, with the task, policy,
+   capabilities, project context and attachments; the coordinator builds and
+   settles the inner Task/Dispatch graph in that same Run;
 7. executing deterministic policy/security/verification gates where appropriate;
 8. reporting the resulting Orca Run state.
 
@@ -344,6 +345,11 @@ These are the non-negotiable Mode C contract. Contract tests MUST cover them.
   independently (Codex, Cursor, local-worker; Mode C still requires Orca).
 - **MODE-C-010**: Attachments supplied to Mode C MUST be forwarded through
   supported Orca/provider mechanisms rather than metadata-only routing.
+
+Mode C CLI requires a live Orca terminal with runtime-issued
+`ORCA_TERMINAL_HANDLE`. Missing authority fails before orchestration mutations;
+headless launch without this identity is unsupported. The coordinator bootstrap
+uses a valid current checkout placement, with child placement owned by Orca.
 
 ### Workflow ownership requirements
 
