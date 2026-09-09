@@ -1,6 +1,6 @@
 """Fake providers for tests (no real quota)."""
 
-from tests.fakes.providers import (
+from .providers import (
     SCENARIOS,
     FakeProvider,
     fake_codex,
