@@ -110,6 +110,11 @@ def build_parser() -> argparse.ArgumentParser:
     handoff_p.add_argument("--git-status", default="", help="Bounded git status text")
     handoff_p.add_argument("--git-diff", default="", help="Bounded git diff text")
     handoff_p.add_argument(
+        "--run-id",
+        default="",
+        help="Existing Orca run_id so handoff stays inside the Mode C Run",
+    )
+    handoff_p.add_argument(
         "--prepare-only",
         action="store_true",
         help="Only emit the bounded packet / suggested command (do not run Orca)",
@@ -264,10 +269,12 @@ def _cmd_handoff(args: argparse.Namespace) -> int:
         known_failures=list(args.failure or []),
         git_status=args.git_status or "",
         git_diff=args.git_diff or "",
+        orca_run_id=str(getattr(args, "run_id", "") or ""),
     )
     payload = prepare_manual_handoff(
         packet,
         execute=not bool(getattr(args, "prepare_only", False)),
+        run_id=str(getattr(args, "run_id", "") or "") or None,
     )
     sys.stdout.write(json.dumps(payload, indent=2, default=str) + "\n")
     if payload.get("executed"):

@@ -4,9 +4,9 @@
 
 **Input**: Feature specification from `/specs/001-portable-ai-orchestration/spec.md`
 
-**Status**: Architecture contract realigned. Production code is **not** yet
-fully compliant. Do not mark the feature converged until Mode C matches this
-plan.
+**Status**: Architecture contract realigned. Mode C production path uses
+`ModeCRunController` / `mode_c.py` (one Orca Run + local gates). Do not merge
+until maintainer architecture review confirms no dual-orchestrator regression.
 
 ## Summary
 

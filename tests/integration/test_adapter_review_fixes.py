@@ -184,7 +184,8 @@ def test_missing_verification_commands_fail_workflow(tmp_path: Path) -> None:
     assert "not configured" in state.phase_outcomes[Phase.VERIFICATION.value].detail
 
 
-def test_edit_lease_wired_into_lead_implement(tmp_path: Path) -> None:
+def test_mode_c_does_not_use_edit_lock(tmp_path: Path) -> None:
+    """Mode C routes writes through Orca worktrees — no local edit.lock."""
     root = tmp_path / "proj"
     root.mkdir()
     blocker = request_edit_lease(root, "other-agent")
@@ -202,17 +203,16 @@ def test_edit_lease_wired_into_lead_implement(tmp_path: Path) -> None:
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
-    # classify
-    assert wf.run_phase() is not None
-    # lead_implement should refuse shared checkout
-    outcome = wf.run_phase()
+    assert wf.run_phase() is not None  # classify
+    outcome = wf.run_phase()  # lead_implement via Orca despite advisory lock
     assert outcome is not None
-    assert outcome.status is PhaseStatus.FAILED
-    assert "shared concurrent" in outcome.detail.lower()
+    assert outcome.status is PhaseStatus.SUCCEEDED
+    assert "edit_lease" not in wf.state.metadata
     release_edit_lease(root, "other-agent")
 
 
 def test_cross_process_lock_file_created(tmp_path: Path) -> None:
+    """Advisory lock helper still works for non-Mode-C tooling."""
     root = tmp_path / "proj"
     root.mkdir()
     lease = request_edit_lease(root, "agent-a")

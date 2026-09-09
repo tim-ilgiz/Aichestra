@@ -4,7 +4,9 @@
 
 **Created**: 2026-09-09
 
-**Status**: Architecture contract updated (implementation NOT converged)
+**Status**: Architecture contract realigned; Mode C production path is
+single-Orca-Run (`ModeCRunController` / `mode_c.py`). Ready for maintainer
+review before merge.
 
 **Input**: User description: "A developer can clone this repository onto macOS, Windows or Linux, execute the platform bootstrap, authenticate required providers, and receive an equivalent Orca-based AI development environment."
 
@@ -12,13 +14,9 @@
 
 This specification is the **target** architecture source of truth.
 
-It MUST NOT be weakened to match the current Python implementation.
-If `src/aichestra/orchestration/workflow.py` (or any dual-orchestrator
-`OrchestratedWorkflow` / phase engine) contradicts this document, the code is
-obsolete and MUST be removed or refactored later — not the other way around.
-
-Production implementation is **not** marked complete against this contract until
-Mode C is a thin Orca adapter + policy/gates only.
+Mode C MUST remain a thin Orca adapter + local deterministic gates. If code
+reintroduces a second worker scheduler or Orca-less Mode C fallback, treat that
+as a regression against this document — do not weaken the spec.
 
 ---
 

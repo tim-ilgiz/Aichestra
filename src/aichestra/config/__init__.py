@@ -10,13 +10,11 @@ from aichestra.config.layering import (
     save_machine_local,
 )
 from aichestra.config.hardware_profiles import (
-    M4_PRO_24GB,
     PROFILES,
     suggest_profile,
 )
 
 __all__ = [
-    "M4_PRO_24GB",
     "PROFILES",
     "fallback_lead_name",
     "local_enabled",

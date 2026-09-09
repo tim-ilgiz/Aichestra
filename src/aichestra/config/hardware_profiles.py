@@ -1,4 +1,8 @@
-"""Named hardware profiles — examples only, never mandatory product requirements."""
+"""Capability-tier hardware profiles — no host-identity product profiles.
+
+Named Mac examples (e.g. M4 Pro 24GB) belong in test fixtures only, never in
+production configuration or routing.
+"""
 
 from __future__ import annotations
 
@@ -17,22 +21,7 @@ class HardwareProfile:
     max_context_tokens: int
 
 
-# Example validation profile for the current Mac — NOT a global product requirement.
-M4_PRO_24GB = HardwareProfile(
-    id="apple-m4-pro-24gb-example",
-    description=(
-        "Example profile for Apple M4 Pro / 24 GB unified memory validation. "
-        "Not required globally."
-    ),
-    min_memory_gb=24.0,
-    recommended_model_class="~14B",
-    max_local_workers=1,
-    normal_context_tokens=16_000,
-    max_context_tokens=32_000,
-)
-
 PROFILES: dict[str, HardwareProfile] = {
-    M4_PRO_24GB.id: M4_PRO_24GB,
     "weak": HardwareProfile(
         id="weak",
         description="Weak machine — prefer local disabled",
@@ -51,6 +40,15 @@ PROFILES: dict[str, HardwareProfile] = {
         normal_context_tokens=8_000,
         max_context_tokens=16_000,
     ),
+    "capable-unified-24plus": HardwareProfile(
+        id="capable-unified-24plus",
+        description="Capable machine (~24GB+ with GPU) — ~14B-class optional",
+        min_memory_gb=24.0,
+        recommended_model_class="~14B",
+        max_local_workers=1,
+        normal_context_tokens=16_000,
+        max_context_tokens=32_000,
+    ),
     "powerful": HardwareProfile(
         id="powerful",
         description="Powerful GPU workstation — larger model possible",
@@ -64,24 +62,20 @@ PROFILES: dict[str, HardwareProfile] = {
 
 
 def suggest_profile(memory_gb: float, *, has_gpu: bool = False) -> HardwareProfile:
+    """Capability-based tier selection.
+
+    Order matters: ``powerful`` (>=32 + GPU) MUST be checked before
+    ``capable-unified-24plus`` (>=24 + GPU), otherwise 32+ machines never reach
+    the powerful tier.
+    """
     if memory_gb < 8:
         return PROFILES["weak"]
     if memory_gb < 16:
         return PROFILES["medium"]
-    # Check powerful (>=32) before capable (>=24); otherwise 32+ never matches.
     if memory_gb >= 32 and has_gpu:
         return PROFILES["powerful"]
     if memory_gb >= 24 and has_gpu:
-        # Example class for ~24GB unified-memory machines (e.g. M4 Pro fixture).
-        return HardwareProfile(
-            id="capable-unified-24plus",
-            description="Capable machine (~24GB+) — ~14B-class optional",
-            min_memory_gb=24.0,
-            recommended_model_class="~14B",
-            max_local_workers=1,
-            normal_context_tokens=16_000,
-            max_context_tokens=32_000,
-        )
+        return PROFILES["capable-unified-24plus"]
     return PROFILES["medium"]
 
 

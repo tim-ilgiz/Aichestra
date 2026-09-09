@@ -212,10 +212,14 @@ def test_handoff_cli_helper_packet_usable() -> None:
         repo_path="/tmp/proj",
         workflow_phase="lead_implement",
         next_action="continue in Cursor",
+        orca_run_id="run-42",
     )
     payload = prepare_manual_handoff(packet)
     assert "bounded_brief" in payload
     assert "finish auth" in payload["bounded_brief"]
+    assert payload["preserves_orca_run"] is True
+    assert "run-use --id run-42" in payload["suggested_orca_command"]
+    assert "--no-parent" not in payload["suggested_orca_command"]
 
 
 def test_existing_cover_does_not_force_update() -> None:

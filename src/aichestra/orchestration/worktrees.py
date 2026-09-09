@@ -1,8 +1,8 @@
-"""Worktree / serial edit policy — refuse shared concurrent edits (FR-057).
+"""Thin concurrency *policy* helpers — not a Mode C worktree/session manager.
 
-Uses a project-local lock file so two ``orchestrate`` processes cannot edit the
-same checkout concurrently. In-process registry remains as a fast path for
-same-process detection.
+Mode C worktrees and workers belong to Orca. This module only provides an
+optional serial-edit advisory for non-Mode-C tooling and unit tests. Mode C
+MUST NOT acquire ``.aichestra/edit.lock`` or act as a worktree coordinator.
 """
 
 from __future__ import annotations

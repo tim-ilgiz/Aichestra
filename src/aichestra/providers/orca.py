@@ -83,9 +83,20 @@ def build_orca_argv(
     """
     prompt = request.bounded_prompt()
     role = (request.role or "").strip().lower()
-    if role in {"ensure_run", "control_plane", "classify"} or (
-        request.read_only and role in {"", "phase_report"}
-    ):
+    # Phase reports / status pings never mint Runs — status only.
+    if role in {"phase_report", "status_ping"}:
+        return [binary, "status", "--json"]
+    if role in {"ensure_run", "control_plane", "classify"}:
+        existing = request.context.get("run_id")
+        if isinstance(existing, str) and existing.strip():
+            return [
+                binary,
+                "orchestration",
+                "run-use",
+                "--id",
+                existing.strip(),
+                "--json",
+            ]
         return [
             binary,
             "orchestration",
@@ -94,8 +105,6 @@ def build_orca_argv(
             prompt,
             "--json",
         ]
-    if role in {"phase_report", "status_ping"}:
-        return [binary, "status", "--json"]
     name = f"aichestra-{session_id[:8]}"
     worktree = str(request.context.get("worktree") or "new-child")
     from aichestra.providers.attachments import orca_attach_flags
@@ -527,22 +536,47 @@ class OrcaProvider(ProviderAdapter):
         # Soft-fail run-use: some environments already have the Run bound.
 
         title = (request.role or "aichestra-task")[:80]
+        # Explicitly associate the task with the Mode C Run (run-use + --run).
+        task_argv = [
+            binary,
+            "orchestration",
+            "task-create",
+            "--spec",
+            prompt,
+            "--task-title",
+            title,
+            "--run",
+            run_id,
+            "--json",
+        ]
         task_result = run_cli_task(
             binary=binary,
-            argv=[
-                binary,
-                "orchestration",
-                "task-create",
-                "--spec",
-                prompt,
-                "--task-title",
-                title,
-                "--json",
-            ],
+            argv=task_argv,
             session=session,
             request=request,
             unavailable_detail="Orca binary unavailable",
         )
+        # Older Orca builds may not accept --run; retry after run-use only.
+        if (
+            not task_result.ok
+            and "unknown" in f"{task_result.detail} {task_result.output}".lower()
+        ):
+            task_result = run_cli_task(
+                binary=binary,
+                argv=[
+                    binary,
+                    "orchestration",
+                    "task-create",
+                    "--spec",
+                    prompt,
+                    "--task-title",
+                    title,
+                    "--json",
+                ],
+                session=session,
+                request=request,
+                unavailable_detail="Orca binary unavailable",
+            )
         task_payload = _parse_orca_json(task_result.output)
         task_id = (
             _dig_id(task_payload, "result", "id")

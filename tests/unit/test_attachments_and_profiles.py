@@ -21,6 +21,17 @@ def test_suggest_profile_powerful_before_capable() -> None:
     assert suggest_profile(16, has_gpu=False).id == "medium"
 
 
+def test_no_host_identity_profile_in_production() -> None:
+    from aichestra.config import hardware_profiles as hp
+    from aichestra import config as cfg
+
+    assert not hasattr(hp, "M4_PRO_24GB")
+    assert not hasattr(cfg, "M4_PRO_24GB")
+    assert "apple-m4-pro-24gb-example" not in hp.PROFILES
+    # Fixture-only example may live under tests/, never in production PROFILES.
+    assert all("m4" not in pid.lower() for pid in hp.PROFILES)
+
+
 def test_stage_attachments_copies_bytes(tmp_path: Path) -> None:
     src = tmp_path / "shot.png"
     src.write_bytes(b"\x89PNG\r\n\x1a\nfake")

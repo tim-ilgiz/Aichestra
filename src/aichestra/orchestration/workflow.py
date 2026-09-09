@@ -31,7 +31,6 @@ from aichestra.orchestration.speckit_policy import (
     classify_speckit_scale,
 )
 from aichestra.orchestration.verification import VerificationReport, run_verification
-from aichestra.orchestration.worktrees import release_edit_lease, request_edit_lease
 from aichestra.orchestration.writers import plan_doc_writes, plan_test_writes
 from aichestra.providers.base import (
     FailureClass,
@@ -385,12 +384,6 @@ class ModeCRunController:
             self.state.current_index += 1
         if stop:
             self.state.stopped = True
-        # Release serial edit lease when verification finishes or workflow stops
-        # after implement started (lease held across implement → verification).
-        if outcome.phase is Phase.VERIFICATION or (
-            stop and self.state.metadata.get("edit_lease_held")
-        ):
-            self._release_serial_edit_lease()
 
     def _execute_phase(self, phase: Phase) -> dict[str, Any]:
         bindings = self.bindings
@@ -648,10 +641,8 @@ class ModeCRunController:
                 "brief": self.state.metadata.get("brief"),
             }
 
-        lease_fail = self._acquire_serial_edit_lease(role="lead_implement")
-        if lease_fail is not None:
-            return lease_fail
-
+        # Worktrees/concurrency belong to Orca under the Mode C Run — Aichestra
+        # does not take a local .aichestra/edit.lock lease for Mode C writes.
         lead_kind = self._lead_agent_kind()
         context["agent"] = lead_kind
         # First write placement: isolated Orca child worktree.
@@ -1161,9 +1152,12 @@ class ModeCRunController:
         context: Mapping[str, Any] | None = None,
         hold_edit_lease: bool = False,
     ) -> dict[str, Any]:
-        """Direct lead adapter — Mode A / test seams only; not Mode C fallback."""
-        # Mode C must not reach here for agent work. Keep for explicit non-orchestrated
-        # callers and unit seams; refuse when an Orca binding is present.
+        """Refuse direct lead dispatch — Mode C always routes via Orca.
+
+        ``hold_edit_lease`` is accepted for API compatibility and ignored;
+        worktree concurrency belongs to Orca.
+        """
+        del hold_edit_lease  # Mode C does not manage edit leases.
         if self.bindings.orca is not None:
             return {
                 "ok": False,
@@ -1173,126 +1167,14 @@ class ModeCRunController:
                 ),
                 "failure": FailureClass.ERROR.value,
             }
-        lead = self.bindings.lead
-        if lead is None and self.bindings.providers:
-            selection = select_lead(
-                self.bindings.providers,
-                preferred=self.bindings.preferred_lead,
-                fallback=self.bindings.fallback_lead,
-            )
-            self.state.metadata["lead_selection"] = {
-                "lead": selection.lead.value if selection.lead else None,
-                "reason": selection.reason,
-            }
-            if selection.lead is None:
-                return {
-                    "ok": False,
-                    "detail": selection.reason,
-                    "failure": FailureClass.UNAVAILABLE.value,
-                }
-            return {
-                "ok": False,
-                "detail": (
-                    f"lead {selection.lead.value} selected but no executable "
-                    "adapter bound; inject WorkflowBindings.lead"
-                ),
-                "failure": FailureClass.UNAVAILABLE.value,
-            }
-        if lead is None:
-            return {
-                "ok": False,
-                "detail": "no lead provider bound",
-                "failure": FailureClass.UNAVAILABLE.value,
-            }
-        ctx = sanitize_mapping(dict(context or {}))
-        if "research" in self.state.metadata and "research" not in ctx:
-            research = self.state.metadata["research"]
-            ctx["research"] = (
-                sanitize_mapping(research) if isinstance(research, dict) else research
-            )
-
-        needs_edit = role == "lead_implement"
-        attachments = tuple(self.bindings.attachments or ())
-
-        def _execute(cwd: str | None) -> ProviderTaskResult:
-            return lead.execute_task(
-                ProviderTaskRequest(
-                    prompt=prompt,
-                    role=role,
-                    context=ctx,
-                    cwd=cwd,
-                    timeout_seconds=300.0,
-                    read_only=not needs_edit,
-                    attachments=attachments,
-                )
-            )
-
-        root = self._effective_project_root()
-        if needs_edit and root:
-            if not hold_edit_lease and not self.state.metadata.get("edit_lease_held"):
-                lease_fail = self._acquire_serial_edit_lease(role=role)
-                if lease_fail is not None:
-                    return lease_fail
-            result = _execute(root)
-            if not hold_edit_lease and not self.state.metadata.get("edit_lease_held"):
-                self._release_serial_edit_lease()
-        else:
-            result = _execute(root)
-
-        key = f"lead_{role}"
-        self.state.metadata[key] = result.to_dict()
-        if self._is_quota_failure(result) and needs_edit:
-            return self._quota_handoff_failure(result, role=role, source=lead.kind.value)
+        # Without an Orca binding this controller is misconfigured for Mode C.
         return {
-            "ok": result.ok,
-            "detail": result.detail,
-            "provider": result.to_dict(),
-            "kind": lead.kind.value,
+            "ok": False,
+            "detail": (
+                f"Mode C requires Orca; refusing direct lead dispatch for {role}"
+            ),
+            "failure": FailureClass.UNAVAILABLE.value,
         }
-
-    def _acquire_serial_edit_lease(
-        self,
-        *,
-        role: str,
-        agent_id: str | None = None,
-    ) -> dict[str, Any] | None:
-        root = self._effective_project_root()
-        if not root:
-            return None
-        if self.state.metadata.get("edit_lease_held"):
-            return None
-        holder = agent_id or f"lead-{role}-{id(self)}"
-        lease = request_edit_lease(root, holder)
-        self.state.metadata["edit_lease"] = {
-            "role": role,
-            "agent_id": holder,
-            "allowed": lease.allowed,
-            "policy": lease.policy.value,
-            "path": lease.path,
-            "reason": lease.reason,
-        }
-        if not lease.allowed:
-            return {
-                "ok": False,
-                "detail": lease.reason,
-                "failure": FailureClass.ERROR.value,
-                "edit_lease": self.state.metadata["edit_lease"],
-            }
-        self.state.metadata["edit_lease_holder"] = holder
-        self.state.metadata["edit_lease_held"] = True
-        return None
-
-    def _release_serial_edit_lease(self) -> None:
-        root = self._effective_project_root() or self.bindings.project_root
-        holder = self.state.metadata.get("edit_lease_holder")
-        if not root or not holder:
-            self.state.metadata.pop("edit_lease_held", None)
-            return
-        try:
-            release_edit_lease(root, str(holder))
-        finally:
-            self.state.metadata["edit_lease_held"] = False
-            self.state.metadata.pop("edit_lease_holder", None)
 
     def _report_orca_phase(self, phase: Phase, outcome: PhaseOutcome) -> None:
         """Record phase status locally; never create additional Orca Runs."""
@@ -1490,16 +1372,21 @@ class ModeCRunController:
                 str((self.state.metadata.get("classify") or {}).get("classification", "")),
             ],
             repo_path=self.bindings.project_root or "",
+            worktree_path=str(self.state.metadata.get("orca_worktree_path") or ""),
             workflow_phase=role,
             completed_work=list(self.state.completed),
             remaining_work=[p.value for p in self.state.phases[self.state.current_index :]],
             known_failures=[result.detail],
-            next_action="Continue implement on Cursor via one-action manual handoff",
+            next_action="Continue implement on Cursor inside the same Orca Run",
             compacted_research=dict(self.state.metadata.get("research") or {}),
             source_lead=source if source != "orca" else self._lead_agent_kind(),
             target_lead="cursor",
+            orca_run_id=str(self.state.metadata.get("orca_run_id") or ""),
         )
-        handoff = prepare_manual_handoff(packet)
+        handoff = prepare_manual_handoff(
+            packet,
+            run_id=str(self.state.metadata.get("orca_run_id") or "") or None,
+        )
         self.state.metadata["manual_handoff"] = handoff
         return {
             "ok": False,
