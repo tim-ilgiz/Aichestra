@@ -14,7 +14,7 @@ from aichestra.orchestration.change_signals import infer_change_signals
 from aichestra.orchestration.modes import Mode
 from aichestra.orchestration.verification import verification_commands_from_config
 from aichestra.orchestration.workflow import (
-    OrchestratedWorkflow,
+    ModeCRunController,
     Phase,
     PhaseStatus,
     WorkflowBindings,
@@ -41,7 +41,7 @@ def test_verification_commands_from_project_shape() -> None:
 
 
 def test_verification_failure_fails_workflow(tmp_path: Path) -> None:
-    wf = OrchestratedWorkflow(
+    wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(
@@ -134,7 +134,7 @@ def test_change_signals_from_paths_for_auth_api() -> None:
 
 
 def test_maintenance_uses_change_signals_not_defaults(tmp_path: Path) -> None:
-    wf = OrchestratedWorkflow(
+    wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(
@@ -143,8 +143,6 @@ def test_maintenance_uses_change_signals_not_defaults(tmp_path: Path) -> None:
             project_root=str(tmp_path),
             task_prompt="change authorization behavior",
             # No maintenance_kwargs — must infer from summary / paths.
-            # Writers execute via Orca only; do not inject direct lead writer_fn.
-            writer_fn=None,
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
@@ -158,7 +156,7 @@ def test_maintenance_uses_change_signals_not_defaults(tmp_path: Path) -> None:
 
 def test_required_writer_dispatches_via_orca(tmp_path: Path) -> None:
     orca = fake_orca("success")
-    wf = OrchestratedWorkflow(
+    wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(
@@ -172,7 +170,6 @@ def test_required_writer_dispatches_via_orca(tmp_path: Path) -> None:
                 "existing_tests_cover": False,
                 "risk": "high",
             },
-            writer_fn=None,
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )

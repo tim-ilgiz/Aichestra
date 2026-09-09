@@ -7,7 +7,8 @@ validate project root + Orca
 → classify / Spec Kit policy (local)
 → ensure exactly ONE Orca Run
 → Spec Kit artifacts via Orca (MEDIUM/LARGE; file-gated)
-→ ONE mode_c_agents Orca handoff (research+implement under that run_id)
+→ Orca research task under that run_id (local-worker when policy selects it)
+→ ONE mode_c_agents Orca handoff for implementation under that run_id
 → maintenance-reviewer (local)
 → ONE mode_c_writers Orca handoff when needed (same run)
 → verification (local; config or safe auto-detect)
@@ -26,7 +27,6 @@ from __future__ import annotations
 from aichestra.orchestration.workflow import (
     ModeCPolicyPackage,
     ModeCRunController,
-    OrchestratedWorkflow,
     Phase,
     PhaseOutcome,
     PhaseStatus,
@@ -39,7 +39,6 @@ from aichestra.orchestration.workflow import (
 __all__ = [
     "ModeCPolicyPackage",
     "ModeCRunController",
-    "OrchestratedWorkflow",
     "Phase",
     "PhaseOutcome",
     "PhaseStatus",

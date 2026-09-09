@@ -2,7 +2,6 @@
 
 from aichestra.orchestration.mode_c import (
     ModeCRunController,
-    OrchestratedWorkflow,
     PhaseStatus,
     default_phases,
 )
@@ -13,7 +12,6 @@ __all__ = [
     "LeadSelection",
     "Mode",
     "ModeCRunController",
-    "OrchestratedWorkflow",
     "PhaseStatus",
     "default_phases",
     "parse_mode",

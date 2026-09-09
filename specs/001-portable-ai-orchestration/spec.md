@@ -346,6 +346,10 @@ These are the non-negotiable Mode C contract. Contract tests MUST cover them.
 - **FR-020**: Runtime sessions/caches/logs/secrets are not stored in Git.
 - **FR-021**: Orchestrated research is an Orca task on the Mode C Run;
   repository-researcher prefers local-worker **via Orca** when enabled.
+- **FR-021a**: If local-worker is AVAILABLE, CAPABLE, ALLOWED, and PREFERRED,
+  repository research MUST be dispatched as a real Orca task/worker using
+  `agent=opencode` (or equivalent current Orca local-worker primitive), not as
+  metadata-only guidance in a cloud-lead prompt.
 - **FR-022**: Research output is compacted before being handed to cloud lead
   agents.
 - **FR-023**: A maintenance-reviewer (deterministic Aichestra gate) runs after
@@ -358,6 +362,10 @@ These are the non-negotiable Mode C contract. Contract tests MUST cover them.
   tests before creating new files.
 - **FR-027**: Documentation writer (Orca task) prefers updating an existing
   canonical document.
+- **FR-027a**: When maintenance-reviewer requires tests/docs and local-worker is
+  AVAILABLE, CAPABLE, ALLOWED, and PREFERRED, writer work MUST be dispatched as
+  a real Orca local-worker task/worker. If unavailable, fallback to enabled
+  cloud lead via policy.
 - **FR-028**: Spec Kit is used proportionally to task size/risk as **policy
   input** for Orca orchestration — not justification for a second Python
   workflow engine.
@@ -473,8 +481,20 @@ These are the non-negotiable Mode C contract. Contract tests MUST cover them.
   Node heuristics). Bootstrap MAY set `bootstrap_complete=True` when doctor is
   ok and no blocking remaining steps remain (no forever-pending advisories).
 - **FR-073**: Handoff CLI MUST require `--run-id` or reliably auto-resolve a
-  recent Mode C run; README MUST match executable UX. Wait-event success
-  requires dispatch-id correlation when an expected dispatch id exists.
+  recent Mode C run; README MUST match executable UX.
+- **FR-074**: Orca wait-event handling MUST correlate completion to the expected
+  dispatch/task identity. Unrelated events from the same Run MUST NOT mark the
+  current dispatch as failed; they are ignored or acknowledged and waiting
+  continues until timeout or relevant terminal event.
+- **FR-075**: Bootstrap readiness semantics MUST be truthful:
+  `BootstrapResult.ok` MUST NOT report ready when doctor reports FAIL blockers.
+- **FR-076**: Local-only capability is explicitly supported for compatible
+  utilities (for example repository research and maintenance analysis) when
+  Codex/Cursor are unavailable, but general production implementation Mode C is
+  not guaranteed without an enabled cloud lead.
+- **FR-077**: Legacy dual-orchestrator seams (`OrchestratedWorkflow` alias,
+  unreachable phase handlers, `writer_fn`, `bound_writer_from_lead`) MUST be
+  removed from production paths to keep a single architecture model.
 
 ### Key Entities
 
@@ -534,6 +554,12 @@ These are the non-negotiable Mode C contract. Contract tests MUST cover them.
   commands.
 - **SC-016**: Architecture contract tests prove MODE-C-001–MODE-C-010
   (including exactly one `run-create` and no direct Mode C provider execution).
+- **SC-017**: Positive routing tests prove local-worker research/writers are
+  actually dispatched through Orca local-worker when policy selects local.
+- **SC-018**: Event-correlation tests prove unrelated dispatch events do not
+  terminate the current wait as failure.
+- **SC-019**: Bootstrap tests prove readiness/`ok` semantics do not report READY
+  when doctor has blocking FAIL results.
 
 ## Clarifications
 

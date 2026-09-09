@@ -5,18 +5,16 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from aichestra.cli import main
 from aichestra.orchestration.modes import Mode
 from aichestra.orchestration.workflow import (
-    OrchestratedWorkflow,
+    ModeCRunController,
     Phase,
     PhaseStatus,
     WorkflowBindings,
-    bound_writer_from_lead,
 )
 from aichestra.orchestration.worktrees import release_edit_lease, request_edit_lease
 from aichestra.providers.base import (
@@ -165,7 +163,7 @@ def test_local_worker_send_sets_config_env(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_missing_verification_commands_fail_workflow(tmp_path: Path) -> None:
-    wf = OrchestratedWorkflow(
+    wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(
@@ -191,7 +189,7 @@ def test_mode_c_does_not_use_edit_lock(tmp_path: Path) -> None:
     blocker = request_edit_lease(root, "other-agent")
     assert blocker.allowed
 
-    wf = OrchestratedWorkflow(
+    wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(
@@ -262,20 +260,3 @@ def test_cli_binds_writer_for_login_feature(
     assert "no writer executor" not in json.dumps(payload)
     assert code == 0
 
-
-def test_bound_writer_from_lead_refuses_mode_c_direct_dispatch() -> None:
-    """Mode C seam: bound_writer_from_lead must refuse direct lead execution."""
-    lead = fake_codex("success")
-    writer = bound_writer_from_lead(lead, project_root=None)
-    state = SimpleNamespace(
-        decision=SimpleNamespace(
-            TEST_DECISION="required",
-            TEST_SCOPE=["login"],
-            DOC_DECISION="none",
-            DOC_TARGETS=[],
-        )
-    )
-    result = writer(state, Phase.TEST_WRITER)  # type: ignore[arg-type]
-    assert result.ok is False
-    assert "Orca" in result.detail or "refused" in result.detail.lower()
-    assert lead.sent == []

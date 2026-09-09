@@ -165,7 +165,7 @@ def test_mode_c_wires_orca_only_end_to_end(fixture_project_a: Path) -> None:
     assert state.metadata.get("thin_coordinator") is True
     assert Phase.RESEARCH.value in state.completed
     assert state.metadata["research"]["via"] == "orca"
-    assert state.metadata["research"]["QUERY"] == "README"
+    assert state.metadata["research"]["query"] == "README"
     assert orca.sent
     # Mode C must not call lead or local_worker adapters directly.
     assert lead.sent == []
@@ -177,6 +177,7 @@ def test_mode_c_wires_orca_only_end_to_end(fixture_project_a: Path) -> None:
         if (req.role or "")
         not in {"ensure_run", "control_plane", "classify", "phase_report"}
     }
+    assert "research" in agent_roles
     assert "mode_c_agents" in agent_roles
     assert "lead_review" in agent_roles
     run_ids = {

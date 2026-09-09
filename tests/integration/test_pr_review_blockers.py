@@ -14,7 +14,7 @@ from aichestra.orchestration.maintenance_reviewer import review_change
 from aichestra.orchestration.modes import Mode
 from aichestra.orchestration.speckit_policy import SpecKitScale, classify_speckit_scale
 from aichestra.orchestration.workflow import (
-    OrchestratedWorkflow,
+    ModeCRunController,
     Phase,
     WorkflowBindings,
 )
@@ -56,7 +56,7 @@ def test_orca_question_from_other_dispatch_not_success() -> None:
         dispatch_id="ours",
     )
     assert ok is False
-    assert "question" in detail
+    assert "unrelated" in detail
 
 
 def test_orca_worker_done_matching_dispatch_ok() -> None:
@@ -83,7 +83,7 @@ def test_classify_not_hardcoded_medium() -> None:
 def test_workflow_classify_uses_speckit_and_binds_orca_run(tmp_path: Path) -> None:
     orca = fake_orca("success")
     lead = fake_codex("success")
-    wf = OrchestratedWorkflow(
+    wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(
@@ -104,7 +104,7 @@ def test_workflow_classify_uses_speckit_and_binds_orca_run(tmp_path: Path) -> No
 
 def test_mode_c_without_project_root_fails_before_orca() -> None:
     orca = fake_orca("success")
-    wf = OrchestratedWorkflow(
+    wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(
@@ -126,7 +126,7 @@ def test_lead_review_includes_task_and_sanitized_verification(tmp_path: Path) ->
     lead = fake_codex("success")
     proj = tmp_path / "proj"
     proj.mkdir()
-    wf = OrchestratedWorkflow(
+    wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(
@@ -181,7 +181,7 @@ def test_quota_failure_prepares_manual_handoff(tmp_path: Path) -> None:
         return result
 
     orca.send = send_quota_on_agents  # type: ignore[method-assign]
-    wf = OrchestratedWorkflow(
+    wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(

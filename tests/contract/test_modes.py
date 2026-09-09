@@ -10,7 +10,7 @@ from aichestra.orchestration.modes import (
     parse_mode,
     starts_full_orchestration,
 )
-from aichestra.orchestration.workflow import OrchestratedWorkflow
+from aichestra.orchestration.workflow import ModeCRunController
 
 
 def test_three_modes_parse() -> None:
@@ -35,6 +35,6 @@ def test_never_intercepts_native_cli() -> None:
 
 def test_workflow_rejects_non_orchestrated_modes() -> None:
     with pytest.raises(ValueError):
-        OrchestratedWorkflow(mode=Mode.NATIVE)
+        ModeCRunController(mode=Mode.NATIVE)
     with pytest.raises(ValueError):
-        OrchestratedWorkflow(mode=Mode.ORCA_INTERACTIVE)
+        ModeCRunController(mode=Mode.ORCA_INTERACTIVE)

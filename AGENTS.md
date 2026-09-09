@@ -62,6 +62,9 @@ The platform must support:
 - Exactly one Orca `run-create` / one `run_id` per Mode C invocation
 - No direct Codex/Cursor/local-worker execution from Aichestra for Mode C
   implement/research/writers/review
+- If policy selects local-worker for Mode C research/writers, it MUST be an
+  actual Orca-owned dispatch/worker (not prompt metadata like
+  `research_agent=opencode`)
 - Attachments forwarded through real Orca/provider mechanisms when claimed
 - Same-run task binding is fail-closed (`run-use` / run association MUST succeed)
 - Disabled providers MUST never be dispatched

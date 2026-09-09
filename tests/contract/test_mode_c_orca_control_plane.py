@@ -7,7 +7,7 @@ from pathlib import Path
 
 from aichestra.orchestration.modes import Mode
 from aichestra.orchestration.workflow import (
-    OrchestratedWorkflow,
+    ModeCRunController,
     Phase,
     PhaseStatus,
     WorkflowBindings,
@@ -53,7 +53,7 @@ def test_extract_worktree_locator_from_receipt() -> None:
 
 def test_one_run_id_reused_across_agent_phases(tmp_path: Path) -> None:
     orca = fake_orca("success")
-    wf = OrchestratedWorkflow(
+    wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(
@@ -91,7 +91,7 @@ def test_one_run_id_reused_across_agent_phases(tmp_path: Path) -> None:
 def test_medium_speckit_writes_real_artifacts(tmp_path: Path) -> None:
     """MEDIUM Spec Kit artifacts come from Orca under the Mode C Run."""
     orca = fake_orca("success")
-    wf = OrchestratedWorkflow(
+    wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(
@@ -118,7 +118,7 @@ def test_medium_speckit_writes_real_artifacts(tmp_path: Path) -> None:
 
 
 def test_speckit_gate_blocks_when_artifacts_missing(tmp_path: Path) -> None:
-    wf = OrchestratedWorkflow(
+    wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(
@@ -174,7 +174,7 @@ def test_worktree_adoption_switches_effective_root(tmp_path: Path) -> None:
 
     orca.send = send_with_child  # type: ignore[method-assign]
 
-    wf = OrchestratedWorkflow(
+    wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(

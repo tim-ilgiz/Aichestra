@@ -385,7 +385,7 @@ def test_disabled_lead_never_dispatched(tmp_path: Path) -> None:
 
 
 def test_local_disabled_research_not_opencode(tmp_path: Path) -> None:
-    """When local.enabled is false, research agent must not hard-code opencode."""
+    """When local.enabled is false, Orca research must not use opencode."""
     orca = fake_orca("success")
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
@@ -405,8 +405,31 @@ def test_local_disabled_research_not_opencode(tmp_path: Path) -> None:
     package = state.metadata.get("mode_c_policy_package") or {}
     assert package.get("research_agent") != "opencode"
     assert package.get("research_agent") == "codex"
-    agents = next(r for r in orca.sent if (r.role or "") == "mode_c_agents")
-    assert (agents.context or {}).get("research_agent") != "opencode"
+    research = next(r for r in orca.sent if (r.role or "") == "research")
+    assert (research.context or {}).get("agent") != "opencode"
+
+
+def test_local_research_is_real_orca_local_worker_dispatch(tmp_path: Path) -> None:
+    """Positive routing: local-capable research dispatches Orca worker=opencode."""
+    orca = fake_orca("success")
+    wf = ModeCRunController(
+        mode=Mode.ORCHESTRATED,
+        research_useful=True,
+        bindings=_small_bindings(
+            tmp_path,
+            orca=orca,
+            lead=fake_codex("success"),
+            local_worker=fake_local_worker("success"),
+            task_prompt="refactor across 12 files in multi-package monorepo",
+            research_query="README auth flow",
+        ),
+    )
+    wf.bindings.local_enabled = True
+    state = wf.run_all()
+    assert not state.failed, state.failed
+    research = next(r for r in orca.sent if (r.role or "") == "research")
+    assert (research.context or {}).get("agent") == "opencode"
+    assert state.metadata.get("research", {}).get("via") == "orca"
 
 
 def test_verify_auto_detect_python(tmp_path: Path) -> None:
@@ -428,6 +451,19 @@ def test_worker_done_requires_matching_dispatch() -> None:
     assert "missing dispatch" in detail.lower() or "expected" in detail.lower()
 
 
+def test_unrelated_dispatch_event_is_retryable_not_terminal() -> None:
+    from aichestra.providers.orca import interpret_orca_wait_event
+
+    ok, detail, meta = interpret_orca_wait_event(
+        {"events": [{"type": "question", "dispatchId": "other"}], "deliveryId": "d-1"},
+        dispatch_id="ours",
+    )
+    assert ok is False
+    assert "unrelated" in detail
+    assert meta.get("retryable_unrelated") is True
+    assert meta.get("ack_delivery_id") == "d-1"
+
+
 def test_mode_c_does_not_own_general_purpose_agent_phase_scheduler(tmp_path: Path) -> None:
     """Observable: run_all uses Orca-owned handoffs; run_phase refuses agents."""
     orca = fake_orca("success")
@@ -437,7 +473,7 @@ def test_mode_c_does_not_own_general_purpose_agent_phase_scheduler(tmp_path: Pat
         bindings=_small_bindings(
             tmp_path,
             orca=orca,
-            task_prompt="fix typo",
+            task_prompt="refactor across 12 files in multi-package monorepo",
             research_query="README",
         ),
     )
@@ -450,9 +486,9 @@ def test_mode_c_does_not_own_general_purpose_agent_phase_scheduler(tmp_path: Pat
         if (r.role or "")
         not in {"ensure_run", "control_plane", "classify", "phase_report", "status_ping"}
     ]
-    # Exactly one orchestration handoff for research+implement — not per-phase workers.
+    # Research + implement are Orca-owned dispatches; no per-phase Python scheduler.
     assert agent_roles.count("mode_c_agents") == 1
-    assert "research" not in agent_roles
+    assert agent_roles.count("research") == 1
     assert "lead_implement" not in agent_roles
     # Writers are one handoff when needed — never per-writer Orca roles.
     assert "test_writer" not in agent_roles
@@ -634,6 +670,62 @@ def test_task_create_without_proven_run_binding_is_refused() -> None:
     assert "run_id" in result.detail
 
 
+def test_dispatch_wait_ignores_unrelated_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    from aichestra.providers import orca as orca_mod
+    from aichestra.providers.orca import OrcaProvider
+    from aichestra.providers.base import ProviderSession, ProviderTaskRequest, ProviderTaskResult
+
+    calls: list[list[str]] = []
+    check_calls = {"n": 0}
+
+    def fake_run_cli_task(*, binary, argv, session, request, unavailable_detail):
+        calls.append(list(argv))
+        if argv[1:3] == ["orchestration", "run-use"]:
+            return ProviderTaskResult(ok=True, detail="ok", session_id=session.session_id)
+        if argv[1:3] == ["orchestration", "task-create"]:
+            return ProviderTaskResult(
+                ok=True,
+                detail="ok",
+                session_id=session.session_id,
+                output='{"result":{"id":"task-1"}}',
+            )
+        if argv[1:3] == ["orchestration", "worker-start"]:
+            return ProviderTaskResult(
+                ok=True,
+                detail="ok",
+                session_id=session.session_id,
+                output='{"result":{"dispatchId":"dispatch-a"}}',
+            )
+        if argv[1:3] == ["orchestration", "check"]:
+            check_calls["n"] += 1
+            if check_calls["n"] == 1:
+                return ProviderTaskResult(
+                    ok=True,
+                    detail="ok",
+                    session_id=session.session_id,
+                    output='{"events":[{"type":"question","dispatchId":"dispatch-b"}],"deliveryId":"del-1"}',
+                )
+            return ProviderTaskResult(
+                ok=True,
+                detail="ok",
+                session_id=session.session_id,
+                output='{"events":[{"type":"worker_done","dispatchId":"dispatch-a"}],"deliveryId":"del-2"}',
+            )
+        return ProviderTaskResult(ok=True, detail="ok", session_id=session.session_id)
+
+    monkeypatch.setattr(orca_mod, "run_cli_task", fake_run_cli_task)
+    provider = OrcaProvider()
+    result = provider._dispatch_supervised(
+        "orca",
+        ProviderSession(session_id="s1", kind=ProviderKind.ORCA, role="x"),
+        ProviderTaskRequest(prompt="do work", role="lead_implement", context={"run_id": "run-1"}),
+        agent="codex",
+    )
+    assert result.ok is True
+    assert check_calls["n"] == 2
+    assert any("--ack" in c for c in calls if c[1:3] == ["orchestration", "check"])
+
+
 def test_disabled_codex_is_never_dispatched(tmp_path: Path) -> None:
     orca = fake_orca("success")
     disabled = fake_codex("unavailable")
@@ -707,6 +799,62 @@ def test_disabled_local_worker_is_never_dispatched(tmp_path: Path) -> None:
     assert local.sent == []
     package = state.metadata.get("mode_c_policy_package") or {}
     assert package.get("research_agent") != "opencode"
+
+
+def test_local_writer_routed_via_orca_local_worker(tmp_path: Path) -> None:
+    """Positive routing: writer work uses Orca opencode when local selected."""
+    orca = fake_orca("success")
+    wf = ModeCRunController(
+        mode=Mode.ORCHESTRATED,
+        research_useful=False,
+        bindings=WorkflowBindings(
+            orca=orca,
+            lead=fake_codex("success"),
+            local_worker=fake_local_worker("success"),
+            local_enabled=True,
+            project_root=str(tmp_path),
+            task_prompt="implement login feature",
+            maintenance_kwargs={
+                "change_summary": "implement login feature",
+                "touches_behavior": True,
+                "existing_tests_cover": False,
+                "risk": "high",
+            },
+            verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
+        ),
+    )
+    state = wf.run_all()
+    assert not state.failed, state.failed
+    writers = next(r for r in orca.sent if (r.role or "") == "mode_c_writers")
+    assert (writers.context or {}).get("agent") == "opencode"
+
+
+def test_writer_fallback_to_cloud_when_local_unavailable(tmp_path: Path) -> None:
+    """If local-worker unavailable, writers fallback to enabled lead policy."""
+    orca = fake_orca("success")
+    wf = ModeCRunController(
+        mode=Mode.ORCHESTRATED,
+        research_useful=False,
+        bindings=WorkflowBindings(
+            orca=orca,
+            lead=fake_codex("success"),
+            local_worker=fake_local_worker("unavailable"),
+            local_enabled=True,
+            project_root=str(tmp_path),
+            task_prompt="implement login feature",
+            maintenance_kwargs={
+                "change_summary": "implement login feature",
+                "touches_behavior": True,
+                "existing_tests_cover": False,
+                "risk": "high",
+            },
+            verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
+        ),
+    )
+    state = wf.run_all()
+    assert not state.failed, state.failed
+    writers = next(r for r in orca.sent if (r.role or "") == "mode_c_writers")
+    assert (writers.context or {}).get("agent") == "codex"
 
 
 def test_no_available_lead_does_not_default_to_codex(tmp_path: Path) -> None:

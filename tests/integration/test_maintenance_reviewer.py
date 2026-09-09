@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from aichestra.orchestration.maintenance_reviewer import review_change
 from aichestra.orchestration.modes import Mode
-from aichestra.orchestration.workflow import OrchestratedWorkflow, Phase
+from aichestra.orchestration.workflow import ModeCRunController, Phase
 from aichestra.orchestration.writers import plan_doc_writes, plan_test_writes
 
 
@@ -77,7 +77,7 @@ def test_workflow_skips_writers_when_none(tmp_path) -> None:
     from aichestra.orchestration.workflow import PhaseStatus, WorkflowBindings
     from tests.fakes.providers import fake_codex, fake_orca
 
-    wf = OrchestratedWorkflow(
+    wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(

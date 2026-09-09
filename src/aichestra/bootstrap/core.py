@@ -136,6 +136,7 @@ def bootstrap(
         actions.append("report_remaining_bootstrap_steps")
     elif doctor_ok:
         actions.append("bootstrap_complete")
+    ready = bool(doctor_ok) and not remaining
 
     return BootstrapResult(
         repo_root=str(root),
@@ -157,7 +158,7 @@ def bootstrap(
             "doctor_checks": doctor_checks,
         },
         remaining_steps=remaining,
-        ok=True,
+        ok=ready,
         doctor_ok=doctor_ok,
         doctor_checks=doctor_checks,
     )

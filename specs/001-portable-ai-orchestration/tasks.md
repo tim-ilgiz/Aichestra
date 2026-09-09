@@ -364,7 +364,9 @@ CI failures). Re-verified under Phase 21.
 - [x] T111 CRITICAL: Agent work via Orca only (MODE-C-003/004)
 - [x] T112 CRITICAL: Exactly one `run-create` / resume (MODE-C-002)
 - [x] T113 CRITICAL: Same-run association fail-closed (MODE-C-007; FR-068)
-- [x] T114 HIGH: Research via Orca policy package (not LocalWorkerProvider)
+- [x] T114 HIGH REOPENED: repository research must be a real Orca dispatch;
+      when local-worker selected by policy, dispatch Orca worker/task with
+      local agent (OpenCode) rather than metadata-only `research_agent`
 - [x] T115 HIGH: Writers via Orca under same run
 - [x] T116 HIGH: Final lead review via Orca
 - [x] T117 HIGH: No direct Mode C Codex/Cursor/local-worker fallback
@@ -440,6 +442,35 @@ GitHub CI are green.
 
 **Checkpoint**: Architecture review gaps addressed in code+tests; merge still
 gated on T137 GitHub CI.
+
+---
+
+## Phase 23: Corrective alignment follow-up (CURRENT)
+
+**Purpose**: Close remaining contract gaps discovered after Phase 22:
+real Orca local-worker dispatch, wait-event correlation on mixed dispatch
+streams, truthful bootstrap readiness semantics, and legacy seam removal.
+
+- [x] T145 CRITICAL: Split Mode C research into explicit Orca task on same run;
+      use policy-selected agent and enforce local-worker real dispatch when
+      AVAILABLE+CAPABLE+ALLOWED+PREFERRED
+- [x] T146 HIGH: Route `mode_c_writers` through policy-selected local-worker
+      when available; fallback to enabled cloud lead
+- [x] T147 CRITICAL: Harden Orca wait loop to correlate by dispatch identity,
+      ignore/ack unrelated events, and continue bounded wait
+- [x] T148 HIGH: Make `BootstrapResult.ok` truthful with doctor/readiness
+      blockers (no READY lie when doctor fails)
+- [x] T149 HIGH: Remove legacy dual-orchestrator signals from production path
+      (`OrchestratedWorkflow` alias, unreachable `_phase_*` agent handlers,
+      `writer_fn`, `bound_writer_from_lead`)
+- [x] T150 CRITICAL: Add positive routing tests:
+      local research/writers real Orca local-worker dispatch + local disabled
+      zero local dispatch + writer fallback
+- [x] T151 CRITICAL: Add Orca event-correlation tests for mixed-dispatch stream
+      (dispatch B events must not fail dispatch A wait)
+- [x] T152 HIGH: Add bootstrap truthfulness tests for `ok` vs doctor blockers
+- [x] T153 CRITICAL: Run full pytest and update task statuses only for
+      behaviors proved by passing tests
 
 ---
 

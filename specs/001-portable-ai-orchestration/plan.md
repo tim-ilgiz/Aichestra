@@ -180,11 +180,15 @@ decision, verification runner, provider/security policy, compaction.
 4. ensure exactly ONE Orca Run (resume or create); no run_id → FAIL CLOSED
 5. MEDIUM/LARGE: ONE Orca handoff role=speckit_artifacts under that Run;
    Aichestra file-gates readiness (no Python stub unlock / *_satisfied)
-6. ONE Orca-owned agents handoff (role mode_c_agents + ModeCPolicyPackage)
-7. local maintenance-reviewer gate
-8. writers via ONE Orca handoff role=mode_c_writers under SAME run_id when needed
-9. local verification (explicit config or safe auto-detect)
-10. final lead review via Orca under SAME run_id
+6. If research is useful, dispatch Orca research task on same run; when local
+   worker is AVAILABLE+CAPABLE+ALLOWED+PREFERRED, use Orca local worker
+   (`agent=opencode` or version-matched equivalent)
+7. Orca lead implementation task on same run (Codex preferred, Cursor fallback)
+8. local maintenance-reviewer gate
+9. writers via Orca on SAME run_id; prefer local worker when selected by policy,
+   fallback to enabled cloud lead
+10. local verification (explicit config or safe auto-detect)
+11. final lead review via Orca under SAME run_id
 ```
 
 Canonical lifecycle identity: Orca `run_id`.
@@ -211,6 +215,7 @@ worker scheduler.
 - `aichestra-run-{id}` synthetic run ids
 - Soft-fail `run-use` then unbound `task-create`
 - `bound_writer_from_lead` / `writer_fn` direct lead execution
+- `OrchestratedWorkflow` alias and unreachable `_phase_*` agent handlers
 - `WorkflowBindings.lead` / `local_worker` used for Mode C `execute_task`
 - Hard-coded `agent=opencode` when `local.enabled=false`
 - Parent-checkout `.aichestra/attachments/` staging
@@ -249,6 +254,10 @@ Inspect current Orca docs before wiring. Prefer Orca primitives for runs,
 tasks, workers, worktrees, diffs, handoff, attachments, and provider visibility.
 **ONE Mode C invocation = ONE Orca Run.** Child worktree ownership is Orca’s;
 adopt results before verification/review. Smallest reliable adapters only.
+
+For `orca orchestration check --wait`, use dispatch-scoped correlation:
+ignore/ack unrelated deliveries, continue bounded waiting, and complete only
+when the expected dispatch reaches terminal status.
 
 ### Attachments
 

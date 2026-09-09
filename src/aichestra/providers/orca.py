@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -240,82 +241,109 @@ def interpret_orca_wait_event(
     ``question`` / ``escalation`` and mismatched dispatch ids leave work incomplete.
     """
     data = payload if isinstance(payload, dict) else {}
-    event = _extract_wait_event(data)
-    event_type = str(
-        event.get("type")
-        or event.get("eventType")
-        or event.get("kind")
-        or data.get("type")
-        or data.get("eventType")
-        or ""
-    ).strip().lower()
-    event_dispatch = (
-        _dig_id(event, "dispatchId")
-        or _dig_id(event, "dispatch_id")
-        or _dig_id(event, "id")
-        or _dig_id(data, "dispatchId")
-        or _dig_id(data, "result", "dispatchId")
+    ack_delivery_id = (
+        _dig_id(data, "deliveryId")
+        or _dig_id(data, "delivery_id")
+        or _dig_id(data, "result", "deliveryId")
+        or _dig_id(data, "result", "delivery_id")
     )
-    meta = {
-        "event_type": event_type or None,
-        "event_dispatch_id": event_dispatch,
-        "expected_dispatch_id": dispatch_id,
-        "event": event or data,
-    }
-    if event_type in {"question", "escalation"}:
-        return (
-            False,
-            f"worker incomplete: received {event_type} (not worker_done)",
-            meta,
+    events = _extract_wait_events(data)
+    unrelated: list[dict[str, Any]] = []
+    for event in events:
+        event_type = str(
+            event.get("type")
+            or event.get("eventType")
+            or event.get("kind")
+            or ""
+        ).strip().lower()
+        event_dispatch = (
+            _dig_id(event, "dispatchId")
+            or _dig_id(event, "dispatch_id")
+            or _dig_id(event, "id")
         )
-    if event_type and event_type != "worker_done":
-        return False, f"unexpected wait event type: {event_type}", meta
-    if not event_type:
-        # Some Orca builds nest the type; treat missing type as incomplete.
-        return False, "wait receipt missing worker_done event type", meta
-    if dispatch_id and event_dispatch and event_dispatch != dispatch_id:
-        return (
-            False,
-            (
-                f"dispatch_id mismatch: expected {dispatch_id}, "
-                f"got {event_dispatch}"
-            ),
-            meta,
-        )
-    # Fail closed: if we launched a specific dispatch, the wait event MUST
-    # correlate to it. Missing dispatch id is not success.
-    if dispatch_id and not event_dispatch:
-        return (
-            False,
-            (
-                f"wait event missing dispatch id (expected {dispatch_id}); "
-                "refusing to treat as worker_done success"
-            ),
-            meta,
-        )
-    # Optional explicit failure flag on the done event.
-    status = str(event.get("status") or event.get("result") or "").lower()
-    if status in {"failed", "error", "cancelled"}:
-        return False, f"worker_done with failure status: {status}", meta
-    return True, "worker_done", meta
+        if dispatch_id and event_dispatch and event_dispatch != dispatch_id:
+            unrelated.append(
+                {
+                    "event_type": event_type or None,
+                    "event_dispatch_id": event_dispatch,
+                }
+            )
+            continue
+        meta = {
+            "event_type": event_type or None,
+            "event_dispatch_id": event_dispatch,
+            "expected_dispatch_id": dispatch_id,
+            "event": event,
+            "ack_delivery_id": ack_delivery_id,
+            "retryable_unrelated": False,
+        }
+        if event_type in {"question", "escalation"}:
+            return (
+                False,
+                f"worker incomplete: received {event_type} (not worker_done)",
+                meta,
+            )
+        if event_type and event_type != "worker_done":
+            return False, f"unexpected wait event type: {event_type}", meta
+        if not event_type:
+            return False, "wait receipt missing worker_done event type", meta
+        if dispatch_id and not event_dispatch:
+            return (
+                False,
+                (
+                    f"wait event missing dispatch id (expected {dispatch_id}); "
+                    "refusing to treat as worker_done success"
+                ),
+                meta,
+            )
+        status = str(event.get("status") or event.get("result") or "").lower()
+        if status in {"failed", "error", "cancelled"}:
+            return False, f"worker_done with failure status: {status}", meta
+        return True, "worker_done", meta
+
+    return (
+        False,
+        "wait delivery contained only unrelated dispatch events",
+        {
+            "event_type": None,
+            "event_dispatch_id": None,
+            "expected_dispatch_id": dispatch_id,
+            "event": events[0] if events else data,
+            "unrelated_events": unrelated,
+            "ack_delivery_id": ack_delivery_id,
+            "retryable_unrelated": bool(dispatch_id and unrelated),
+        },
+    )
 
 
-def _extract_wait_event(payload: dict[str, Any]) -> dict[str, Any]:
+def _extract_wait_events(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    raw_events = payload.get("events")
+    if isinstance(raw_events, list):
+        for item in raw_events:
+            if isinstance(item, dict):
+                events.append(item)
     for key in ("event", "result", "check", "data"):
         nested = payload.get(key)
         if isinstance(nested, dict):
-            # Prefer nested event when present.
             inner = nested.get("event")
             if isinstance(inner, dict):
-                return inner
+                events.append(inner)
             if any(k in nested for k in ("type", "eventType", "kind", "dispatchId")):
-                return nested
-    events = payload.get("events")
-    if isinstance(events, list) and events:
-        first = events[0]
-        if isinstance(first, dict):
-            return first
-    return payload
+                events.append(nested)
+            rows = nested.get("events")
+            if isinstance(rows, list):
+                for row in rows:
+                    if isinstance(row, dict):
+                        events.append(row)
+    if events:
+        return events
+    return [payload]
+
+
+def _extract_wait_event(payload: dict[str, Any]) -> dict[str, Any]:
+    events = _extract_wait_events(payload)
+    return events[0] if events else payload
 
 
 class OrcaProvider(ProviderAdapter):
@@ -668,9 +696,18 @@ class OrcaProvider(ProviderAdapter):
             return self._failed_dispatch(worker_result, steps, session.session_id)
 
         timeout_ms = max(1_000, int(float(request.timeout_seconds) * 1000))
-        wait_result = run_cli_task(
-            binary=binary,
-            argv=[
+        deadline = time.monotonic() + (timeout_ms / 1000.0)
+        wait_result: ProviderTaskResult | None = None
+        wait_payload: dict[str, Any] = {}
+        done_ok = False
+        done_detail = "wait did not produce worker_done"
+        done_meta: dict[str, Any] = {}
+        ack_delivery_id: str | None = None
+        attempts = 0
+        while time.monotonic() < deadline:
+            attempts += 1
+            remaining_ms = max(1_000, int((deadline - time.monotonic()) * 1000))
+            wait_argv = [
                 binary,
                 "orchestration",
                 "check",
@@ -678,17 +715,46 @@ class OrcaProvider(ProviderAdapter):
                 "--types",
                 "worker_done,escalation,question",
                 "--timeout-ms",
-                str(timeout_ms),
+                str(remaining_ms),
                 "--json",
-            ],
-            session=session,
-            request=request,
-            unavailable_detail="Orca binary unavailable",
-        )
-        wait_payload = _parse_orca_json(wait_result.output)
-        done_ok, done_detail, done_meta = interpret_orca_wait_event(
-            wait_payload, dispatch_id=dispatch_id
-        )
+            ]
+            if ack_delivery_id:
+                wait_argv[3:3] = ["--ack", ack_delivery_id]
+                ack_delivery_id = None
+            wait_result = run_cli_task(
+                binary=binary,
+                argv=wait_argv,
+                session=session,
+                request=request,
+                unavailable_detail="Orca binary unavailable",
+            )
+            wait_payload = _parse_orca_json(wait_result.output)
+            done_ok, done_detail, done_meta = interpret_orca_wait_event(
+                wait_payload, dispatch_id=dispatch_id
+            )
+            if not wait_result.ok:
+                break
+            if done_ok:
+                break
+            retryable = bool(done_meta.get("retryable_unrelated"))
+            ack = done_meta.get("ack_delivery_id")
+            if retryable and isinstance(ack, str) and ack.strip():
+                ack_delivery_id = ack.strip()
+                continue
+            break
+        if wait_result is None:
+            wait_result = ProviderTaskResult(
+                ok=False,
+                failure=FailureClass.TIMEOUT,
+                detail="wait timed out before any Orca receipt",
+                session_id=session.session_id,
+            )
+        if (
+            not done_ok
+            and done_meta.get("retryable_unrelated")
+            and time.monotonic() >= deadline
+        ):
+            done_detail = "timed out waiting for expected dispatch completion"
         # Prefer worktree from wait receipt when worker-start omitted it.
         wait_locator = extract_worktree_locator(wait_payload)
         if wait_locator.get("worktree_path") and not locator.get("worktree_path"):
@@ -704,6 +770,7 @@ class OrcaProvider(ProviderAdapter):
                 "step": "check-wait",
                 "ok": wait_result.ok and done_ok,
                 "detail": done_detail,
+                "attempts": attempts,
                 **done_meta,
             }
         )
