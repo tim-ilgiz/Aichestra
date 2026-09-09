@@ -67,8 +67,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run repository-researcher compaction against a target project",
     )
     research_p.add_argument("project_root", type=Path)
-    research_p.add_argument("--query", default="")
+    research_p.add_argument(
+        "--query",
+        default="",
+        help="Research focus query (participates in local-worker and filesystem scan)",
+    )
     research_p.add_argument("--json", action="store_true", default=True)
+
+    orch_p = sub.add_parser(
+        "orchestrate",
+        help="Start Mode C orchestrated workflow (opt-in; does not wrap native CLIs)",
+    )
+    orch_p.add_argument("--prompt", default="Mode C task", help="Task prompt for leads")
+    orch_p.add_argument("--query", default="", help="Optional research query")
+    orch_p.add_argument("--project-root", type=Path, default=None)
+    orch_p.add_argument("--no-research", action="store_true")
+    orch_p.add_argument("--json", action="store_true", default=True)
 
     return parser
 
@@ -137,12 +151,47 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "research":
         from aichestra.orchestration.research_compact import research_paths
 
-        summary = research_paths(args.project_root)
+        summary = research_paths(args.project_root, query=args.query)
         payload = summary.to_dict()
-        if args.query:
-            payload["query"] = args.query
         sys.stdout.write(json.dumps(payload, indent=2, default=str) + "\n")
         return 0
+
+    if args.command == "orchestrate":
+        from aichestra.orchestration.modes import Mode
+        from aichestra.orchestration.workflow import OrchestratedWorkflow, WorkflowBindings
+        from aichestra.providers.codex import CodexProvider
+        from aichestra.providers.cursor import CursorProvider
+        from aichestra.providers.discovery import discover_providers
+        from aichestra.providers.local_worker import LocalWorkerProvider
+        from aichestra.providers.orca import OrcaProvider
+        from aichestra.config.layering import local_enabled, resolve_config
+        from aichestra.orchestration.roles import select_lead
+
+        cfg = resolve_config(repo_root=args.project_root)
+        providers = discover_providers(local_enabled=local_enabled(cfg))
+        selection = select_lead(providers)
+        lead: object | None = None
+        if selection.lead and selection.lead.value == "codex":
+            lead = CodexProvider()
+        elif selection.lead and selection.lead.value == "cursor":
+            lead = CursorProvider()
+        bindings = WorkflowBindings(
+            orca=OrcaProvider(),
+            lead=lead,  # type: ignore[arg-type]
+            local_worker=LocalWorkerProvider(local_enabled=local_enabled(cfg)),
+            providers=providers,
+            project_root=str(args.project_root) if args.project_root else None,
+            task_prompt=args.prompt,
+            research_query=args.query,
+        )
+        wf = OrchestratedWorkflow(
+            mode=Mode.ORCHESTRATED,
+            research_useful=not args.no_research,
+            bindings=bindings,
+        )
+        state = wf.run_all()
+        sys.stdout.write(json.dumps(state.to_dict(), indent=2, default=str) + "\n")
+        return 0 if not state.failed and not state.stopped else 1
 
     parser.error(f"unknown command: {args.command}")
     return 2

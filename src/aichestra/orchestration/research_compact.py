@@ -5,7 +5,13 @@ from __future__ import annotations
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
+
+from aichestra.providers.base import (
+    ProviderAdapter,
+    ProviderTaskRequest,
+    ProviderTaskResult,
+)
 
 
 @dataclass
@@ -19,10 +25,14 @@ class ResearchSummary:
     OPEN_QUESTIONS: list[str] = field(default_factory=list)
     RECOMMENDED_NEXT: str = ""
     READ_ONLY: bool = True
-    PROVIDER: str = "local-worker"
+    PROVIDER: str = "filesystem"
+    QUERY: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+LocalResearchRunner = Callable[[Path, str], ProviderTaskResult]
 
 
 def compact_research(
@@ -33,7 +43,8 @@ def compact_research(
     risks: Iterable[str] | None = None,
     open_questions: Iterable[str] | None = None,
     recommended_next: str = "",
-    provider: str = "local-worker",
+    provider: str = "filesystem",
+    query: str = "",
     max_summary_chars: int = 4_000,
 ) -> ResearchSummary:
     """Compact research into a bounded SUMMARY packet for cloud handoff."""
@@ -46,66 +57,164 @@ def compact_research(
         RECOMMENDED_NEXT=_truncate(recommended_next, 500),
         READ_ONLY=True,
         PROVIDER=provider,
+        QUERY=query.strip(),
     )
 
 
 def research_paths(
     project_root: Path | str,
     *,
+    query: str = "",
     patterns: tuple[str, ...] = ("README*", "AGENTS.md", "pyproject.toml", "package.json"),
     max_files: int = 20,
     prefer_local_worker: bool = True,
     local_worker_available: bool | None = None,
+    local_worker: ProviderAdapter | None = None,
+    local_research_runner: LocalResearchRunner | None = None,
 ) -> ResearchSummary:
-    """Lightweight read-only filesystem research (no production code writes).
+    """Read-only repository research (FR-021/053).
 
-    Prefers ``local-worker`` when available; otherwise labels provider honestly
-    as ``filesystem`` so cloud leads are not told a local worker ran (FR-053).
+    Labels ``PROVIDER=local-worker`` only when a local worker is actually
+    invoked and returns successfully. Otherwise uses ``filesystem``.
+    ``query`` participates in both local-worker and filesystem research.
     """
     root = Path(project_root)
+    q = (query or "").strip()
+
+    if prefer_local_worker:
+        worker_result = _try_local_worker_research(
+            root,
+            query=q,
+            local_worker=local_worker,
+            local_worker_available=local_worker_available,
+            local_research_runner=local_research_runner,
+        )
+        if worker_result is not None and worker_result.ok:
+            return compact_research(
+                summary=_truncate(worker_result.output or f"local-worker research: {q}", 4_000),
+                findings=[f"local-worker: {worker_result.detail or 'ok'}"],
+                open_questions=[q] if q else [],
+                recommended_next="Hand compacted SUMMARY to lead for implementation.",
+                provider="local-worker",
+                query=q,
+            )
+
+    return _filesystem_research(
+        root,
+        query=q,
+        patterns=patterns,
+        max_files=max_files,
+    )
+
+
+def _try_local_worker_research(
+    root: Path,
+    *,
+    query: str,
+    local_worker: ProviderAdapter | None,
+    local_worker_available: bool | None,
+    local_research_runner: LocalResearchRunner | None,
+) -> ProviderTaskResult | None:
+    if local_research_runner is not None:
+        return local_research_runner(root, query)
+
+    if local_worker is not None:
+        status = local_worker.probe()
+        if not status.available:
+            return None
+        prompt = (
+            "Read-only repository research. Do not modify files. "
+            f"Project: {root}. Query: {query or '(general overview)'}. "
+            "Return a compact summary of key files, findings, risks, and next steps."
+        )
+        return local_worker.execute_task(
+            ProviderTaskRequest(
+                prompt=prompt,
+                role="repository-researcher",
+                context={"project_root": str(root), "query": query},
+                read_only=True,
+                cwd=str(root),
+                timeout_seconds=180.0,
+            )
+        )
+
+    # Availability flag alone must not claim a provider ran.
+    if local_worker_available:
+        return None
+
+    if local_worker_available is None:
+        # Auto-discover: only invoke when we can construct a real adapter.
+        try:
+            from aichestra.config.layering import local_enabled, resolve_config
+            from aichestra.providers.local_worker import LocalWorkerProvider
+
+            cfg = resolve_config()
+            worker = LocalWorkerProvider(local_enabled=local_enabled(cfg))
+            if not worker.probe().available:
+                return None
+            return _try_local_worker_research(
+                root,
+                query=query,
+                local_worker=worker,
+                local_worker_available=True,
+                local_research_runner=None,
+            )
+        except Exception:
+            return None
+    return None
+
+
+def _filesystem_research(
+    root: Path,
+    *,
+    query: str,
+    patterns: tuple[str, ...],
+    max_files: int,
+) -> ResearchSummary:
     found: list[str] = []
     findings: list[str] = []
+    query_l = query.lower()
     for pattern in patterns:
         for path in sorted(root.glob(pattern))[:max_files]:
             if path.is_file():
                 rel = str(path.relative_to(root)) if path.is_relative_to(root) else str(path)
-                found.append(rel)
                 try:
                     text = path.read_text(encoding="utf-8", errors="ignore")
                 except OSError:
                     continue
+                if query_l and query_l not in rel.lower() and query_l not in text.lower():
+                    continue
+                found.append(rel)
                 first = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
                 if first:
                     findings.append(f"{rel}: {first[:160]}")
+            if len(found) >= max_files:
+                break
         if len(found) >= max_files:
             break
-    summary = (
-        f"Read-only scan of {root.name}: {len(found)} key files located."
-        if found
-        else f"Read-only scan of {root.name}: no matching key files."
-    )
-    if local_worker_available is None and prefer_local_worker:
-        try:
-            from aichestra.config.layering import local_enabled, resolve_config
-            from aichestra.providers.discovery import discover_providers_report
 
-            cfg = resolve_config()
-            report = discover_providers_report(local_enabled=local_enabled(cfg))
-            local_worker_available = bool(report.get("local_worker_available"))
-        except Exception:
-            local_worker_available = False
-
-    if prefer_local_worker and local_worker_available:
-        provider = "local-worker"
+    if query:
+        summary = (
+            f"Read-only filesystem scan of {root.name} for query {query!r}: "
+            f"{len(found)} key files located."
+        )
     else:
-        provider = "filesystem"
-
+        summary = (
+            f"Read-only scan of {root.name}: {len(found)} key files located."
+            if found
+            else f"Read-only scan of {root.name}: no matching key files."
+        )
+    open_q = [f"Unresolved aspects of query: {query}"] if query and not found else (
+        [query] if query else []
+    )
     return compact_research(
         summary=summary,
         key_files=found,
         findings=findings,
+        open_questions=open_q,
         recommended_next="Hand compacted SUMMARY to lead for implementation.",
-        provider=provider,
+        provider="filesystem",
+        query=query,
     )
 
 

@@ -62,4 +62,11 @@ def test_research_compaction_bounds() -> None:
 def test_research_paths_on_fixture(fixture_project_a: Path) -> None:
     result = research_paths(fixture_project_a)
     assert result.READ_ONLY is True
+    assert result.PROVIDER == "filesystem"
     assert any("README" in f or "pyproject" in f for f in result.KEY_FILES)
+
+
+def test_research_query_participates(fixture_project_a: Path) -> None:
+    result = research_paths(fixture_project_a, query="fixture")
+    assert result.QUERY == "fixture"
+    assert "fixture" in result.SUMMARY.lower() or result.KEY_FILES or result.OPEN_QUESTIONS

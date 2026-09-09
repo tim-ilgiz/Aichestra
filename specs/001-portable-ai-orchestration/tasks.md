@@ -368,3 +368,26 @@ Windows/Linux live validation from macOS-only execution.
 - [x] T074 Add tests for worktree/serial edit lease refuse-shared-checkout and `reset_hard_helper_allowed() is False` in `src/aichestra/orchestration/worktrees.py` per FR-057 (partial)
 - [x] T075 Make `repository-researcher` prefer an available local-worker and degrade to compact filesystem research without mislabeling `PROVIDER` when local-worker is unused per FR-053 (partial)
 - [x] T076 Persist `--approve-model-download` into existing `.local/machine.local.json` on re-bootstrap (today only recorded when creating the file) per FR-049 / SC-014 (partial)
+
+## Phase 17: Review remediation (Mode C execution + staging quoting)
+
+**Purpose**: Address PR review blockers — executable Mode C provider interface,
+strict staging parameter allowlist + remote quoting, truthful phase status /
+maintenance-reviewer gate, honest local-worker research labeling.
+
+- [x] T077 CRITICAL: Add Mode C provider execution interface
+      (`start_session` / `send` / `execute_task`) on
+      `src/aichestra/providers/base.py`, implement for Orca/Codex/Cursor/
+      local-worker, wire `OrchestratedWorkflow` to real phase execution;
+      keep native Codex/Cursor unintercepted (FR-001/043/045/054/064)
+- [x] T078 CRITICAL: Replace staging typed-parameter blacklist with strict
+      allowlist grammars + POSIX remote quoting in
+      `staging_ops.py` / `staging_ssh.py`; add regression tests proving typed
+      params cannot cause an extra remote command (Constitution IV / FR-032/059)
+- [x] T079 HIGH: Model workflow phase status
+      (pending/running/succeeded/failed/skipped); mark succeeded only after
+      real operation ok; enforce maintenance-reviewer before writer phases
+      (FR-023/054)
+- [x] T080 HIGH: Invoke local-worker for research when selected or keep
+      `PROVIDER=filesystem`; honor `--query` inside research
+      (FR-021/053); update CLI `research` / add `orchestrate`

@@ -46,14 +46,16 @@ python -m aichestra update          # after git pull; preserves machine-local
 
 1. **Native** — run `codex` / Cursor IDE / `cursor` as usual (unchanged).
 2. **Orca interactive** — open Orca app; work with one agent (`orca open` / UI).
-3. **Orchestrated** — start an explicit Aichestra workflow (Mode C) via Orca +
-   Aichestra policies; maintenance-reviewer gates tests/docs.
+3. **Orchestrated** — start Mode C explicitly:
+   `python -m aichestra orchestrate --prompt "…" --project-root /path/to/target`
+   (opt-in; does not wrap native `codex`/`cursor` CLIs). Orca is the control
+   plane when available; maintenance-reviewer gates tests/docs.
 4. **Codex→Cursor handoff** — one-action manual handoff builds a bounded brief;
    prefer Orca: `orca worktree create --no-parent --agent cursor --prompt …`.
 5. **Disable local inference** — keep `local.enabled: false` in
    `.local/machine.local.json` (default).
 6. **Local repository research** —
-   `python -m aichestra research /path/to/target-project`
+   `python -m aichestra research /path/to/target-project --query "auth"`
 7. **Machine/local AI** — `python -m aichestra profile` and doctor local-AI section.
 8. **Staging diagnostics** (typed, allowlist-gated; alias in machine-local config):
 

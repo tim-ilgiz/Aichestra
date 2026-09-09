@@ -37,7 +37,7 @@ def test_research_provider_labels_filesystem_when_local_absent(
     assert summary.PROVIDER == "filesystem"
 
 
-def test_research_provider_labels_local_when_available(
+def test_research_does_not_claim_local_without_invocation(
     fixture_project_a: Path,
 ) -> None:
     summary = research_paths(
@@ -45,7 +45,32 @@ def test_research_provider_labels_local_when_available(
         prefer_local_worker=True,
         local_worker_available=True,
     )
+    # Availability alone must not label PROVIDER=local-worker (FR-053).
+    assert summary.PROVIDER == "filesystem"
+
+
+def test_research_labels_local_when_runner_succeeds(
+    fixture_project_a: Path,
+) -> None:
+    from aichestra.providers.base import FailureClass, ProviderTaskResult
+
+    def runner(_root: Path, query: str) -> ProviderTaskResult:
+        return ProviderTaskResult(
+            ok=True,
+            output=f"worker found clues for {query}",
+            failure=FailureClass.NONE,
+            detail="ok",
+        )
+
+    summary = research_paths(
+        fixture_project_a,
+        query="auth",
+        prefer_local_worker=True,
+        local_research_runner=runner,
+    )
     assert summary.PROVIDER == "local-worker"
+    assert summary.QUERY == "auth"
+    assert "auth" in summary.SUMMARY
 
 
 def test_approve_model_download_persists_on_rebootstrap(

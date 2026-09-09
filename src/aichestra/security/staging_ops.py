@@ -1,7 +1,13 @@
-"""Typed staging diagnostic builders — structured argv, not free-form shell."""
+"""Typed staging diagnostic builders — structured argv, not free-form shell.
+
+OpenSSH reconstructs the remote command and the remote user's shell parses it.
+Typed parameters therefore use a strict *allowlist* grammar (not a growing
+blacklist) and remote argv is POSIX-quoted before SSH transport.
+"""
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum
 from typing import Sequence
@@ -16,6 +22,17 @@ class StagingOpKind(str, Enum):
     TAIL_LOG = "tail_log"
     CAT_FILE = "cat_file"
     CURL_HEALTH = "curl_health"
+
+
+# Strict allowlist grammars for typed parameters (Constitution IV / FR-032/059).
+_SERVICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$")
+_PATH_RE = re.compile(r"^/?[A-Za-z0-9._+-]+(/[A-Za-z0-9._+-]+)*$")
+_URL_RE = re.compile(
+    r"^https?://[A-Za-z0-9][A-Za-z0-9.-]{0,253}"
+    r"(:[0-9]{1,5})?"
+    r"(/[A-Za-z0-9._~/-]{0,512})?$"
+)
+_LINES_RE = re.compile(r"^[1-9][0-9]{0,4}$")
 
 
 @dataclass(frozen=True)
@@ -37,7 +54,9 @@ def build_op(kind: StagingOpKind | str, **params: str) -> StagingOp:
         StagingOpKind.FREE_MEMORY: lambda: ("free", "-m"),
         StagingOpKind.PROCESS_LIST: lambda: ("ps", "aux"),
         StagingOpKind.SERVICE_STATUS: lambda: _service_status(params.get("service", "")),
-        StagingOpKind.TAIL_LOG: lambda: _tail_log(params.get("path", ""), params.get("lines", "50")),
+        StagingOpKind.TAIL_LOG: lambda: _tail_log(
+            params.get("path", ""), params.get("lines", "50")
+        ),
         StagingOpKind.CAT_FILE: lambda: _cat_file(params.get("path", "")),
         StagingOpKind.CURL_HEALTH: lambda: _curl_health(params.get("url", "")),
     }
@@ -49,44 +68,70 @@ def build_op(kind: StagingOpKind | str, **params: str) -> StagingOp:
     )
 
 
+def posix_single_quote(value: str) -> str:
+    """POSIX shell single-quote encoding for one remote argument."""
+    return "'" + str(value).replace("'", "'\"'\"'") + "'"
+
+
+def quote_remote_argv(argv: Sequence[str]) -> str:
+    """Join argv into one remote command string safe for the remote shell."""
+    return " ".join(posix_single_quote(a) for a in argv)
+
+
 def _service_status(service: str) -> tuple[str, ...]:
-    if not service or not _safe_token(service):
-        raise ValueError("service name required and must be a safe token")
+    if not _allow_service(service):
+        raise ValueError(
+            "service name required and must match allowlist "
+            "[A-Za-z0-9][A-Za-z0-9._@-]*"
+        )
     return ("systemctl", "status", service, "--no-pager")
 
 
 def _tail_log(path: str, lines: str) -> tuple[str, ...]:
-    if not path or not _safe_path(path):
-        raise ValueError("log path required and must be a safe relative/absolute path")
-    n = lines if str(lines).isdigit() else "50"
-    return ("tail", "-n", n, path)
+    if not _allow_path(path):
+        raise ValueError(
+            "log path required and must match allowlist path grammar "
+            "(no shell metacharacters, no '..')"
+        )
+    if not _allow_lines(str(lines)):
+        raise ValueError("lines must be a positive integer (1-99999)")
+    return ("tail", "-n", str(lines), path)
 
 
 def _cat_file(path: str) -> tuple[str, ...]:
-    if not path or not _safe_path(path):
-        raise ValueError("file path required and must be a safe path")
+    if not _allow_path(path):
+        raise ValueError(
+            "file path required and must match allowlist path grammar "
+            "(no shell metacharacters, no '..')"
+        )
     return ("cat", path)
 
 
 def _curl_health(url: str) -> tuple[str, ...]:
-    if not url.startswith(("http://", "https://")):
-        raise ValueError("health URL must be http(s)")
-    if any(c in url for c in (" ", ";", "|", "&", "`", "$", "\n")):
-        raise ValueError("unsafe characters in URL")
+    if not _allow_url(url):
+        raise ValueError(
+            "health URL must be http(s) and match allowlist host/path grammar"
+        )
     return ("curl", "-fsS", "--max-time", "10", url)
 
 
-def _safe_token(value: str) -> bool:
-    return bool(value) and value.replace("-", "").replace("_", "").replace(".", "").isalnum()
+def _allow_service(value: str) -> bool:
+    return bool(value) and bool(_SERVICE_RE.fullmatch(value))
 
 
-def _safe_path(value: str) -> bool:
-    if not value or any(c in value for c in (";", "|", "&", "`", "$", "\n", "\r")):
+def _allow_path(value: str) -> bool:
+    if not value or not _PATH_RE.fullmatch(value):
         return False
-    # Disallow parent traversal tricks in staging builders.
-    if ".." in value.split("/"):
-        return False
-    return True
+    # Defense in depth: never allow parent traversal segments.
+    return ".." not in value.split("/")
+
+
+def _allow_lines(value: str) -> bool:
+    return bool(_LINES_RE.fullmatch(value))
+
+
+def _allow_url(value: str) -> bool:
+    return bool(value) and bool(_URL_RE.fullmatch(value))
 
 
 def argv_from_sequence(argv: Sequence[str]) -> list[str]:

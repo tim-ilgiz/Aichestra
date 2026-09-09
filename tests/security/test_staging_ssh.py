@@ -98,7 +98,8 @@ def test_safe_op_runs_and_sanitizes():
     assert "Bearer" in result.sanitized_for_cloud or "REDACTED" in result.sanitized_for_cloud
     assert result.ssh_argv[0] in {"ssh", result.ssh_argv[0]}
     assert "stg.example" in " ".join(result.ssh_argv)
-    assert "uptime" in result.ssh_argv
+    # Remote command is a single POSIX-quoted string (OpenSSH shell semantics).
+    assert result.ssh_argv[-1] == "'uptime'"
 
 
 def test_build_ssh_argv_never_reads_missing_key(tmp_path):

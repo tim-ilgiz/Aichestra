@@ -7,7 +7,10 @@ from aichestra.providers.base import (
     ProviderAdapter,
     ProviderKind,
     ProviderRole,
+    ProviderSession,
     ProviderStatus,
+    ProviderTaskRequest,
+    ProviderTaskResult,
 )
 
 SCENARIOS = ("success", "unavailable", "quota", "auth", "timeout", "error")
@@ -30,38 +33,106 @@ def _status(
         failure=failure,
         detail=detail or failure.value,
         intercepts_native_cli=False,
-        metadata={"fake": True},
+        metadata={"fake": True, "integration": "execution-v1"},
     )
 
 
 class FakeProvider(ProviderAdapter):
-    def __init__(self, status: ProviderStatus) -> None:
+    def __init__(
+        self,
+        status: ProviderStatus,
+        *,
+        execute_scenario: str | None = None,
+        execute_output: str = "fake execution ok",
+    ) -> None:
         self.kind = status.kind
         self._status = status
+        self._execute_scenario = execute_scenario or (
+            "success" if status.available else "unavailable"
+        )
+        self._execute_output = execute_output
+        self.sessions: list[ProviderSession] = []
+        self.sent: list[ProviderTaskRequest] = []
 
     def probe(self) -> ProviderStatus:
         return self._status
 
+    def supports_execution(self) -> bool:
+        return True
+
+    def start_session(
+        self,
+        *,
+        role: str = "",
+        context=None,
+    ) -> ProviderSession:
+        session = super().start_session(role=role, context=context)
+        self.sessions.append(session)
+        return session
+
+    def send(
+        self,
+        session: ProviderSession,
+        request: ProviderTaskRequest,
+    ) -> ProviderTaskResult:
+        self.sent.append(request)
+        scenario = self._execute_scenario.lower().strip()
+        if scenario in {"success", "ok", "available"}:
+            return ProviderTaskResult(
+                ok=True,
+                output=self._execute_output,
+                failure=FailureClass.NONE,
+                detail="fake execution ok",
+                session_id=session.session_id,
+                metadata={"fake": True},
+            )
+        failure_map = {
+            "unavailable": FailureClass.UNAVAILABLE,
+            "absent": FailureClass.UNAVAILABLE,
+            "missing": FailureClass.UNAVAILABLE,
+            "quota": FailureClass.QUOTA,
+            "auth": FailureClass.AUTH,
+            "timeout": FailureClass.TIMEOUT,
+            "error": FailureClass.ERROR,
+            "generic": FailureClass.ERROR,
+        }
+        failure = failure_map.get(scenario, FailureClass.ERROR)
+        return ProviderTaskResult(
+            ok=False,
+            output="",
+            failure=failure,
+            detail=f"fake execution {failure.value}",
+            session_id=session.session_id,
+            metadata={"fake": True},
+        )
+
 
 def fake_codex(scenario: str = "success") -> FakeProvider:
-    return FakeProvider(_scenario(ProviderKind.CODEX, ProviderRole.LEAD, scenario))
+    return FakeProvider(
+        _scenario(ProviderKind.CODEX, ProviderRole.LEAD, scenario),
+        execute_scenario=scenario,
+    )
 
 
 def fake_cursor(scenario: str = "success") -> FakeProvider:
     return FakeProvider(
-        _scenario(ProviderKind.CURSOR, ProviderRole.FALLBACK_LEAD, scenario)
+        _scenario(ProviderKind.CURSOR, ProviderRole.FALLBACK_LEAD, scenario),
+        execute_scenario=scenario,
     )
 
 
 def fake_local_worker(scenario: str = "success") -> FakeProvider:
     return FakeProvider(
-        _scenario(ProviderKind.LOCAL_WORKER, ProviderRole.WORKER, scenario)
+        _scenario(ProviderKind.LOCAL_WORKER, ProviderRole.WORKER, scenario),
+        execute_scenario=scenario,
+        execute_output="fake local-worker research summary",
     )
 
 
 def fake_orca(scenario: str = "success") -> FakeProvider:
     return FakeProvider(
-        _scenario(ProviderKind.ORCA, ProviderRole.CONTROL_PLANE, scenario)
+        _scenario(ProviderKind.ORCA, ProviderRole.CONTROL_PLANE, scenario),
+        execute_scenario=scenario,
     )
 
 

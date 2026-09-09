@@ -15,10 +15,14 @@ from aichestra.providers.base import (
     ProviderAdapter,
     ProviderKind,
     ProviderRole,
+    ProviderSession,
     ProviderStatus,
+    ProviderTaskRequest,
+    ProviderTaskResult,
     probe_version,
     which_binary,
 )
+from aichestra.providers.execution import run_cli_task
 
 _OPENCODE_BINARIES = ("opencode",)
 
@@ -131,6 +135,32 @@ class LocalWorkerProvider(ProviderAdapter):
         return assess_resources(
             memory_total_gb=float(total),
             memory_available_gb=self.memory_available_gb,
+        )
+
+    def send(
+        self,
+        session: ProviderSession,
+        request: ProviderTaskRequest,
+    ) -> ProviderTaskResult:
+        """Run a bounded OpenCode task (research/worker) when local-worker is up."""
+        status = self.probe()
+        if not status.available or not status.binary_path:
+            return ProviderTaskResult(
+                ok=False,
+                failure=FailureClass.UNAVAILABLE,
+                detail=status.detail or "local-worker unavailable",
+                session_id=session.session_id,
+            )
+        prompt = request.bounded_prompt()
+        argv = [status.binary_path, "run", prompt]
+        if request.cwd:
+            argv.extend(["--dir", request.cwd])
+        return run_cli_task(
+            binary=status.binary_path,
+            argv=argv,
+            session=session,
+            request=request,
+            unavailable_detail="OpenCode binary unavailable",
         )
 
     def _unload_under_pressure(self, assessment: ResourceAssessment) -> None:

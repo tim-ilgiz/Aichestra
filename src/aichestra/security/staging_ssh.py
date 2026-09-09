@@ -21,7 +21,7 @@ from aichestra.security.staging_allowlist import (
     StagingDecision,
     evaluate_command,
 )
-from aichestra.security.staging_ops import StagingOp, build_op
+from aichestra.security.staging_ops import StagingOp, build_op, quote_remote_argv
 
 
 @dataclass(frozen=True)
@@ -131,7 +131,12 @@ def resolve_staging_alias(
 
 
 def build_ssh_argv(alias: StagingAlias, remote_argv: Sequence[str]) -> list[str]:
-    """Build OpenSSH argv array. Never embeds a free-form remote shell string."""
+    """Build OpenSSH argv with a single POSIX-quoted remote command.
+
+    OpenSSH reconstructs the remote command and the remote login shell parses
+    it. Discrete local argv tokens are *not* sufficient isolation — every
+    remote argument is therefore single-quoted (typed ops already allowlisted).
+    """
     ssh = shutil.which("ssh") or "ssh"
     argv: list[str] = [ssh, "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes"]
     if alias.port:
@@ -143,8 +148,8 @@ def build_ssh_argv(alias: StagingAlias, remote_argv: Sequence[str]) -> list[str]
             argv.extend(["-i", str(path)])
     target = f"{alias.user}@{alias.host}" if alias.user else alias.host
     argv.append(target)
-    # Pass remote command as discrete argv tokens to ssh (no shell joining).
-    argv.extend(str(a) for a in remote_argv)
+    # One remote command string; quoting prevents metacharacter word-splitting.
+    argv.append(quote_remote_argv(remote_argv))
     return argv
 
 

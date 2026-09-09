@@ -6,7 +6,7 @@ from aichestra.security.staging_allowlist import (
     StagingDecision,
     evaluate_command,
 )
-from aichestra.security.staging_ops import StagingOp, build_op
+from aichestra.security.staging_ops import StagingOp, build_op, quote_remote_argv
 from aichestra.security.staging_ssh import (
     UnknownStagingAliasError,
     run_staging_diagnostic,
@@ -20,6 +20,7 @@ __all__ = [
     "UnknownStagingAliasError",
     "build_op",
     "evaluate_command",
+    "quote_remote_argv",
     "run_staging_diagnostic",
     "sanitize_text",
     "staging_configured",

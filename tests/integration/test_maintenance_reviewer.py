@@ -51,10 +51,22 @@ def test_writers_skip_on_none() -> None:
 
 
 def test_workflow_skips_writers_when_none() -> None:
-    wf = OrchestratedWorkflow(mode=Mode.ORCHESTRATED, research_useful=False)
-    wf.apply_maintenance_review(change_summary="noop")
-    while wf.state.current_phase is not None:
-        wf.advance()
-    assert Phase.TEST_WRITER.value in wf.state.skipped
-    assert Phase.DOC_WRITER.value in wf.state.skipped
-    assert Phase.VERIFICATION.value in wf.state.completed
+    from aichestra.orchestration.workflow import PhaseStatus, WorkflowBindings
+    from tests.fakes.providers import fake_codex, fake_orca
+
+    wf = OrchestratedWorkflow(
+        mode=Mode.ORCHESTRATED,
+        research_useful=False,
+        bindings=WorkflowBindings(
+            orca=fake_orca("success"),
+            lead=fake_codex("success"),
+            task_prompt="noop typo",
+            maintenance_kwargs={"change_summary": "noop"},
+        ),
+    )
+    state = wf.run_all()
+    assert Phase.TEST_WRITER.value in state.skipped
+    assert Phase.DOC_WRITER.value in state.skipped
+    assert Phase.VERIFICATION.value in state.completed
+    assert state.phase_outcomes[Phase.MAINTENANCE_REVIEW.value].status is PhaseStatus.SUCCEEDED
+    assert Phase.LEAD_IMPLEMENT.value in state.completed

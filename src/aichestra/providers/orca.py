@@ -1,8 +1,9 @@
-"""Orca control-plane adapter — smallest reliable discovery wrapper.
+"""Orca control-plane adapter — discovery + Mode C session/task execution.
 
 Inspect installed Orca docs / `orca skills get` on the developer machine before
-wiring deeper session/worktree primitives. Aichestra must not duplicate a
-general-purpose orchestrator (no CAO layer).
+extending session/worktree primitives. Aichestra must not duplicate a
+general-purpose orchestrator (no CAO layer). Native Codex/Cursor remain
+unintercepted.
 """
 
 from __future__ import annotations
@@ -15,12 +16,16 @@ from aichestra.providers.base import (
     ProviderAdapter,
     ProviderKind,
     ProviderRole,
+    ProviderSession,
     ProviderStatus,
+    ProviderTaskRequest,
+    ProviderTaskResult,
     probe_version,
     which_binary,
 )
+from aichestra.providers.execution import run_cli_task
 
-# Common CLI names; discovery only — never wraps/intercepts user invocations.
+# Common CLI names; discovery only for PATH — never wraps/intercepts user invocations.
 _ORCA_BINARIES = ("orca", "orca-cli")
 
 
@@ -81,5 +86,48 @@ class OrcaProvider(ProviderAdapter):
             failure=FailureClass.NONE,
             detail="Orca available as opt-in control plane",
             intercepts_native_cli=False,
-            metadata={"integration": "discovery-only-v1"},
+            metadata={"integration": "execution-v1"},
+        )
+
+    def send(
+        self,
+        session: ProviderSession,
+        request: ProviderTaskRequest,
+    ) -> ProviderTaskResult:
+        """Dispatch a bounded Mode C prompt through Orca (opt-in control plane)."""
+        status = self.probe()
+        if not status.available or not status.binary_path:
+            return ProviderTaskResult(
+                ok=False,
+                failure=FailureClass.UNAVAILABLE,
+                detail=status.detail or "Orca unavailable",
+                session_id=session.session_id,
+            )
+        prompt = request.bounded_prompt()
+        # Smallest reliable wrapper: non-interactive run with session id metadata.
+        # Does not replace native `orca` interactive use.
+        argv = [
+            status.binary_path,
+            "run",
+            "--session",
+            session.session_id,
+            prompt,
+        ]
+        result = run_cli_task(
+            binary=status.binary_path,
+            argv=argv,
+            session=session,
+            request=request,
+            unavailable_detail="Orca binary unavailable",
+        )
+        meta = dict(result.metadata)
+        meta["control_plane"] = True
+        meta["integration"] = "execution-v1"
+        return ProviderTaskResult(
+            ok=result.ok,
+            output=result.output,
+            failure=result.failure,
+            detail=result.detail,
+            session_id=result.session_id,
+            metadata=meta,
         )
