@@ -4,9 +4,9 @@
 
 **Input**: Feature specification from `/specs/001-portable-ai-orchestration/spec.md`
 
-**Status**: Architecture contract realigned. Mode C production path uses
-`ModeCRunController` / `mode_c.py` (one Orca Run + local gates). Do not merge
-until maintainer architecture review confirms no dual-orchestrator regression.
+**Status**: Architecture source of truth strengthened (Orca owns workflow graph /
+execution state machine). Production Mode C realignment against Phase 24
+(T158–T168) is **not** complete — docs lead; code must follow.
 
 ## Summary
 
@@ -14,9 +14,10 @@ Deliver a portable, project-agnostic AI development environment where:
 
 - **Mode A** — native Codex / Cursor (unintercepted)
 - **Mode B** — Orca interactive (manual; no automatic full Mode C)
-- **Mode C** — Aichestra → **exactly one Orca Run** → Orca owns workers/tasks/
-  worktrees/handoffs; Aichestra owns policy, discovery, config, and
-  deterministic gates/verification
+- **Mode C** — Aichestra accepts `task + project`, discovers context/policy,
+  creates/resumes **exactly one Orca Run**; Orca owns the workflow graph,
+  execution state machine, workers/tasks/worktrees/handoffs; Aichestra owns
+  discovery, policy, config, and deterministic gates/verification
 
 Cross-platform Python owns portable helpers. OS bootstrap entrypoints wrap the
 shared core. CI and fixtures prove portability without real provider quota.
@@ -24,16 +25,18 @@ shared core. CI and fixtures prove portability without real provider quota.
 ### Aichestra IS
 
 - bootstrap / update
-- discovery (Orca + providers)
+- discovery (Orca + providers + project-owned instructions/tooling)
+- project-context / portable policy construction
 - policy and configuration layering
 - deterministic gates (classify / Spec Kit path, maintenance-reviewer,
   verification-runner, security allowlists, context compaction)
-- Orca adapter (create/resume one Run; create tasks; read state; forward
-  attachments)
+- Orca adapter (create/resume one Run; hand task/policy/context/attachments;
+  read Run state; feed gate results back)
 
 ### Aichestra is NOT
 
 - a general-purpose workflow engine
+- owner of the Mode C workflow graph / execution state machine
 - a worker scheduler
 - a session manager
 - a worktree manager (beyond thin policy checks)
@@ -171,44 +174,120 @@ src/aichestra/
 Allowed to remain as **small deterministic helpers**: classify, maintenance
 decision, verification runner, provider/security policy, compaction.
 
-## Mode C control flow (target — thin coordinator)
+## Mode C control flow — project-execution control plane
+
+Mode C does NOT have a universal hard-coded agent-phase sequence.
+
+Canonical flow:
 
 ```text
-1. validate existing project root (fail if missing/not a dir)
-2. require Orca binding (fail closed; never direct Codex/Cursor/local-worker)
-3. local classify + Spec Kit policy (scale/steps only — not artifact stubs)
-4. ensure exactly ONE Orca Run (resume or create); no run_id → FAIL CLOSED
-5. MEDIUM/LARGE: ONE Orca handoff role=speckit_artifacts under that Run;
-   Aichestra file-gates readiness (no Python stub unlock / *_satisfied)
-6. If research is useful, dispatch Orca research task on same run; when local
-   worker is AVAILABLE+CAPABLE+ALLOWED+PREFERRED, use Orca local worker
-   (`agent=opencode` or version-matched equivalent)
-7. Orca lead implementation task on same run (Codex preferred, Cursor fallback)
-8. local maintenance-reviewer gate
-9. writers via Orca on SAME run_id; prefer local worker when selected by policy,
-   fallback to enabled cloud lead
-10. local verification (explicit config or safe auto-detect)
-11. final lead review via Orca under SAME run_id
+User
+  │
+  │ task + project root + attachments
+  ▼
+Aichestra
+  │
+  ├─ resolve project root
+  ├─ discover project-owned instructions/tooling
+  ├─ discover providers + machine capabilities
+  ├─ resolve portable policy/security constraints
+  ├─ create/resume exactly ONE Orca Run
+  │
+  ▼
+Orca Run
+  │
+  ├─ owns workflow graph
+  ├─ owns task lifecycle
+  ├─ owns worker selection/dispatch
+  ├─ owns worker ordering/dependencies
+  ├─ owns handoffs
+  └─ owns worktrees
+       │
+       ├─ Codex
+       ├─ Cursor
+       ├─ OpenCode/local-worker
+       └─ future supported workers
+
+Aichestra deterministic services may participate at explicit boundaries:
+
+- policy/classification
+- security checks
+- context compaction
+- maintenance policy
+- verification commands / authoritative exit codes
+
+Their results are fed back to the same Orca Run.
 ```
+
+Aichestra MUST NOT translate this into a fixed internal sequence such as:
+
+```text
+classify
+→ research
+→ implement
+→ maintenance
+→ test_writer
+→ doc_writer
+→ verification
+→ lead_review
+```
+
+That sequence may be a valid Orca execution plan for one task, but it is not the
+Aichestra architecture.
 
 Canonical lifecycle identity: Orca `run_id`.
 
-`Phase` / `WorkflowState` may remain as observability/result representation.
-Production `run_all()` MUST NOT be a `while current_phase: _execute_phase`
-worker scheduler.
+Aichestra may expose neutral execution/gate status for observability.
+
+It MUST NOT maintain a second agent-phase state machine that mirrors or predicts
+the Orca workflow graph.
+
+Canonical orchestration state belongs to the Orca Run.
+
+### Project context discovery
+
+Before handing Mode C execution to Orca, Aichestra builds a bounded
+`ProjectContext`.
+
+The discovery layer SHOULD inspect, when present:
+
+- AGENTS.md and supported nested agent instructions
+- existing Spec Kit configuration/artifacts
+- Factory / AI Factory tooling
+- `.aichestra/project.json`
+- repository language/build metadata
+- existing build/test/lint commands
+- existing documentation conventions
+- supported project-specific agent configuration
+- repository status / branch / relevant workspace metadata
+
+Precedence:
+
+1. global security invariants
+2. explicit runtime/user overrides
+3. target-project authoritative instructions
+4. machine-local provider/capability policy
+5. portable Aichestra defaults
+
+Aichestra must preserve project-owned tooling instead of replacing it with a
+parallel Aichestra-owned workflow.
 
 ### Ownership boundary
 
 | Concern | Owner |
 |---------|-------|
-| Agent / task / worker / worktree lifecycle | Orca (under one Run) |
-| Classify / Spec Kit path / proportionality | Aichestra (local policy) |
-| Spec Kit artifact files (MEDIUM/LARGE) | Orca task under Mode C Run → project `.aichestra/speckit/`; Aichestra gates on files |
-| maintenance-reviewer | Aichestra (deterministic) |
-| verification-runner | Aichestra (deterministic; results feed same Run) |
-| Attachments delivery | Orca `--attach` / temp outside parent checkout |
-| Codex/Cursor native CLIs | Mode A only (unintercepted) |
-| Lead/local selection | Policy input to Orca — not Mode C `execute_task` |
+| Workflow graph / state machine | Orca |
+| Agent/task dependencies and ordering | Orca |
+| Worker lifecycle / dispatch | Orca |
+| Worktree lifecycle | Orca |
+| Handoffs inside Mode C | Orca |
+| User task + project entrypoint | Aichestra |
+| Project-context discovery | Aichestra |
+| Portable provider/capability policy | Aichestra |
+| Security policy | Aichestra |
+| Deterministic verification | Aichestra |
+| Project-owned AGENTS/Spec Kit/Factory rules | Target project |
+| Canonical Mode C lifecycle identity | Orca `run_id` |
 
 ### Forbidden production seams (Mode C)
 
@@ -220,6 +299,13 @@ worker scheduler.
 - Hard-coded `agent=opencode` when `local.enabled=false`
 - Parent-checkout `.aichestra/attachments/` staging
 - `brief_satisfied` / `plan_satisfied` metadata unlocks
+- fixed `Phase` graph used as the production Mode C workflow
+- `run_all()` hard-coding research → implement → writers → review
+- Aichestra deciding universal worker/task ordering
+- requiring a Python code change to introduce a different orchestration shape
+- treating project-context detection as informational metadata only
+- creating `.aichestra/speckit/` as a competing canonical Spec Kit when the
+  target project already owns a canonical Spec Kit structure
 
 ## Architecture Notes
 

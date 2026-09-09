@@ -4,20 +4,45 @@
 
 **Created**: 2026-09-09
 
-**Status**: Architecture contract realigned; Mode C production path is a thin
-coordinator (`ModeCRunController.run_all` → one `mode_c_agents` Orca handoff +
-local Spec Kit / maintenance / verification gates). Ready for maintainer
-review once GitHub CI matrix is green.
+**Status**: Architecture source of truth strengthened (Orca owns the workflow
+graph/state machine; Aichestra is a project-execution control plane). Production
+Mode C realignment against MODE-C-011–016 / Phase 24 is **not** complete —
+architecture docs lead; code must follow.
 
 **Input**: User description: "A developer can clone this repository onto macOS, Windows or Linux, execute the platform bootstrap, authenticate required providers, and receive an equivalent Orca-based AI development environment."
 
 ## Architecture status
 
-This specification is the **target** architecture source of truth.
+This specification is the target architecture source of truth.
 
-Mode C MUST remain a thin Orca adapter + local deterministic gates. If code
-reintroduces a second worker scheduler or Orca-less Mode C fallback, treat that
-as a regression against this document — do not weaken the spec.
+Mode C MUST use Orca as the single owner of the orchestration workflow graph,
+agent/task/worker lifecycle, worktrees, and execution state.
+
+Aichestra MUST NOT own or hard-code a fixed agent-phase pipeline such as:
+
+research → implement → maintenance → writers → verification → review
+
+Aichestra is a project-execution control plane around Orca, not a second
+workflow engine.
+
+For a Mode C invocation Aichestra is responsible for:
+
+1. accepting the user task and target project root;
+2. discovering project-owned instructions, configuration, existing AI tooling,
+   Spec Kit / Factory conventions, and verification commands;
+3. discovering available/enabled providers and machine capabilities;
+4. building portable orchestration policy and bounded project context;
+5. creating or resuming exactly one Orca Run;
+6. handing the task, policy, capabilities, project context and attachments to
+   Orca;
+7. executing deterministic policy/security/verification gates where appropriate;
+8. reporting the resulting Orca Run state.
+
+Orca decides and owns the concrete execution graph inside the Run, including
+which workers/tasks are needed, their ordering, handoffs and worktrees.
+
+When implementation disagrees with this architecture, fix the implementation.
+Do not weaken this specification to preserve an Aichestra-owned workflow engine.
 
 ---
 
@@ -117,54 +142,65 @@ without Orca / project root; Mode A remains unintercepted; exactly one
 
 ---
 
-### User Story 3 - Research, writers, review, verification (Priority: P2)
+### User Story 3 - Project-aware Orca execution (Priority: P1)
 
-Mode C policy **inputs** (not a second Python orchestrator) may include:
-classify / Spec Kit path → research if useful → lead implementation →
-maintenance-reviewer decisions → optional test/doc writers → deterministic
-verification → lead review.
+A developer gives Aichestra a task and a target project.
 
-**Agent steps** (research, implement, writers, lead review) MUST execute as
-Orca tasks/workers on the **same** Orca Run. Aichestra MUST NOT call
-`CodexProvider.execute_task`, `CursorProvider.execute_task`, or
-`LocalWorkerProvider.execute_task` for those roles in Mode C.
+Aichestra discovers the project's own instructions and tooling, resolves
+available provider capabilities, builds orchestration policy/context, and starts
+or resumes exactly one Orca Run.
 
-**Deterministic gates** (classify heuristics, maintenance-reviewer,
-verification-runner) MAY run in Aichestra and MUST feed results back into the
-same Orca Run for final review.
+Orca owns the execution workflow inside that Run.
 
-Research via local-worker/OpenCode:
+Aichestra does not prescribe a universal research → implementation → writers →
+review sequence. Different projects and tasks may require different execution
+graphs.
 
-```text
-Aichestra → existing Orca Run → Orca research task → OpenCode/local-worker
-```
+Examples:
 
-If local-worker is absent, Orca may assign a cloud research worker or research
-may be skipped per policy — Aichestra must not become the worker scheduler.
+- a tiny change may require one implementation worker plus verification;
+- a complex change may require repository research, implementation, review and
+  multiple workers;
+- a documentation-only task may require no implementation worker;
+- a project with its own Spec Kit / Factory / AGENTS.md rules keeps those rules
+  authoritative;
+- a project may use Codex, Cursor, local-worker, or a subset according to
+  capabilities and policy.
 
-Test/doc writers and final lead review follow the same rule: maintenance
-decisions are local/deterministic; execution is Orca-owned under the same Run.
+Aichestra may apply deterministic gates such as classification, security policy,
+maintenance decisions and verification, but those gates MUST NOT turn Aichestra
+into the workflow scheduler.
 
-**Why this priority**: Quality gates without documentation/test bloat; no dual
-scheduler.
-
-**Independent Test**: Fixture maintenance decisions; verifier exit codes;
-contract tests that lead/local-worker adapters receive zero Mode C
-`execute_task` calls while Orca receives agent tasks under one `run_id`.
+**Independent Test**: Two different project/task fixtures produce different Orca
+execution plans without changing Aichestra production code or adding new Python
+Phase enum values.
 
 **Acceptance Scenarios**:
 
-1. **Given** research is useful, **When** Mode C runs, **Then** research is an
-   Orca task on the existing Run (compacted before cloud lead handoff).
-2. **Given** implementation completes on the Run, **When** gates proceed,
-   **Then** maintenance-reviewer runs before writers and may choose none.
-3. **Given** TEST/DOC required, **When** writers run, **Then** they are Orca
-   tasks on the same Run (prefer updating existing canonical artifacts).
-4. **Given** verification is required, **When** verification-runner runs,
-   **Then** real target-repo commands and exit codes are authoritative; results
-   attach to the same Mode C / Orca Run for final review.
-5. **Given** final lead review, **When** it executes, **Then** it is an Orca
-   task/worker on the same Run — not a direct Aichestra→Codex call.
+1. **Given** a target project with `AGENTS.md`, Spec Kit, Factory or other
+   supported project-owned AI instructions, **When** Mode C starts, **Then**
+   those instructions are discovered and included in the authoritative project
+   context supplied to Orca.
+
+2. **Given** a project without Aichestra-specific configuration, **When** Mode C
+   starts, **Then** Aichestra can still build a usable project context through
+   discovery rather than requiring a hard-coded project type.
+
+3. **Given** a simple task, **When** Orca determines that research or writers are
+   unnecessary, **Then** Aichestra does not require those phases to exist.
+
+4. **Given** a complex task, **When** Orca decides multiple workers/tasks are
+   required, **Then** all of them belong to the same Orca Run and Orca owns their
+   ordering and lifecycle.
+
+5. **Given** project-owned Spec Kit or Factory conventions, **When**
+   orchestration runs, **Then** Aichestra preserves and uses the project's
+   canonical structures rather than creating a competing workflow/spec system.
+
+6. **Given** deterministic verification configured or discovered for the
+   project, **When** execution reaches a verification boundary, **Then**
+   Aichestra may execute the commands and return authoritative exit-code results
+   to the same Orca Run.
 
 ---
 
@@ -308,6 +344,30 @@ These are the non-negotiable Mode C contract. Contract tests MUST cover them.
   independently (Codex, Cursor, local-worker; Mode C still requires Orca).
 - **MODE-C-010**: Attachments supplied to Mode C MUST be forwarded through
   supported Orca/provider mechanisms rather than metadata-only routing.
+
+### Workflow ownership requirements
+
+- **MODE-C-011**: Orca MUST own the Mode C workflow graph and execution state
+  machine. Aichestra MUST NOT own a fixed multi-agent phase graph.
+
+- **MODE-C-012**: Aichestra MUST NOT require universal agent phases such as
+  research, implementation, test-writer, doc-writer or lead-review. Such work
+  may exist when required, but Orca owns its scheduling.
+
+- **MODE-C-013**: Mode C MUST begin from `task + resolved project root +
+  discovered project context + provider/capability policy`, rather than from a
+  hard-coded Python phase sequence.
+
+- **MODE-C-014**: Project-owned instructions and tooling MUST take precedence
+  over generic Aichestra workflow assumptions where they do not violate global
+  security constraints.
+
+- **MODE-C-015**: Adding a new project workflow shape MUST NOT require adding a
+  new Aichestra production `Phase` enum member or Python scheduling branch.
+
+- **MODE-C-016**: Aichestra deterministic gates MUST remain independent from
+  agent orchestration. A gate may allow, block or report execution, but MUST NOT
+  become a worker/task scheduler.
 
 ### Functional Requirements
 
@@ -495,6 +555,23 @@ These are the non-negotiable Mode C contract. Contract tests MUST cover them.
 - **FR-077**: Legacy dual-orchestrator seams (`OrchestratedWorkflow` alias,
   unreachable phase handlers, `writer_fn`, `bound_writer_from_lead`) MUST be
   removed from production paths to keep a single architecture model.
+- **FR-078**: Aichestra MUST implement project-context discovery for the target
+  project. Supported inputs include project-local `AGENTS.md`, Spec Kit
+  structures, Factory/AI tooling, `.aichestra` configuration, build/test
+  metadata and other supported project-owned instructions.
+- **FR-079**: Discovered project instructions MUST be represented as bounded,
+  explicit context/policy handed to Orca. Detection alone is insufficient.
+- **FR-080**: Existing project-owned Spec Kit / Factory structures MUST remain
+  canonical. Aichestra MUST NOT silently create a parallel canonical
+  specification system when the project already defines one.
+- **FR-081**: The production Mode C controller MUST be orchestration-shape
+  agnostic. It may create/resume an Orca Run and exchange policy/gate results,
+  but MUST NOT encode a universal agent workflow.
+- **FR-082**: Provider selection MUST be capability/policy input to Orca rather
+  than a trigger for Aichestra to schedule provider-specific agent phases.
+- **FR-083**: Mode C result/state exposed by Aichestra SHOULD derive from the
+  canonical Orca Run state plus deterministic Aichestra gate results rather than
+  from an independent Aichestra agent-phase state machine.
 
 ### Key Entities
 

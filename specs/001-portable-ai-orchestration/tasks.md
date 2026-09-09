@@ -474,6 +474,76 @@ streams, truthful bootstrap readiness semantics, and legacy seam removal.
 
 ---
 
+## Phase 24: Workflow ownership / project-execution realignment (CURRENT)
+
+**Purpose**: Remove the remaining architectural assumption that Mode C has a
+fixed Aichestra-owned agent-phase workflow. Make Orca the owner of the workflow
+graph/state machine and make Aichestra project-aware rather than
+workflow-specific.
+
+### Architecture source-of-truth correction
+
+- [x] T154 CRITICAL: Update `spec.md` to state that Orca owns the workflow graph
+      and execution state machine; forbid a universal Aichestra
+      research→implement→writers→review pipeline (MODE-C-011/012).
+
+- [x] T155 CRITICAL: Update `spec.md` with project-context discovery and
+      project-owned instruction precedence requirements
+      (MODE-C-013/014; FR-078/079/080).
+
+- [x] T156 CRITICAL: Update `plan.md` to replace the fixed Mode C step pipeline
+      with `task + project → Aichestra context/policy → one Orca Run → Orca-owned
+      workflow`.
+
+- [x] T157 HIGH: Update `plan.md` ownership boundaries: workflow graph,
+      agent/task ordering, workers, handoffs and worktrees belong to Orca;
+      project context/policy/security/verification belong to Aichestra.
+
+### Production realignment — NOT COMPLETE
+
+- [ ] T158 CRITICAL: Refactor Mode C production controller so `run_all()` no
+      longer hard-codes a universal research/implement/writers/review workflow.
+
+- [ ] T159 CRITICAL: Remove production dependence on fixed agent `Phase` values.
+      Phase-like structures may not act as the canonical workflow state machine.
+
+- [ ] T160 CRITICAL: Introduce project-context discovery and an explicit bounded
+      `ProjectContext` handed to Orca.
+
+- [ ] T161 CRITICAL: Discover and preserve target-project `AGENTS.md`, Spec Kit,
+      Factory/AI tooling and supported project-owned instructions with explicit
+      precedence rules.
+
+- [ ] T162 CRITICAL: Stop creating a competing `.aichestra/speckit/` canonical
+      structure when the target project already has a canonical Spec Kit
+      lifecycle. Define compatibility/migration behavior.
+
+- [ ] T163 HIGH: Make provider/capability selection policy data consumed by Orca
+      rather than Aichestra-owned agent scheduling decisions.
+
+- [ ] T164 HIGH: Derive Mode C execution status from Orca Run state plus
+      deterministic Aichestra gate results; do not maintain a parallel agent
+      workflow state machine.
+
+- [ ] T165 HIGH: Add architecture contract tests proving two materially
+      different task/project workflows can execute without adding/changing
+      Python `Phase` scheduling code.
+
+- [ ] T166 HIGH: Add contract tests proving target-project instructions are
+      discovered, passed to Orca and remain authoritative.
+
+- [ ] T167 CRITICAL: Re-run full local tests and GitHub CI matrix after the
+      production refactor.
+
+- [ ] T168 CRITICAL: Run at least one real Mode C integration smoke proving
+      `task + project → one real Orca Run → real worker → worktree/result`
+      without an Aichestra-owned fixed workflow.
+
+**Checkpoint**: Do not treat architecture as converged until T158–T168 are
+complete.
+
+---
+
 ## Dependencies & Execution Order
 
 ### Phase Dependencies
@@ -482,22 +552,31 @@ streams, truthful bootstrap readiness semantics, and legacy seam removal.
 - Phase 20 contract artifacts (T103–T107) precede production realignment
 - Phase 21 (T125–T137) closes dual-orchestrator / fail-closed gaps
 - Phase 22 (T138–T144) closes architect REQUEST CHANGES residuals
+- Phase 23 (T145–T153) closes corrective alignment follow-up
+- Phase 24 (T154–T157 done; T158–T168 open) is the current architecture
+  convergence gate for workflow ownership / project-execution control plane
 - T108–T124 depend on T103–T107; T124/T137/T144 gate merge
-- Converge / “feature complete” only after T137 + Phase 22
+- Converge / “feature complete” only after T137 + Phase 22 + Phase 24 T158–T168
+- Phase 24 supersedes any earlier interpretation of T108/T125/T139 that allows
+  `ModeCRunController.run_all()` to remain the owner of a fixed agent workflow.
+- Earlier green tests prove the previous contract only; they do not prove
+  MODE-C-011–016.
 
 ### User Story Mapping
 
 - **US1** (bootstrap/portability): Phases 2, 8, 9, T134
-- **US2** (modes/providers/Orca): Phases 4, 5, 20, 21
-- **US3** (research/reviewer/verify): Phase 6, 20, 21
+- **US2** (modes/providers/Orca): Phases 4, 5, 20, 21, 24
+- **US3** (project-aware Orca execution): Phase 6, 20, 21, 24
 - **US4** (staging security): Phase 7
-- **US5** (isolation/CI/smoke): Phases 10–12, T137
+- **US5** (isolation/CI/smoke): Phases 10–12, T137, T167–T168
 - **US6** (machine/local AI): Phase 3, parts of 9, T122
 
 ### Parallel Opportunities
 
 - After T107: T119/T122 can proceed in parallel with T108–T113
 - T114–T116 parallel once T111 lands
+- After T154–T157: T160–T162 can proceed in parallel with T158–T159 once
+  controller seams are identified
 
 ---
 
@@ -506,6 +585,8 @@ streams, truthful bootstrap readiness semantics, and legacy seam removal.
 | Requirement cluster | Tasks |
 |---------------------|-------|
 | MODE-C-001–010 architecture contract | T103–T107, T108–T123, T125–T136 |
+| MODE-C-011–016 workflow ownership | T154–T157 (docs), T158–T168 (code) |
+| FR-078–083 project-execution control plane | T154–T157 (docs), T158–T166 (code) |
 | FR-067–073 hardening | T125–T135 |
 | Dual-orchestrator regression tests | T136 |
 | Windows/Linux native bootstrap | T006, T041–T043 |
@@ -514,7 +595,7 @@ streams, truthful bootstrap readiness semantics, and legacy seam removal.
 | Three modes + graceful degradation | T015–T024, T108–T117 |
 | maintenance-reviewer + verifier + audit | T025–T034, T114–T116 |
 | Staging read-only + sanitization | T035–T039 |
-| GitHub Actions matrix / no quota | T055–T057, T124, T137 |
+| GitHub Actions matrix / no quota | T055–T057, T124, T137, T167 |
 | Isolation fixtures | T050–T052 |
 | Truthful validation + operator UX | T058–T061, T064 |
 
@@ -523,7 +604,10 @@ streams, truthful bootstrap readiness semantics, and legacy seam removal.
 ## Implementation Strategy
 
 1. Spec/plan/AGENTS are source of truth — do not soften for code
-2. Production Mode C is thin coordinator + one Orca Run
+2. Mode C is `task + project → discovery/context/policy → one Orca Run`;
+   Orca owns the workflow graph — Aichestra is not a fixed agent-phase engine
 3. Do not mark T124/T137 `[x]` until GitHub CI matrix is green
 4. Do not claim Windows/Linux live validation from macOS-only execution
-5. Do not reintroduce `while current_phase: launch Orca worker`
+5. Do not reintroduce `while current_phase: launch Orca worker` or a universal
+   research→implement→writers→review `run_all()` pipeline
+6. Do not treat architecture as converged until Phase 24 T158–T168 complete
