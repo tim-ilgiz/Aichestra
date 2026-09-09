@@ -74,13 +74,17 @@ def build_orca_argv(
     session_id: str,
     agent: str = _DEFAULT_AGENT,
 ) -> list[str]:
-    """Build the primary Orca argv for a Mode C dispatch (for tests / inspection).
+    """Build a representative Orca argv for Mode C (tests / inspection).
 
-    Control-plane / read-only work registers an orchestration run.
-    Write work starts a supervised worker on an isolated child worktree.
+    ``ensure_run`` / first control-plane bind → ``orchestration run-create``.
+    Supervised agent work → ``orchestration worker-start`` (task must already exist).
+    Full ownership handoff (outside Mode C supervision) uses ``worktree create``.
     """
     prompt = request.bounded_prompt()
-    if request.read_only or request.role in {"control_plane", "classify"}:
+    role = (request.role or "").strip().lower()
+    if role in {"ensure_run", "control_plane", "classify"} or (
+        request.read_only and role in {"", "phase_report"}
+    ):
         return [
             binary,
             "orchestration",
@@ -89,21 +93,77 @@ def build_orca_argv(
             prompt,
             "--json",
         ]
+    if role in {"phase_report", "status_ping"}:
+        return [binary, "status", "--json"]
     name = f"aichestra-{session_id[:8]}"
+    worktree = str(request.context.get("worktree") or "new-child")
     return [
         binary,
-        "worktree",
-        "create",
+        "orchestration",
+        "worker-start",
+        "--task",
+        str(request.context.get("task_id") or "<task-id>"),
+        "--worktree",
+        worktree,
         "--name",
         name,
         "--agent",
         agent,
-        "--prompt",
-        prompt,
         "--setup",
         "skip",
         "--json",
     ]
+
+
+def extract_worktree_locator(payload: dict[str, Any] | None) -> dict[str, str | None]:
+    """Best-effort worktree path/id from an Orca worker-start / wait receipt."""
+    data = payload if isinstance(payload, dict) else {}
+    path: str | None = None
+    worktree_id: str | None = None
+
+    def _from_mapping(obj: Any) -> None:
+        nonlocal path, worktree_id
+        if not isinstance(obj, dict):
+            return
+        for key in ("path", "worktreePath", "worktree_path", "cwd", "folder"):
+            value = obj.get(key)
+            if isinstance(value, str) and value.strip() and path is None:
+                path = value.strip()
+        for key in ("id", "worktreeId", "worktree_id", "fullId", "selector"):
+            value = obj.get(key)
+            if isinstance(value, str) and value.strip() and worktree_id is None:
+                # Prefer full ``repo::path`` selectors when present.
+                if "::" in value or worktree_id is None:
+                    worktree_id = value.strip()
+
+    for key in ("worktree", "result", "effects", "worker", "launch", "data"):
+        nested = data.get(key)
+        _from_mapping(nested)
+        if isinstance(nested, dict):
+            _from_mapping(nested.get("worktree"))
+            _from_mapping(nested.get("effects"))
+            effects = nested.get("effects")
+            if isinstance(effects, dict):
+                _from_mapping(effects.get("worktree"))
+            created = nested.get("created")
+            if isinstance(created, dict):
+                _from_mapping(created.get("worktree"))
+                _from_mapping(created)
+
+    if path is None:
+        for key in ("worktreePath", "worktree_path"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                path = value.strip()
+                break
+    if worktree_id is None:
+        for key in ("worktreeId", "worktree_id"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                worktree_id = value.strip()
+                break
+
+    return {"worktree_path": path, "worktree_id": worktree_id}
 
 
 def _parse_orca_json(output: str) -> dict[str, Any]:
@@ -299,9 +359,67 @@ class OrcaProvider(ProviderAdapter):
                 metadata={"orca_status": ping.to_dict()},
             )
 
+        role = (request.role or "").strip().lower()
         agent = str(request.context.get("agent") or _DEFAULT_AGENT)
-        if request.read_only or request.role in {"control_plane", "classify"}:
+
+        # Phase reports must never create Runs — local metadata only at adapter.
+        if role in {"phase_report", "status_ping"}:
+            return ProviderTaskResult(
+                ok=True,
+                failure=FailureClass.NONE,
+                detail="phase report acknowledged (no new Orca Run)",
+                session_id=session.session_id,
+                metadata={
+                    "control_plane": True,
+                    "integration": "execution-v1",
+                    "orca_command": "noop-phase-report",
+                    "run_id": request.context.get("run_id"),
+                },
+            )
+
+        # Bind or create exactly one Run when requested; reuse context.run_id.
+        if role in {"ensure_run", "control_plane", "classify"}:
+            existing = request.context.get("run_id")
+            if isinstance(existing, str) and existing.strip():
+                return ProviderTaskResult(
+                    ok=True,
+                    failure=FailureClass.NONE,
+                    detail="reusing existing Orca Run",
+                    session_id=session.session_id,
+                    metadata={
+                        "control_plane": True,
+                        "integration": "execution-v1",
+                        "orca_command": "run-reuse",
+                        "run_id": existing.strip(),
+                        "reused": True,
+                    },
+                )
             return self._register_run(binary, session, request)
+
+        if request.read_only and role not in {
+            "lead_implement",
+            "lead_review",
+            "test_writer",
+            "doc_writer",
+            "research",
+        }:
+            existing = request.context.get("run_id")
+            if isinstance(existing, str) and existing.strip():
+                return ProviderTaskResult(
+                    ok=True,
+                    failure=FailureClass.NONE,
+                    detail="read-only under existing Orca Run",
+                    session_id=session.session_id,
+                    metadata={
+                        "control_plane": True,
+                        "integration": "execution-v1",
+                        "orca_command": "run-reuse",
+                        "run_id": existing.strip(),
+                        "reused": True,
+                    },
+                )
+            return self._register_run(binary, session, request)
+
         return self._dispatch_supervised(binary, session, request, agent=agent)
 
     def _register_run(
@@ -310,13 +428,18 @@ class OrcaProvider(ProviderAdapter):
         session: ProviderSession,
         request: ProviderTaskRequest,
     ) -> ProviderTaskResult:
-        """Control-plane path: create a durable orchestration Run (no write agent)."""
-        argv = build_orca_argv(
-            binary, request, session_id=session.session_id
-        )
+        """Create one durable orchestration Run (no write agent)."""
+        prompt = request.bounded_prompt()
         result = run_cli_task(
             binary=binary,
-            argv=argv,
+            argv=[
+                binary,
+                "orchestration",
+                "run-create",
+                "--objective",
+                prompt,
+                "--json",
+            ],
             session=session,
             request=request,
             unavailable_detail="Orca binary unavailable",
@@ -336,6 +459,7 @@ class OrcaProvider(ProviderAdapter):
                 "orca_command": "orchestration run-create",
                 "run_id": run_id,
                 "receipt": payload,
+                "reused": False,
             }
         )
         return ProviderTaskResult(
@@ -355,33 +479,48 @@ class OrcaProvider(ProviderAdapter):
         *,
         agent: str,
     ) -> ProviderTaskResult:
-        """Write path: run → task → worker-start → wait for worker_done."""
+        """Task → worker-start → wait; reuse workflow Run (never run-create here)."""
         prompt = request.bounded_prompt()
         steps: list[dict[str, Any]] = []
+        run_id = request.context.get("run_id")
+        if not (isinstance(run_id, str) and run_id.strip()):
+            return ProviderTaskResult(
+                ok=False,
+                failure=FailureClass.ERROR,
+                detail=(
+                    "Mode C supervised dispatch requires context.run_id; "
+                    "call ensure_run once per workflow"
+                ),
+                session_id=session.session_id,
+                metadata={"steps": steps, "integration": "execution-v1"},
+            )
+        run_id = run_id.strip()
+        steps.append({"step": "run-reuse", "ok": True, "run_id": run_id})
 
-        run_result = run_cli_task(
+        # Bind the existing Run so task-create inherits Run namespace (no second run-create).
+        use_result = run_cli_task(
             binary=binary,
             argv=[
                 binary,
                 "orchestration",
-                "run-create",
-                "--objective",
-                prompt,
+                "run-use",
+                "--id",
+                run_id,
                 "--json",
             ],
             session=session,
             request=request,
             unavailable_detail="Orca binary unavailable",
         )
-        run_payload = _parse_orca_json(run_result.output)
-        run_id = (
-            _dig_id(run_payload, "result", "id")
-            or _dig_id(run_payload, "result", "runId")
-            or _dig_id(run_payload, "id")
+        steps.append(
+            {
+                "step": "run-use",
+                "ok": use_result.ok,
+                "run_id": run_id,
+                "detail": use_result.detail,
+            }
         )
-        steps.append({"step": "run-create", "ok": run_result.ok, "run_id": run_id})
-        if not run_result.ok:
-            return self._failed_dispatch(run_result, steps, session.session_id)
+        # Soft-fail run-use: some environments already have the Run bound.
 
         title = (request.role or "aichestra-task")[:80]
         task_result = run_cli_task(
@@ -424,6 +563,11 @@ class OrcaProvider(ProviderAdapter):
             )
 
         name = f"aichestra-{session.session_id[:8]}"
+        worktree = str(
+            request.context.get("worktree")
+            or request.context.get("worktree_id")
+            or "new-child"
+        )
         worker_argv = [
             binary,
             "orchestration",
@@ -431,7 +575,7 @@ class OrcaProvider(ProviderAdapter):
             "--task",
             task_id,
             "--worktree",
-            "new-child",
+            worktree,
             "--name",
             name,
             "--agent",
@@ -453,11 +597,13 @@ class OrcaProvider(ProviderAdapter):
             or _dig_id(worker_payload, "result", "id")
             or _dig_id(worker_payload, "dispatchId")
         )
+        locator = extract_worktree_locator(worker_payload)
         steps.append(
             {
                 "step": "worker-start",
                 "ok": worker_result.ok,
                 "dispatch_id": dispatch_id,
+                **locator,
             }
         )
         if not worker_result.ok:
@@ -485,6 +631,16 @@ class OrcaProvider(ProviderAdapter):
         done_ok, done_detail, done_meta = interpret_orca_wait_event(
             wait_payload, dispatch_id=dispatch_id
         )
+        # Prefer worktree from wait receipt when worker-start omitted it.
+        wait_locator = extract_worktree_locator(wait_payload)
+        if wait_locator.get("worktree_path") and not locator.get("worktree_path"):
+            locator = wait_locator
+        elif wait_locator.get("worktree_id") and not locator.get("worktree_id"):
+            locator = {
+                "worktree_path": locator.get("worktree_path")
+                or wait_locator.get("worktree_path"),
+                "worktree_id": wait_locator.get("worktree_id"),
+            }
         steps.append(
             {
                 "step": "check-wait",
@@ -501,6 +657,10 @@ class OrcaProvider(ProviderAdapter):
             "task_id": task_id,
             "dispatch_id": dispatch_id,
             "agent": agent,
+            "worktree": worktree,
+            "worktree_path": locator.get("worktree_path"),
+            "worktree_id": locator.get("worktree_id"),
+            "integration_policy": "adopt_child_worktree",
             "steps": steps,
             "receipt": wait_payload or worker_payload,
             "wait_interpretation": done_meta,

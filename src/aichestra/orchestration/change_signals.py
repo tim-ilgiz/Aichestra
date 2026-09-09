@@ -119,6 +119,45 @@ def list_changed_paths(project_root: Path | str | None) -> list[str]:
     return paths
 
 
+def read_implementation_diff(
+    project_root: Path | str | None,
+    *,
+    max_chars: int = 40_000,
+) -> str:
+    """Return a bounded unified diff for maintenance-reviewer input (FR-023)."""
+    if project_root is None:
+        return ""
+    root = Path(project_root).resolve()
+    if not root.is_dir():
+        return ""
+    chunks: list[str] = []
+    for args in (
+        ["git", "-C", str(root), "diff", "HEAD"],
+        ["git", "-C", str(root), "diff", "--cached"],
+    ):
+        try:
+            completed = subprocess.run(
+                args,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if completed.returncode != 0:
+            continue
+        text = (completed.stdout or "").strip()
+        if text:
+            chunks.append(text)
+    if not chunks:
+        return ""
+    blob = "\n\n".join(chunks)
+    if len(blob) <= max_chars:
+        return blob
+    return blob[: max_chars - 20] + "\n…[diff truncated]"
+
+
 def infer_change_signals(
     *,
     project_root: Path | str | None = None,
@@ -148,7 +187,9 @@ def infer_change_signals(
     touches_public_api = any(_looks_like_api(p) for p in code_paths) or bool(
         re.search(r"\b(public\s+api|openapi|breaking\s+change)\b", summary)
     )
-    existing_tests_cover = bool(test_paths) and touches_behavior
+    # Conservative: path presence alone is not proof of coverage (FR-023/055).
+    # Callers may override via maintenance_kwargs after reviewing the diff.
+    existing_tests_cover = False
     docs_stale = touches_behavior or touches_public_api
     if doc_paths and not touches_public_api:
         # Docs already updated in-tree for a non-API change — not stale.
@@ -180,6 +221,8 @@ def infer_change_signals(
         "canonical_doc": canonical_doc,
         "risk": risk,
         "changed_paths": paths,
+        "implementation_diff": read_implementation_diff(project_root),
+        "test_paths_touched": test_paths,
     }
 
 

@@ -24,6 +24,7 @@ class BootstrapResult:
     local_enabled: bool
     actions: list[str] = field(default_factory=list)
     profile_summary: dict[str, Any] = field(default_factory=dict)
+    remaining_steps: list[str] = field(default_factory=list)
     ok: bool = True
     doctor_ok: bool | None = None
     doctor_checks: int | None = None
@@ -36,6 +37,7 @@ class BootstrapResult:
             "local_enabled": self.local_enabled,
             "actions": list(self.actions),
             "profile_summary": dict(self.profile_summary),
+            "remaining_steps": list(self.remaining_steps),
             "ok": self.ok,
             "doctor_ok": self.doctor_ok,
             "doctor_checks": self.doctor_checks,
@@ -77,8 +79,11 @@ def bootstrap(
             existing.setdefault("notes", {})
             existing["notes"]["model_download_requires_approval"] = True
             existing["notes"]["approve_model_download"] = True
+            # Explicit: approval flag is not a completed download.
+            existing["notes"]["model_download_performed"] = False
             changed = True
             actions.append("persist_approve_model_download")
+            actions.append("note_approve_flag_is_not_download")
         if changed:
             save_machine_local(existing, root)
     else:
@@ -99,6 +104,7 @@ def bootstrap(
             "notes": {
                 "model_download_requires_approval": True,
                 "approve_model_download": bool(approve_model_download),
+                "model_download_performed": False,
             },
         }
         save_machine_local(data, root)
@@ -106,6 +112,7 @@ def bootstrap(
         actions.append("create_machine_local")
         if approve_model_download:
             actions.append("persist_approve_model_download")
+            actions.append("note_approve_flag_is_not_download")
 
     cfg = resolve_config(repo_root=root)
     local_enabled = bool(cfg.get("local", {}).get("enabled", False))
@@ -117,6 +124,15 @@ def bootstrap(
         local_enabled=local_enabled,
         actions=actions,
     )
+
+    remaining = _remaining_bootstrap_steps(
+        root=root,
+        local_enabled=local_enabled,
+        actions=actions,
+        approve_model_download=approve_model_download,
+    )
+    if remaining:
+        actions.append("report_remaining_bootstrap_steps")
 
     return BootstrapResult(
         repo_root=str(root),
@@ -137,6 +153,7 @@ def bootstrap(
             "doctor_ok": doctor_ok,
             "doctor_checks": doctor_checks,
         },
+        remaining_steps=remaining,
         ok=True,
         doctor_ok=doctor_ok,
         doctor_checks=doctor_checks,
@@ -226,6 +243,53 @@ def _enrich_after_config(
         actions.append(f"run_doctor_failed:{type(exc).__name__}")
 
     return doctor_ok, doctor_checks
+
+
+def _remaining_bootstrap_steps(
+    *,
+    root: Path,
+    local_enabled: bool,
+    actions: list[str],
+    approve_model_download: bool,
+) -> list[str]:
+    """Honest list of bootstrap contract steps not yet performed."""
+    remaining: list[str] = []
+    action_set = set(actions)
+    if any(a.startswith("missing_orca") for a in actions) or "probe_orca" in action_set:
+        # probe always happens; missing_* only when unavailable
+        pass
+    if "missing_orca" in action_set:
+        remaining.append("install_orca_and_enable_orchestration")
+    if "missing_codex" in action_set and "missing_cursor" in action_set:
+        remaining.append("install_codex_or_cursor_lead")
+    if local_enabled and "missing_local_runtime" in action_set:
+        remaining.append("install_or_configure_local_runtime")
+    if approve_model_download:
+        remaining.append(
+            "model_download_still_manual — approve flag recorded, weights not fetched"
+        )
+    remaining.append("configure_orca_provider_integration_if_needed")
+    remaining.append("run_safe_smoke_tests_on_this_machine")
+    # Deduplicate while preserving order.
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in remaining:
+        if item not in seen:
+            seen.add(item)
+            ordered.append(item)
+    # Persist for operators.
+    try:
+        ml_path = machine_local_path(root)
+        if ml_path.is_file():
+            existing = load_json(ml_path)
+            notes = existing.setdefault("notes", {})
+            if isinstance(notes, dict):
+                notes["bootstrap_remaining_steps"] = ordered
+                notes["bootstrap_complete"] = False
+                save_machine_local(existing, root)
+    except OSError:
+        pass
+    return ordered
 
 
 def _ensure_gitignore_entries(gitignore: Path, actions: list[str]) -> None:

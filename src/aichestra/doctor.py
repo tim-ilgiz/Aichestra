@@ -71,11 +71,12 @@ def run_doctor(
     root: Path | None = None
     try:
         root = Path(repo_root).resolve() if repo_root else find_repo_root()
+        version_detail = _aichestra_version_detail(root)
         report.checks.append(
             CheckResult(
                 "aichestra",
                 CheckStatus.PASS,
-                f"repository root resolved: {root}",
+                f"repository root resolved: {root}; {version_detail}",
             )
         )
     except FileNotFoundError as exc:
@@ -83,6 +84,8 @@ def run_doctor(
             CheckResult("aichestra", CheckStatus.FAIL, str(exc))
         )
         return report
+
+    report.checks.append(_git_check(root))
 
     # Machine
     try:
@@ -123,8 +126,46 @@ def run_doctor(
     cfg = resolve_config(repo_root=root, project_root=project_root)
     enabled = local_enabled(cfg)
 
-    # Cloud providers
+    # Cloud providers — report each lead/control-plane distinctly (FR-061).
     providers = discover_providers_report(local_enabled=enabled)
+    by_kind = providers.get("providers") if isinstance(providers.get("providers"), dict) else {}
+    for kind_name, label in (
+        ("orca", "orca"),
+        ("codex", "codex"),
+        ("cursor", "cursor"),
+        ("local-worker", "opencode_local_worker"),
+        ("opencode", "opencode"),
+        ("ollama", "ollama"),
+    ):
+        info = by_kind.get(kind_name) if isinstance(by_kind, dict) else None
+        if not isinstance(info, dict):
+            if kind_name == "orca":
+                available = bool(providers.get("orca_available"))
+                detail = "Orca control plane discovered" if available else "Orca absent"
+            elif kind_name == "local-worker":
+                available = bool(providers.get("local_worker_available"))
+                detail = "local-worker available" if available else "local-worker absent"
+            else:
+                continue
+        else:
+            available = bool(info.get("available"))
+            detail = str(
+                info.get("version")
+                or info.get("detail")
+                or ("available" if available else "absent")
+            )
+        if kind_name == "orca" and available:
+            detail = (
+                f"{detail}; required skill: orchestration "
+                "(inspect: orca skills get orchestration --full)"
+            )
+        report.checks.append(
+            CheckResult(
+                label,
+                CheckStatus.PASS if available else CheckStatus.WARN,
+                detail,
+            )
+        )
     if providers["any_lead"]:
         report.checks.append(
             CheckResult(
@@ -139,18 +180,6 @@ def run_doctor(
                 "cloud_providers",
                 CheckStatus.WARN,
                 "no Codex/Cursor on PATH — native/orchestrated lead workflows degraded",
-            )
-        )
-    if providers["orca_available"]:
-        report.checks.append(
-            CheckResult("orca", CheckStatus.PASS, "Orca control plane discovered")
-        )
-    else:
-        report.checks.append(
-            CheckResult(
-                "orca",
-                CheckStatus.WARN,
-                "Orca not on PATH — orchestrated UI unavailable until installed",
             )
         )
 
@@ -251,7 +280,8 @@ def run_doctor(
                 CheckResult(
                     "verification",
                     CheckStatus.PASS,
-                    f"{len(verify_cmds)} verification command(s) configured",
+                    f"{len(verify_cmds)} verification command(s) configured: "
+                    + "; ".join(" ".join(c) for c in verify_cmds[:3]),
                 )
             )
         elif proj is not None:
@@ -259,12 +289,47 @@ def run_doctor(
                 CheckResult(
                     "verification",
                     CheckStatus.WARN,
-                    "project root set but no verify commands in config",
+                    "project root set but no verify/build commands in config",
                 )
             )
     except Exception as exc:  # noqa: BLE001
         report.checks.append(
             CheckResult("verification", CheckStatus.WARN, f"verify config error: {exc}")
+        )
+
+    if proj is not None:
+        report.checks.append(_speckit_project_check(proj))
+
+    # Selected model / reason from machine-local notes when present
+    try:
+        from aichestra.config.layering import load_json, machine_local_path
+
+        ml = machine_local_path(root)
+        if ml.is_file():
+            data = load_json(ml)
+            local_notes = data.get("notes") if isinstance(data.get("notes"), dict) else {}
+            selection = local_notes.get("selected_model") or data.get("local", {}).get(
+                "selected_model"
+            )
+            if selection:
+                report.checks.append(
+                    CheckResult(
+                        "selected_model",
+                        CheckStatus.PASS,
+                        f"selected_model={selection}",
+                    )
+                )
+            elif enabled:
+                report.checks.append(
+                    CheckResult(
+                        "selected_model",
+                        CheckStatus.WARN,
+                        "local enabled but no selected_model recorded yet",
+                    )
+                )
+    except Exception as exc:  # noqa: BLE001
+        report.checks.append(
+            CheckResult("selected_model", CheckStatus.WARN, f"selection read error: {exc}")
         )
 
     # Staging
@@ -291,6 +356,82 @@ def run_doctor(
         )
 
     return report
+
+
+def _aichestra_version_detail(root: Path) -> str:
+    parts: list[str] = []
+    try:
+        from importlib.metadata import version
+
+        parts.append(f"pkg={version('aichestra')}")
+    except Exception:  # noqa: BLE001
+        parts.append("pkg=unknown")
+    try:
+        import subprocess
+
+        completed = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if completed.returncode == 0 and (completed.stdout or "").strip():
+            parts.append(f"commit={(completed.stdout or '').strip()}")
+    except Exception:  # noqa: BLE001
+        parts.append("commit=unknown")
+    return ", ".join(parts)
+
+
+def _git_check(root: Path) -> CheckResult:
+    try:
+        import subprocess
+
+        completed = subprocess.run(
+            ["git", "-C", str(root), "status", "--porcelain", "-b"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if completed.returncode != 0:
+            return CheckResult("git", CheckStatus.WARN, "git status failed")
+        branch = "unknown"
+        for line in (completed.stdout or "").splitlines():
+            if line.startswith("## "):
+                branch = line[3:].strip()
+                break
+        dirty = any(
+            line and not line.startswith("## ")
+            for line in (completed.stdout or "").splitlines()
+        )
+        return CheckResult(
+            "git",
+            CheckStatus.PASS,
+            f"branch={branch}; dirty={dirty}",
+        )
+    except Exception as exc:  # noqa: BLE001
+        return CheckResult("git", CheckStatus.WARN, f"git probe error: {exc}")
+
+
+def _speckit_project_check(project_root: Path) -> CheckResult:
+    markers = [
+        project_root / ".specify",
+        project_root / "specs",
+        project_root / ".agents" / "skills" / "speckit-specify",
+    ]
+    found = [str(p.relative_to(project_root)) for p in markers if p.exists()]
+    if found:
+        return CheckResult(
+            "speckit",
+            CheckStatus.PASS,
+            "Spec Kit markers: " + ", ".join(found),
+        )
+    return CheckResult(
+        "speckit",
+        CheckStatus.WARN,
+        "no Spec Kit markers (.specify/specs) in target project",
+    )
 
 
 def format_doctor_report(report: DoctorReport) -> str:

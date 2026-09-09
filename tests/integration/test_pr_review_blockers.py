@@ -80,7 +80,7 @@ def test_classify_not_hardcoded_medium() -> None:
     assert large.scale is SpecKitScale.LARGE_HIGH_RISK
 
 
-def test_workflow_classify_uses_speckit_and_skips_orca_without_cwd() -> None:
+def test_workflow_classify_uses_speckit_and_binds_orca_run() -> None:
     orca = fake_orca("success")
     lead = fake_codex("success")
     wf = OrchestratedWorkflow(
@@ -98,11 +98,12 @@ def test_workflow_classify_uses_speckit_and_skips_orca_without_cwd() -> None:
     outcome = wf.run_phase()  # classify
     assert outcome is not None and outcome.status.value == "succeeded"
     assert wf.state.metadata["classify"]["classification"] == "small"
-    assert wf.state.metadata.get("orca_skipped_reason") == "no_project_root"
-    assert not orca.sent
+    assert wf.state.metadata.get("orca_run_id")
+    assert any((req.role or "") == "ensure_run" for req in orca.sent)
 
 
 def test_lead_review_includes_task_and_sanitized_verification(tmp_path: Path) -> None:
+    orca = fake_orca("success")
     lead = fake_codex("success")
     proj = tmp_path / "proj"
     proj.mkdir()
@@ -110,7 +111,7 @@ def test_lead_review_includes_task_and_sanitized_verification(tmp_path: Path) ->
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(
-            orca=fake_orca("success"),
+            orca=orca,
             lead=lead,
             project_root=str(proj),
             task_prompt="ACCEPTANCE: users can log in with SSO",
@@ -131,28 +132,33 @@ def test_lead_review_includes_task_and_sanitized_verification(tmp_path: Path) ->
     )
     state = wf.run_all()
     assert Phase.LEAD_REVIEW.value in state.completed, state.failed
-    review_req = lead.sent[-1]
+    assert lead.sent == []
+    review_req = next(req for req in orca.sent if (req.role or "") == "lead_review")
     bounded = review_req.bounded_prompt()
     assert "ACCEPTANCE" in bounded or "SSO" in bounded or "log in" in bounded.lower()
     assert "DEMO_FAKE_TOKEN" not in bounded
     assert "DEMO_FAKE_TOKEN" not in str(review_req.context)
 
 
-def test_quota_failure_prepares_manual_handoff() -> None:
-    lead = fake_codex("quota")
+def test_quota_failure_prepares_manual_handoff(tmp_path: Path) -> None:
+    orca = fake_orca("success")
+    proj = tmp_path / "proj"
+    proj.mkdir()
     wf = OrchestratedWorkflow(
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(
-            lead=lead,
-            project_root=None,
+            orca=orca,
+            lead=fake_codex("success"),
+            project_root=str(proj),
             task_prompt="continue feature",
             maintenance_kwargs={"change_summary": "x"},
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
-    # Classify then implement
+    # Classify then fail implement on quota via Orca (not direct lead).
     wf.run_phase()
+    orca._execute_scenario = "quota"
     outcome = wf.run_phase()  # lead_implement
     assert outcome is not None
     assert outcome.status.value == "failed"

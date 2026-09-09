@@ -109,11 +109,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     handoff_p.add_argument("--git-status", default="", help="Bounded git status text")
     handoff_p.add_argument("--git-diff", default="", help="Bounded git diff text")
+    handoff_p.add_argument(
+        "--prepare-only",
+        action="store_true",
+        help="Only emit the bounded packet / suggested command (do not run Orca)",
+    )
     handoff_p.add_argument("--json", action="store_true", default=True)
 
     orch_p = sub.add_parser(
         "orchestrate",
-        help="Start Mode C orchestrated workflow (opt-in; does not wrap native CLIs)",
+        help=(
+            "Start Mode C: create/resume one Orca Run + policy/gates "
+            "(requires Orca; does not wrap native CLIs)"
+        ),
     )
     orch_p.add_argument("--prompt", default="Mode C task", help="Task prompt for leads")
     orch_p.add_argument("--query", default="", help="Optional research query")
@@ -135,6 +143,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="PATH",
         help="Attachment path for media routing (repeatable)",
+    )
+    orch_p.add_argument(
+        "--resume-run-id",
+        default=None,
+        help="Resume an existing Orca Run id (Mode C single-run lifecycle)",
     )
     orch_p.add_argument("--no-research", action="store_true")
     orch_p.add_argument("--json", action="store_true", default=True)
@@ -240,9 +253,17 @@ def _cmd_handoff(args: argparse.Namespace) -> int:
         git_status=args.git_status or "",
         git_diff=args.git_diff or "",
     )
-    payload = prepare_manual_handoff(packet)
+    payload = prepare_manual_handoff(
+        packet,
+        execute=not bool(getattr(args, "prepare_only", False)),
+    )
     sys.stdout.write(json.dumps(payload, indent=2, default=str) + "\n")
-    return 0
+    if payload.get("executed"):
+        return 0
+    if getattr(args, "prepare_only", False):
+        return 0
+    # Attempted execute but Orca missing / failed — still emit packet; non-zero.
+    return 1 if payload.get("execute_error") else 0
 
 
 def _local_cfg_list(local_cfg: dict[str, Any], *keys: str) -> list[str] | None:
@@ -262,11 +283,7 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
     from aichestra.orchestration.modes import Mode
     from aichestra.orchestration.roles import select_lead
     from aichestra.orchestration.verification import verification_commands_from_config
-    from aichestra.orchestration.workflow import (
-        OrchestratedWorkflow,
-        WorkflowBindings,
-        bound_writer_from_lead,
-    )
+    from aichestra.orchestration.workflow import ModeCRunController, WorkflowBindings
     from aichestra.providers.codex import CodexProvider
     from aichestra.providers.cursor import CursorProvider
     from aichestra.providers.discovery import discover_providers
@@ -322,17 +339,8 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         elif selection.lead and selection.lead.value == "cursor":
             lead = CursorProvider()
 
-    # Prefer local_worker for writers when available; else lead (review P2#12).
-    writer_adapter: object | None = None
-    if local is not None:
-        try:
-            if local.probe().available:
-                writer_adapter = local
-        except Exception:
-            writer_adapter = None
-    if writer_adapter is None and lead is not None:
-        writer_adapter = lead
-
+    # Mode C: Orca is the control plane. lead/local_worker are discovery metadata
+    # and Mode A seams — agent work is not dispatched through them here.
     bindings = WorkflowBindings(
         orca=orca,  # type: ignore[arg-type]
         lead=lead,  # type: ignore[arg-type]
@@ -342,18 +350,10 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         task_prompt=args.prompt,
         research_query=args.query,
         attachments=attachments,
+        resume_run_id=getattr(args, "resume_run_id", None),
         verification_commands=verification_commands_from_config(cfg),
-        writer_fn=(
-            bound_writer_from_lead(
-                writer_adapter,  # type: ignore[arg-type]
-                project_root=str(project_root) if project_root else None,
-                attachments=attachments,
-            )
-            if writer_adapter is not None
-            else None
-        ),
     )
-    wf = OrchestratedWorkflow(
+    wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         research_useful=not args.no_research,
         bindings=bindings,
@@ -368,6 +368,8 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         "fake_providers": use_fakes,
         "verification_commands": bindings.verification_commands,
         "attachments": list(attachments),
+        "orca_run_id": state.metadata.get("orca_run_id"),
+        "resume_run_id": bindings.resume_run_id,
     }
     sys.stdout.write(json.dumps(payload, indent=2, default=str) + "\n")
     return 0 if not state.failed and not state.stopped else 1

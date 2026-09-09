@@ -60,8 +60,13 @@ def build_handoff_packet(**kwargs: Any) -> HandoffPacket:
     return packet
 
 
-def prepare_manual_handoff(packet: HandoffPacket) -> dict[str, Any]:
-    """Return a one-action manual handoff payload for the operator.
+def prepare_manual_handoff(
+    packet: HandoffPacket,
+    *,
+    execute: bool = False,
+    orca_binary: str | None = None,
+) -> dict[str, Any]:
+    """Return a one-action handoff payload; optionally execute Orca worktree create.
 
     Prefer Orca's native full-handoff primitive when Orca is available::
 
@@ -70,11 +75,12 @@ def prepare_manual_handoff(packet: HandoffPacket) -> dict[str, Any]:
     The bounded packet is serialized into the prompt brief — not a full transcript.
     """
     brief = _format_handoff_brief(packet)
+    name = "aichestra-handoff"
     suggested = (
-        "orca worktree create --name aichestra-handoff --no-parent "
+        f"orca worktree create --name {name} --no-parent "
         "--agent cursor --prompt <bounded-brief> --json"
     )
-    return {
+    payload: dict[str, Any] = {
         "mode": "manual_one_action",
         "automatic_quota_fallback_reliable": automatic_quota_fallback_reliable,
         "instruction": (
@@ -85,7 +91,60 @@ def prepare_manual_handoff(packet: HandoffPacket) -> dict[str, Any]:
         "suggested_orca_command": suggested,
         "bounded_brief": brief,
         "packet": packet.to_dict(),
+        "executed": False,
     }
+    if not execute:
+        return payload
+
+    binary = orca_binary
+    if not binary:
+        try:
+            from aichestra.providers.orca import resolve_orca_binary
+
+            binary = resolve_orca_binary()
+        except Exception:  # noqa: BLE001
+            binary = None
+    if not binary:
+        payload["execute_error"] = "Orca binary not found; handoff packet prepared only"
+        return payload
+
+    import subprocess
+
+    argv = [
+        binary,
+        "worktree",
+        "create",
+        "--name",
+        name,
+        "--no-parent",
+        "--agent",
+        "cursor",
+        "--prompt",
+        brief,
+        "--setup",
+        "skip",
+        "--json",
+    ]
+    try:
+        completed = subprocess.run(
+            argv,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        payload["executed"] = completed.returncode == 0
+        payload["orca_argv"] = argv[:8] + ["--prompt", "<bounded-brief>", "--setup", "skip", "--json"]
+        payload["orca_exit_code"] = completed.returncode
+        payload["orca_stdout"] = (completed.stdout or "")[:4000]
+        payload["orca_stderr"] = (completed.stderr or "")[:2000]
+        if completed.returncode != 0:
+            payload["execute_error"] = (
+                f"orca worktree create exited {completed.returncode}"
+            )
+    except Exception as exc:  # noqa: BLE001
+        payload["execute_error"] = str(exc)
+    return payload
 
 
 def _format_handoff_brief(packet: HandoffPacket) -> str:

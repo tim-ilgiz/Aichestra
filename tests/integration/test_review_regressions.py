@@ -129,25 +129,33 @@ def test_change_signals_from_paths_for_auth_api() -> None:
     assert signals["touches_behavior"] is True
     assert signals["touches_public_api"] is True
     assert signals["risk"] == "high"
-    assert signals["existing_tests_cover"] is True
+    # Path presence alone must not claim coverage (FR-023/055).
+    assert signals["existing_tests_cover"] is False
 
 
-def test_maintenance_uses_change_signals_not_defaults() -> None:
+def test_maintenance_uses_change_signals_not_defaults(tmp_path: Path) -> None:
     wf = OrchestratedWorkflow(
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(
             orca=fake_orca("success"),
             lead=fake_codex("success"),
+            project_root=str(tmp_path),
             task_prompt="change authorization behavior",
             # No maintenance_kwargs — must infer from summary / paths.
             writer_fn=lambda _state, _phase: fake_codex("success").execute_task(
                 ProviderTaskRequest(prompt="write")
             ),
+            verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
     # Jump after lead implement.
     while wf.state.current_phase not in {Phase.MAINTENANCE_REVIEW, None}:
+        if wf.state.current_phase is Phase.LEAD_IMPLEMENT:
+            wf.state.metadata["brief_satisfied"] = True
+            wf.state.metadata["plan_satisfied"] = True
+            wf.state.metadata["clarify_satisfied"] = True
+            wf.state.metadata["tasks_satisfied"] = True
         outcome = wf.run_phase()
         assert outcome is not None
         assert outcome.status is not PhaseStatus.FAILED
@@ -161,13 +169,15 @@ def test_maintenance_uses_change_signals_not_defaults() -> None:
     assert wf.state.metadata["change_signals"]["effective"]["touches_behavior"] is True
 
 
-def test_required_writer_blocks_without_executor() -> None:
+def test_required_writer_dispatches_via_orca(tmp_path: Path) -> None:
+    orca = fake_orca("success")
     wf = OrchestratedWorkflow(
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(
-            orca=fake_orca("success"),
+            orca=orca,
             lead=fake_codex("success"),
+            project_root=str(tmp_path),
             task_prompt="feature",
             maintenance_kwargs={
                 "change_summary": "feature",
@@ -176,12 +186,12 @@ def test_required_writer_blocks_without_executor() -> None:
                 "risk": "high",
             },
             writer_fn=None,
+            verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
     state = wf.run_all()
-    assert Phase.TEST_WRITER.value in state.failed
-    detail = state.phase_outcomes[Phase.TEST_WRITER.value].detail
-    assert "no writer executor" in detail
+    assert Phase.TEST_WRITER.value in state.completed
+    assert any((req.role or "") == "test_writer" for req in orca.sent)
 
 
 def test_orchestrate_separates_repo_and_project_roots(

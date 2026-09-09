@@ -391,3 +391,101 @@ maintenance-reviewer gate, honest local-worker research labeling.
 - [x] T080 HIGH: Invoke local-worker for research when selected or keep
       `PROVIDER=filesystem`; honor `--query` inside research
       (FR-021/053); update CLI `research` / add `orchestrate`
+
+## Phase 18: Architecture remediation (Orca control plane)
+
+**Purpose**: Close PR #1 P0–P1 gaps against target architecture —
+Aichestra is policy/bootstrap/integration; Mode C is one Orca Run with
+tasks/workers/worktrees; Mode A remains native Codex/Cursor outside Mode C.
+Green CI with fake providers must not encode Orca bypass.
+
+### P0 — Mode C / Orca
+
+- [x] T081 CRITICAL: Mode C agent phases (implement, review, writers) execute
+      only through Orca; on Orca UNAVAILABLE fail Mode C — do not fall back to
+      direct Codex/Cursor `_run_lead` (FR-001/043/045; Constitution VI). Mode A
+      remains native and separate.
+- [x] T082 CRITICAL: Create exactly one Orca Run per Mode C workflow; persist
+      `orca_run_id` on `WorkflowState`; reuse for all task-create/worker-start;
+      stop `_report_orca_phase` / control_plane from creating additional Runs
+      (FR-001/045).
+- [x] T083 CRITICAL: After `worker-start --worktree new-child`, capture
+      worktree path/id from receipt; adopt as effective project root for
+      maintenance-reviewer, writers, and verification; record explicit
+      integration policy (continue on child — no silent verify-on-parent)
+      (FR-057).
+- [x] T084 CRITICAL: Replace tests that require Orca-unavailable→lead bypass
+      (`test_phase_succeeded_only_after_operation_ok` and similar); add contract
+      tests: Mode C without Orca fails; one run_id reused; worktree adoption
+      switches effective root (FR-045/062).
+
+### P1 — policy fidelity
+
+- [x] T085 HIGH: maintenance-reviewer inputs include implementation diff (not
+      only changed paths), and do not treat “any test file touched” as
+      `existing_tests_cover=True` without stronger signal (FR-023/055).
+- [x] T086 HIGH: Spec Kit MEDIUM/LARGE execute real brief/plan/tasks gates
+      (or hard-block implement) rather than metadata-only stubs (FR-028/063).
+      *(hard-block until metadata statuses ready/approved or *_satisfied)*
+- [ ] T087 HIGH: Deliver attachments via Orca/native file capability (not only
+      path text in prompt); enforce vision provider_hint (FR-058).
+      *(partial: bytes_delivered=false honesty + media_delivery note; native
+      attach still TODO)*
+- [x] T088 HIGH: `aichestra handoff` performs one-action Orca
+      `worktree create --agent cursor --prompt …` when Orca available; JSON
+      packet alone is insufficient (FR-035/036).
+      *(default execute; `--prepare-only` keeps packet-only)*
+- [x] T089 HIGH: Bootstrap performs or clearly reports remaining install /
+      Orca+provider integration / local-worker / smoke steps; do not mark
+      download approval as download (FR-013/014; SC truthful status).
+- [x] T090 HIGH: Doctor reports version/commit, Git, Orca+skills, Codex,
+      Cursor, OpenCode, models, selected model+reason, Spec Kit detection,
+      build/test commands per FR-040/061.
+- [x] T091 HIGH: `smoke_mac.py` labels LIVE only after real execute_task (or
+      rename probe-only to DISCOVERED); LIVE ≠ DISCOVERED (Constitution V).
+      *(probe → DISCOVERED; `AICHESTRA_SMOKE_EXECUTE=1` → LIVE on ok execute)*
+
+### P2 — follow-ups (non-blocking for architecture merge bar if P0+P1 done)
+
+- [ ] T092 MEDIUM: LocalWorkerProvider selects via LocalRuntime abstraction
+      (not hard-wired Ollama) (FR-047/051).
+- [ ] T093 MEDIUM: Expand `run_cli_task` failure classification for NETWORK /
+      CRASH / CANCEL (FR-062 / graceful degradation).
+- [ ] T094 MEDIUM: Windows profiler: CIM/PowerShell fallback when WMIC absent.
+- [ ] T095 LOW: Fold review-history regression tests into canonical suites
+      (orca/workflow/bootstrap/security) per anti-bloat policy.
+
+## Phase 19: Structural Mode C — one Orca Run controller
+
+**Purpose**: Stop treating symptom patches as architecture. Make Mode C a thin
+controller over **one Orca Run**; Aichestra owns policy + deterministic gates
+only. Re-align artifacts already updated in this phase; complete code/tests.
+
+### P0 — ownership model
+
+- [x] T096 CRITICAL: Rename/document `OrchestratedWorkflow` as
+      `ModeCRunController`; state that canonical lifecycle is `orca_run_id`
+      (resume supported); local phases are policy/gate schedule mirrors, not a
+      competing orchestrator (FR-001/043/045/054; Constitution VI).
+- [x] T097 CRITICAL: Mode C agent steps (research, implement, writers,
+      lead_review) dispatch **only** via Orca under the same Run; remove
+      direct `local_worker` / `writer_fn`→lead / `_run_lead` Mode C paths
+      (FR-045/054).
+- [x] T098 CRITICAL: Lead review + maintenance gates receive adopted-worktree
+      change signals (diff/paths/status) — never silent parent-checkout review
+      when a child worktree was created (FR-055/057).
+- [x] T099 CRITICAL: Rewrite integration/contract tests that encode
+      dual-orchestrator fan-out (`lead.sent` / `worker.sent` as Mode C agents);
+      assert one `run_id`, Orca-only agent dispatch, worktree adoption
+      (FR-045/062).
+
+### P1 — remaining fidelity
+
+- [ ] T100 HIGH: Spec Kit LARGE path invokes real skill/command flow or remains
+      hard-blocked until artifacts exist — no `status=recorded` fake success
+      (FR-028/063).
+- [ ] T101 HIGH: Attachments delivered via Orca native attach when available
+      (close T087) (FR-058).
+- [x] T102 HIGH: Governance ADR/SPEC pending has an Orca task continuation path
+      (not dead-end) (FR-055).
+      *(one Orca governance task under same Run before hard-stop)*

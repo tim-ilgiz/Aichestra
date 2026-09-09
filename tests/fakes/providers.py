@@ -77,14 +77,42 @@ class FakeProvider(ProviderAdapter):
     ) -> ProviderTaskResult:
         self.sent.append(request)
         scenario = self._execute_scenario.lower().strip()
+        role = (request.role or "").strip().lower()
+        run_id = request.context.get("run_id")
+        if not (isinstance(run_id, str) and run_id.strip()):
+            run_id = f"fake-run-{session.session_id[:8]}"
+        else:
+            run_id = run_id.strip()
+
         if scenario in {"success", "ok", "available"}:
+            meta: dict = {"fake": True, "run_id": run_id}
+            if role in {"ensure_run", "control_plane", "classify"}:
+                meta["orca_command"] = "orchestration run-create"
+                meta["reused"] = False
+            elif role in {"phase_report", "status_ping"}:
+                meta["orca_command"] = "noop-phase-report"
+            else:
+                cwd = request.cwd
+                # Fakes keep the same checkout so verification can run; real Orca
+                # returns a distinct managed child path that workflow then adopts.
+                worktree_path = cwd or f"/tmp/fake-orca-worktree-{session.session_id[:8]}"
+                meta.update(
+                    {
+                        "orca_command": "orchestration worker-start",
+                        "task_id": f"fake-task-{len(self.sent)}",
+                        "dispatch_id": f"fake-dispatch-{len(self.sent)}",
+                        "worktree_path": worktree_path,
+                        "worktree_id": f"fake-repo::{worktree_path}",
+                        "integration_policy": "adopt_child_worktree",
+                    }
+                )
             return ProviderTaskResult(
                 ok=True,
                 output=self._execute_output,
                 failure=FailureClass.NONE,
                 detail="fake execution ok",
                 session_id=session.session_id,
-                metadata={"fake": True},
+                metadata=meta,
             )
         failure_map = {
             "unavailable": FailureClass.UNAVAILABLE,
@@ -103,7 +131,7 @@ class FakeProvider(ProviderAdapter):
             failure=failure,
             detail=f"fake execution {failure.value}",
             session_id=session.session_id,
-            metadata={"fake": True},
+            metadata={"fake": True, "run_id": run_id},
         )
 
 

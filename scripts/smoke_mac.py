@@ -31,12 +31,12 @@ from aichestra.repo import find_repo_root
 
 
 def _execution_live(adapter) -> tuple[str, dict]:
-    """Label LIVE only when probe.available and supports_execution (if present)."""
+    """Probe-only → DISCOVERED; LIVE only after successful execute_task."""
     status = adapter.probe()
     meta = {
         "available": status.available,
         "detail": status.detail,
-        "discovery_note": "discovery≠task execution",
+        "discovery_note": "discovery≠task execution; LIVE requires execute_task",
     }
     supports = True
     if hasattr(adapter, "supports_execution"):
@@ -46,11 +46,36 @@ def _execution_live(adapter) -> tuple[str, dict]:
             supports = False
             meta["supports_execution_error"] = str(exc)
     meta["supports_execution"] = supports
-    if status.available and supports:
-        return "LIVE", meta
-    if status.available and not supports:
+    if not status.available:
+        return "ABSENT", meta
+    if not supports:
         return "DISCOVERED_NOT_EXECUTABLE", meta
-    return "ABSENT", meta
+    return "DISCOVERED", meta
+
+
+def _try_execute_live(adapter) -> tuple[str, dict]:
+    """Optional real execute_task — only this may upgrade label to LIVE."""
+    label, meta = _execution_live(adapter)
+    if label != "DISCOVERED":
+        return label, meta
+    try:
+        result = adapter.execute_task(
+            ProviderTaskRequest(
+                prompt="Aichestra smoke dry execute — no side effects.",
+                role="smoke",
+                read_only=True,
+                timeout_seconds=15.0,
+            )
+        )
+        meta["execute_ok"] = result.ok
+        meta["execute_detail"] = result.detail
+        meta["execute_failure"] = result.failure.value
+        if result.ok:
+            return "LIVE", meta
+        return "DISCOVERED_EXECUTE_FAILED", meta
+    except Exception as exc:  # noqa: BLE001
+        meta["execute_error"] = str(exc)
+        return "DISCOVERED_EXECUTE_ERROR", meta
 
 
 def main() -> int:
@@ -76,37 +101,21 @@ def main() -> int:
             live_components["memory_available"] = "LIVE"
         live_components["doctor"] = "LIVE" if doctor.ok else "LIVE_WITH_WARNINGS"
         for adapter in adapters:
-            label, meta = _execution_live(adapter)
+            if os.environ.get("AICHESTRA_SMOKE_EXECUTE", "").strip() in {
+                "1",
+                "true",
+                "yes",
+            }:
+                label, meta = _try_execute_live(adapter)
+                execute_results[adapter.kind.value] = {
+                    "ok": meta.get("execute_ok"),
+                    "detail": meta.get("execute_detail") or meta.get("execute_error"),
+                    "failure": meta.get("execute_failure"),
+                }
+            else:
+                label, meta = _execution_live(adapter)
             live_components[adapter.kind.value] = label
             provider_meta[adapter.kind.value] = meta
-
-        # Optional dry fake execute — off by default (non-consuming).
-        if os.environ.get("AICHESTRA_SMOKE_EXECUTE", "").strip() in {"1", "true", "yes"}:
-            for adapter in adapters:
-                status = adapter.probe()
-                if not status.available:
-                    continue
-                if hasattr(adapter, "supports_execution") and not adapter.supports_execution():
-                    continue
-                try:
-                    result = adapter.execute_task(
-                        ProviderTaskRequest(
-                            prompt="Aichestra smoke dry execute — no side effects.",
-                            role="smoke",
-                            read_only=True,
-                            timeout_seconds=15.0,
-                        )
-                    )
-                    execute_results[adapter.kind.value] = {
-                        "ok": result.ok,
-                        "detail": result.detail,
-                        "failure": result.failure.value,
-                    }
-                except Exception as exc:  # noqa: BLE001
-                    execute_results[adapter.kind.value] = {
-                        "ok": False,
-                        "detail": f"execute error: {exc}",
-                    }
     else:
         live_components["note"] = (
             f"This smoke script was executed on {system}; "

@@ -40,11 +40,13 @@ paths.
 
 A developer can use three distinct modes: (A) native Codex/Cursor without
 Aichestra orchestration, (B) Orca interactive with one agent and no automatic
-full orchestration, and (C) explicitly started Aichestra orchestrated workflow.
-Orca is the opt-in control plane. Codex is preferred lead, Cursor is fallback,
-and OpenCode+local-runtime is an optional worker. Missing providers do not
-disable the whole platform. Aichestra does not require Docker or a VM to run,
-and does not add a second general-purpose orchestrator on top of Orca.
+full orchestration, and (C) an explicitly started Mode C session that creates
+or resumes **one Orca Run** as the orchestration engine. Aichestra supplies
+policy, bootstrap, and deterministic gates; it MUST NOT act as a second
+general-purpose orchestrator. Orca is the opt-in control plane. Codex is
+preferred lead, Cursor is fallback, and OpenCode+local-runtime is an optional
+worker. Missing providers do not disable the whole platform. Aichestra does
+not require Docker or a VM to run.
 
 **Why this priority**: Provider availability and interaction style vary by
 machine and account.
@@ -55,36 +57,44 @@ asserted by contract tests.
 
 **Acceptance Scenarios**:
 
-1. **Given** Orca is available, **When** the developer starts orchestrated
-   work (Mode C), **Then** Orca is the primary interactive UI/control plane.
+1. **Given** Orca is available, **When** the developer starts Mode C,
+   **Then** Aichestra creates or resumes exactly one Orca Run and Orca is the
+   primary interactive UI/control plane for agent work.
 2. **Given** the developer opens Orca and works with one agent (Mode B),
-   **When** no orchestrated workflow is started, **Then** full multi-role
-   orchestration is not automatically started.
+   **When** no Mode C Run is started, **Then** full multi-role orchestration
+   is not automatically started.
 3. **Given** Codex is available, **When** a lead is selected, **Then** Codex is
    preferred.
 4. **Given** Codex is unavailable and Cursor is available, **When** a lead is
    selected, **Then** Cursor is used as fallback.
-5. **Given** local inference is disabled or missing, **When** orchestrated
-   workflows run, **Then** the platform remains useful without the local worker.
+5. **Given** local inference is disabled or missing, **When** Mode C runs,
+   **Then** the platform remains useful without the local worker (other Orca
+   agents / gates still apply).
 6. **Given** native Codex or Cursor CLI/IDE usage (Mode A), **When** the
    developer works outside Orca, **Then** native commands remain unchanged and
    unintercepted.
 7. **Given** cloud-only configuration, **When** local runtime is absent,
    **Then** research/maintenance utilities that require local inference degrade
    without blocking lead workflows.
+8. **Given** Mode C is requested and Orca is unavailable, **When** Mode C
+   starts, **Then** it fails closed with a clear ORCA_UNAVAILABLE outcome and
+   MUST NOT fall back to direct Codex/Cursor (Mode A remains separate).
 
 ---
 
 ### User Story 3 - Research, review, verification, and anti-bloat gates (Priority: P2)
 
-Orchestrated development follows: classify → local research if useful → lead
-implementation → maintenance-reviewer gate → optional test/docs workers →
-deterministic verification → lead review. The repository-researcher prefers
-the local worker and produces a compact structured summary. The
-maintenance-reviewer emits structured TEST/DOC/ADR/SPEC decisions and may
-explicitly choose none. Tests and docs are never unconditional stages. A
-verification-runner executes real target-repo commands; LLM opinion is not
-authoritative for pass/fail.
+Mode C policy schedule is: classify → research if useful → lead implementation
+→ maintenance-reviewer gate → optional test/docs workers → deterministic
+verification → lead review. **Agent steps** (research, implement, writers,
+lead review) execute as tasks/workers on the **same Orca Run** (typically in
+an Orca child worktree). **Deterministic gates** (classify heuristics,
+maintenance-reviewer, verification-runner) run in Aichestra against the
+adopted worktree. The repository-researcher prefers the local worker via Orca
+and produces a compact structured summary. The maintenance-reviewer emits
+structured TEST/DOC/ADR/SPEC decisions and may explicitly choose none. Tests
+and docs are never unconditional stages. A verification-runner executes real
+target-repo commands; LLM opinion is not authoritative for pass/fail.
 
 **Why this priority**: Controls quality and prevents documentation/test bloat.
 
@@ -275,11 +285,13 @@ multi-model selection.
 - **FR-042**: The project includes a reusable later maintenance-audit workflow
   for reducing test/documentation/spec bloat in target projects.
 - **FR-043**: Three distinct modes are supported: Native (A), Orca Interactive
-  single-agent (B), and explicitly started Orchestrated workflow (C).
+  single-agent (B), and Mode C (explicitly started or resumed **one Orca Run**
+  with Aichestra policy/gates — not a second workflow engine).
 - **FR-044**: Aichestra itself MUST NOT require Docker or a virtual machine to
   run; WSL MUST NOT be required for Windows.
 - **FR-045**: Aichestra MUST NOT build a duplicate general-purpose orchestrator
-  or require CAO; adapters must be the smallest reliable wrappers over Orca.
+  or require CAO; Mode C agent work MUST go through Orca under one Run;
+  adapters must be the smallest reliable wrappers over Orca.
 - **FR-046**: A deterministic machine-profiler obtains OS, architecture, CPU,
   memory, disk, and GPU/accelerator facts via ordinary system APIs (not an LLM).
 - **FR-047**: Local-runtime-discovery supports Ollama initially and is
@@ -299,9 +311,10 @@ multi-model selection.
 - **FR-053**: A reusable `repository-researcher` role prefers local-worker,
   is normally read-only for production code, and emits a compact structured
   research summary.
-- **FR-054**: Default orchestrated flow is classify → research if useful → lead
+- **FR-054**: Mode C policy schedule is classify → research if useful → lead
   implement → maintenance-reviewer → optional test/docs workers → deterministic
-  verification → lead review; tests/docs are not unconditional.
+  verification → lead review; agent steps are Orca tasks on one Run; gates are
+  local/deterministic on the adopted worktree; tests/docs are not unconditional.
 - **FR-055**: maintenance-reviewer emits structured TEST_DECISION, TEST_SCOPE,
   DOC_DECISION, DOC_TARGETS, ADR_REQUIRED, SPEC_UPDATE, and RATIONALE.
 - **FR-056**: A verification-runner executes real target-repository build/test

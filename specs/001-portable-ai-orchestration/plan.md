@@ -109,7 +109,7 @@ src/aichestra/
 │   └── local_worker.py     # OpenCode + local runtime optional
 ├── orchestration/
 │   ├── modes.py            # Native / Interactive / Orchestrated
-│   ├── workflow.py         # default orchestrated flow
+│   ├── workflow.py         # Mode C thin run controller (policy + gates)
 │   ├── roles.py
 │   ├── research_compact.py # repository-researcher + compaction
 │   ├── maintenance_reviewer.py
@@ -177,7 +177,9 @@ Resolution never requires a fixed home-directory string in tracked files.
 
 - **A Native**: Codex/Cursor used directly; Aichestra does not intercept.
 - **B Orca Interactive**: single-agent session; no automatic full orchestration.
-- **C Orchestrated**: explicit Aichestra workflow start coordinates roles.
+- **C Mode C**: Aichestra creates/resumes **one Orca Run**, applies policy and
+  deterministic gates; Orca owns tasks/workers/worktrees/agent scheduling.
+  Mode C fails closed if Orca is unavailable (no direct Codex/Cursor fallback).
 
 ### Provider discovery
 
@@ -189,8 +191,11 @@ invocation paths are not wrapped globally.
 ### Orca integration
 
 Inspect current installed/version-matched Orca documentation before wiring
-adapters. Prefer Orca primitives for sessions, worktrees, diffs, handoff, and
-provider visibility. Smallest reliable adapters only; no CAO layer.
+adapters. Prefer Orca primitives for runs, tasks, workers, worktrees, diffs,
+handoff, and provider visibility. **ONE user task = ONE Orca Run** (create once,
+reuse `run_id` for all task-create/worker-start; resume by `run_id`).
+Child worktree results MUST be adopted before verification/reviewer.
+Smallest reliable adapters only; no CAO / second workflow engine.
 
 ### Machine profiler + local runtime
 
@@ -200,10 +205,16 @@ Selection is capability-based. Hardware profiles suggest model class (M4 Pro
 24 GB example → conservative ~14B, one worker) without committing weights,
 host paths, or global mandatory model ids.
 
-### Default orchestrated flow
+### Mode C policy schedule (not a second orchestrator)
 
-classify → local research if useful → lead (Codex→Cursor) → maintenance-reviewer
-→ optional test/docs writers → verification-runner → lead review.
+Policy order: classify → research if useful → lead (Codex→Cursor via Orca) →
+maintenance-reviewer → optional test/docs writers → verification-runner →
+lead review.
+
+- **Agent steps** → Orca tasks/workers on the same Run (child worktree for edits).
+- **Gates** → Aichestra local: Spec Kit scale/heuristics, maintenance-reviewer,
+  verification-runner (exit codes), against adopted worktree.
+- Canonical lifecycle identity is the Orca `run_id`, not a Python phase engine.
 
 ### Staging safety
 

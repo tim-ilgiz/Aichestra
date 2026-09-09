@@ -46,10 +46,11 @@ python -m aichestra update          # after git pull; preserves machine-local
 
 1. **Native** — run `codex` / Cursor IDE / `cursor` as usual (unchanged).
 2. **Orca interactive** — open Orca app; work with one agent (`orca open` / UI).
-3. **Orchestrated** — start Mode C explicitly:
+3. **Mode C** — start explicitly (requires Orca):
    `python -m aichestra orchestrate --prompt "…" --project-root /path/to/target`
-   (opt-in; does not wrap native `codex`/`cursor` CLIs). Orca is the control
-   plane when available; maintenance-reviewer gates tests/docs.
+   Creates **one Orca Run**; agent work goes through Orca tasks/workers/worktrees;
+   Aichestra applies policy + deterministic gates. No direct Codex/Cursor
+   fallback in Mode C (use Mode A for native tools).
 4. **Codex→Cursor handoff** — one-action manual handoff builds a bounded brief;
    prefer Orca: `orca worktree create --no-parent --agent cursor --prompt …`.
 5. **Disable local inference** — keep `local.enabled: false` in
@@ -88,9 +89,9 @@ python scripts/smoke_mac.py         # Mac-oriented live smoke report
 |------|------|----------|
 | A | `native` | Use Codex/Cursor directly. Aichestra does **not** intercept native CLIs. |
 | B | `orca_interactive` | Single-agent Orca session; no automatic full multi-role orchestration. |
-| C | `orchestrated` | Explicitly started Aichestra workflow (classify → research → lead → maintenance-reviewer → optional writers → verification → lead review). |
+| C | `orchestrated` | One Orca Run + Aichestra policy/gates (agent steps via Orca; local maintenance-reviewer + verification on adopted worktree). |
 
-Orca is opt-in. Codex is the preferred lead; Cursor is the fallback.
+Orca is opt-in and **required for Mode C**. Codex is the preferred lead; Cursor is the fallback.
 Quota handoff Codex→Cursor is **manual one-action** in v1
 (`automatic_quota_fallback_reliable = false`).
 
@@ -113,10 +114,11 @@ Do not treat CI green as live OS smoke for Windows/Linux.
 
 ## Architecture (high level)
 
-- **Orca** — opt-in UI / orchestration control plane
-- **Codex** — preferred lead
+- **Orca** — opt-in UI / **orchestration engine** for Mode C (one Run per task)
+- **Aichestra** — policy, bootstrap, discovery, deterministic gates (not a second orchestrator)
+- **Codex** — preferred lead (via Orca in Mode C; native in Mode A)
 - **Cursor** — fallback lead
-- **OpenCode + Ollama** — optional `local-worker`
+- **OpenCode + Ollama** — optional `local-worker` (via Orca in Mode C)
 - **maintenance-reviewer** — structured TEST/DOC/ADR/SPEC gate (may choose none/none)
 - **verification-runner** — real subprocess commands; exit codes are authoritative
 - Native Codex/Cursor usage remains independent of Orca

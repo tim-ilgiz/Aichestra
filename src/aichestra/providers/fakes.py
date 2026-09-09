@@ -72,7 +72,17 @@ class FakeModeCProvider(ProviderAdapter):
             failure=FailureClass.NONE,
             detail="fake execution ok",
             session_id=session.session_id,
-            metadata={"fake": True},
+            metadata={
+                "fake": True,
+                "run_id": (
+                    request.context.get("run_id")
+                    if isinstance(request.context.get("run_id"), str)
+                    else f"fake-run-{session.session_id[:8]}"
+                ),
+                "worktree_path": request.cwd,
+                "worktree_id": f"fake-repo::{request.cwd}" if request.cwd else None,
+                "integration_policy": "adopt_child_worktree",
+            },
         )
 
 

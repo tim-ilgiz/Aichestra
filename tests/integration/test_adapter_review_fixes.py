@@ -44,12 +44,16 @@ def test_orca_argv_uses_orchestration_not_run() -> None:
     assert "--session" not in argv
 
 
-def test_orca_write_argv_uses_worktree_create() -> None:
-    req = ProviderTaskRequest(prompt="implement feature", role="lead_implement")
+def test_orca_write_argv_uses_worker_start() -> None:
+    req = ProviderTaskRequest(
+        prompt="implement feature",
+        role="lead_implement",
+        context={"task_id": "t1", "run_id": "r1"},
+    )
     argv = build_orca_argv("/bin/orca", req, session_id="abcd1234-ffff")
-    assert argv[1:3] == ["worktree", "create"]
+    assert argv[1:3] == ["orchestration", "worker-start"]
     assert "--agent" in argv
-    assert "--prompt" in argv
+    assert "--worktree" in argv
 
 
 def test_codex_sandbox_workspace_write_for_edits(monkeypatch: pytest.MonkeyPatch) -> None:

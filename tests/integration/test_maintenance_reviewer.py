@@ -71,7 +71,7 @@ def test_writers_skip_on_none() -> None:
     assert docs.action == "skip"
 
 
-def test_workflow_skips_writers_when_none() -> None:
+def test_workflow_skips_writers_when_none(tmp_path) -> None:
     import sys
 
     from aichestra.orchestration.workflow import PhaseStatus, WorkflowBindings
@@ -83,6 +83,7 @@ def test_workflow_skips_writers_when_none() -> None:
         bindings=WorkflowBindings(
             orca=fake_orca("success"),
             lead=fake_codex("success"),
+            project_root=str(tmp_path),
             task_prompt="noop typo",
             maintenance_kwargs={"change_summary": "noop"},
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],

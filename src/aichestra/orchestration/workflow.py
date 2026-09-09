@@ -1,4 +1,10 @@
-"""Default orchestrated workflow phases (FR-054) with real Mode C execution."""
+"""Mode C thin run controller: one Orca Run + policy/deterministic gates (FR-054).
+
+Aichestra MUST NOT act as a second general-purpose orchestrator. Canonical
+lifecycle identity is the Orca ``run_id``. Local phase progression mirrors the
+policy gate schedule; agent work is dispatched only through the bound Orca
+adapter under that Run.
+"""
 
 from __future__ import annotations
 
@@ -167,7 +173,7 @@ class WorkflowState:
 
 @dataclass
 class WorkflowBindings:
-    """Injectable Mode C executors — fakes in CI, real adapters on operator machines."""
+    """Injectable Mode C bindings — Orca required; fakes in CI."""
 
     orca: ProviderAdapter | None = None
     lead: ProviderAdapter | None = None
@@ -177,15 +183,23 @@ class WorkflowBindings:
     task_prompt: str = ""
     research_query: str = ""
     attachments: tuple[str, ...] = ()
+    resume_run_id: str | None = None
     classify_fn: Callable[[WorkflowState], dict[str, Any]] | None = None
     research_fn: Callable[[WorkflowState], ResearchSummary] | None = None
     maintenance_kwargs: dict[str, Any] = field(default_factory=dict)
     verification_commands: list[list[str]] = field(default_factory=list)
+    # Deprecated Mode C seam — ignored when orca is bound (writers go via Orca).
     writer_fn: Callable[[WorkflowState, Phase], ProviderTaskResult] | None = None
 
 
-class OrchestratedWorkflow:
-    """Coordinates Mode C: real phase execution with explicit phase status."""
+class ModeCRunController:
+    """Thin Mode C controller over one Orca Run + local policy/gates.
+
+    Agent steps (research, implement, writers, lead_review) execute only through
+    the Orca adapter under a single ``orca_run_id``. Deterministic gates
+    (classify heuristics, maintenance-reviewer, verification-runner) run locally
+    against the adopted child worktree when present.
+    """
 
     def __init__(
         self,
@@ -196,7 +210,7 @@ class OrchestratedWorkflow:
     ) -> None:
         if not starts_full_orchestration(mode):
             raise ValueError(
-                f"Orchestrated workflow requires Mode C; got {mode.value}"
+                f"Mode C run controller requires Mode C; got {mode.value}"
             )
         self.bindings = bindings or WorkflowBindings()
         self.state = WorkflowState(
@@ -205,6 +219,11 @@ class OrchestratedWorkflow:
         )
         self.state.metadata["task_prompt"] = self.bindings.task_prompt
         self.state.metadata["research_useful_default"] = research_useful
+        self.state.metadata["canonical_orchestration"] = "orca_run"
+        self.state.metadata["controller"] = "ModeCRunController"
+        if self.bindings.resume_run_id and self.bindings.resume_run_id.strip():
+            self.state.metadata["orca_run_id"] = self.bindings.resume_run_id.strip()
+            self.state.metadata["orca_run_resumed"] = True
         for phase in self.state.phases:
             self.state.phase_outcomes[phase.value] = PhaseOutcome(
                 phase=phase, status=PhaseStatus.PENDING
@@ -374,19 +393,7 @@ class OrchestratedWorkflow:
             return self._phase_classify()
 
         if phase is Phase.RESEARCH:
-            if bindings.research_fn:
-                summary = bindings.research_fn(self.state)
-            else:
-                root = bindings.project_root or "."
-                summary = research_paths(
-                    root,
-                    query=bindings.research_query,
-                    prefer_local_worker=True,
-                    local_worker=bindings.local_worker,
-                )
-            payload = summary.to_dict()
-            self.state.metadata["research"] = payload
-            return {"ok": True, "detail": "research compacted", "research": payload}
+            return self._phase_research()
 
         if phase is Phase.LEAD_IMPLEMENT:
             return self._phase_lead_implement()
@@ -453,51 +460,41 @@ class OrchestratedWorkflow:
         if path.scale is SpecKitScale.MEDIUM:
             self.state.metadata["brief"] = {
                 "required": True,
-                "status": "recorded",
+                "status": "pending",
                 "summary": prompt[:500],
             }
+            self.state.metadata["brief_required"] = True
         if path.scale is SpecKitScale.LARGE_HIGH_RISK:
             self.state.metadata["plan_required"] = True
             self.state.metadata["brief_required"] = True
+            self.state.metadata["clarify_required"] = True
+            self.state.metadata["tasks_required"] = True
+            self.state.metadata["brief"] = {
+                "required": True,
+                "status": "pending",
+                "summary": prompt[:500],
+            }
             self.state.metadata["plan"] = {
                 "required": True,
-                "status": "recorded",
-                "note": "LARGE path requires plan/brief before implement",
+                "status": "pending",
+                "note": "LARGE path requires clarify/plan/tasks artifacts before implement",
                 "summary": prompt[:500],
+            }
+            self.state.metadata["tasks"] = {
+                "required": True,
+                "status": "pending",
             }
 
         self._apply_scale_phases(path.scale)
 
-        if bindings.orca is not None:
-            if not bindings.project_root:
-                self.state.metadata["orca_skipped_reason"] = "no_project_root"
-            else:
-                ctx = sanitize_mapping(
-                    {
-                        **data,
-                        "attachments": list(bindings.attachments or []),
-                    }
-                )
-                orca_result = bindings.orca.execute_task(
-                    ProviderTaskRequest(
-                        prompt=f"Mode C classify: {data.get('classification', path.scale.value)}",
-                        role="control_plane",
-                        context=ctx,
-                        cwd=bindings.project_root,
-                        timeout_seconds=60.0,
-                        read_only=True,
-                        attachments=tuple(bindings.attachments or ()),
-                    )
-                )
-                self.state.metadata["orca_classify"] = orca_result.to_dict()
-                if not orca_result.ok and orca_result.failure not in {
-                    FailureClass.UNAVAILABLE,
-                }:
-                    return {
-                        "ok": False,
-                        "detail": orca_result.detail,
-                        "provider": orca_result.to_dict(),
-                    }
+        # Mode C binds exactly one Orca Run at classify (policy → control plane).
+        ensure = self._ensure_orca_run(objective=prompt)
+        if ensure is not None and not ensure.get("ok", False):
+            # Missing Orca is a hard Mode C failure — not a lead fallback.
+            if ensure.get("failure") == FailureClass.UNAVAILABLE.value:
+                return ensure
+            # Soft: non-unavailable ensure issues still fail Mode C start.
+            return ensure
 
         classify_outcome = PhaseOutcome(
             phase=Phase.CLASSIFY,
@@ -508,12 +505,73 @@ class OrchestratedWorkflow:
         self._report_orca_phase(Phase.CLASSIFY, classify_outcome)
         return {"ok": True, "detail": "classified", **data}
 
+    def _phase_research(self) -> dict[str, Any]:
+        """Research agent via the same Orca Run; compact locally for handoff."""
+        bindings = self.bindings
+        query = bindings.research_query or bindings.task_prompt or "repository research"
+        context: dict[str, Any] = {
+            "query": query,
+            "agent": "opencode",
+            "prefer_local_worker": True,
+            "read_only": True,
+        }
+        orca_out = self._run_via_orca(
+            prompt=f"Repository research (read-only): {query}",
+            role="research",
+            context=context,
+            read_only=True,
+            adopt_worktree=False,
+        )
+        if not orca_out.get("ok"):
+            return orca_out
+
+        # Deterministic compaction helper (filesystem) — not a direct local-worker
+        # dispatch. Optional research_fn is a test seam for summary shape only.
+        if bindings.research_fn:
+            summary = bindings.research_fn(self.state)
+        else:
+            root = self._effective_project_root() or bindings.project_root or "."
+            summary = research_paths(
+                root,
+                query=query,
+                prefer_local_worker=False,
+                local_worker=None,
+            )
+        payload = summary.to_dict()
+        payload["via"] = "orca"
+        payload["orca"] = {
+            "ok": orca_out.get("ok"),
+            "detail": orca_out.get("detail"),
+            "run_id": orca_out.get("run_id"),
+        }
+        provider = orca_out.get("provider")
+        if isinstance(provider, dict) and isinstance(provider.get("output"), str):
+            payload["ORCA_OUTPUT"] = provider["output"][:2000]
+        self.state.metadata["research"] = payload
+        return {"ok": True, "detail": "research via Orca compacted", "research": payload}
+
     def _phase_lead_implement(self) -> dict[str, Any]:
         bindings = self.bindings
         prompt = bindings.task_prompt or "Implement the classified task."
+        gate = self._speckit_implement_gate()
+        if gate is not None:
+            return gate
         attachment_routing = self._route_attachments(prompt=prompt)
         if attachment_routing is not None:
             self.state.metadata["media_routing"] = attachment_routing
+            if attachment_routing.get("vision_required") and not attachment_routing.get(
+                "bytes_delivered"
+            ):
+                # FR-058: vision inputs must reach a vision-capable provider via
+                # native attachments — path text alone is insufficient.
+                if attachment_routing.get("provider_hint") == "orca/cloud-vision":
+                    self.state.metadata["media_delivery"] = {
+                        "status": "path_only_pending_native_attach",
+                        "note": (
+                            "Attachments listed as paths; Orca native file attach "
+                            "not yet wired — vision work may be incomplete"
+                        ),
+                    }
 
         context: dict[str, Any] = {
             "task_prompt": prompt,
@@ -546,50 +604,16 @@ class OrchestratedWorkflow:
 
         lead_kind = self._lead_agent_kind()
         context["agent"] = lead_kind
+        # First write placement: isolated Orca child worktree.
+        context["worktree"] = "new-child"
         context = sanitize_mapping(context)
 
-        # Prefer Orca control-plane dispatch for implement when available.
-        if bindings.orca is not None and bindings.project_root:
-            orca_result = bindings.orca.execute_task(
-                ProviderTaskRequest(
-                    prompt=prompt,
-                    role="lead_implement",
-                    context=context,
-                    cwd=bindings.project_root,
-                    timeout_seconds=300.0,
-                    read_only=False,
-                    attachments=tuple(bindings.attachments or ()),
-                )
-            )
-            self.state.metadata["orca_lead_implement"] = orca_result.to_dict()
-            if orca_result.ok:
-                self.state.metadata["lead_lead_implement"] = orca_result.to_dict()
-                return {
-                    "ok": True,
-                    "detail": orca_result.detail,
-                    "provider": orca_result.to_dict(),
-                    "kind": "orca",
-                    "via": "orca",
-                }
-            if self._is_quota_failure(orca_result):
-                return self._quota_handoff_failure(
-                    orca_result, role="lead_implement", source="orca"
-                )
-            if orca_result.failure is not FailureClass.UNAVAILABLE:
-                return {
-                    "ok": False,
-                    "detail": orca_result.detail,
-                    "provider": orca_result.to_dict(),
-                    "kind": "orca",
-                    "via": "orca",
-                }
-            self.state.metadata["orca_implement_fallback"] = "unavailable"
-
-        return self._run_lead(
+        return self._run_via_orca(
             prompt=prompt,
             role="lead_implement",
             context=context,
-            hold_edit_lease=True,
+            read_only=False,
+            adopt_worktree=True,
         )
 
     def _phase_maintenance_review(self) -> dict[str, Any]:
@@ -598,10 +622,14 @@ class OrchestratedWorkflow:
             bindings.task_prompt
             or self.state.metadata.get("classify", {}).get("prompt", "change")
         )
+        root = self._effective_project_root()
         inferred = infer_change_signals(
-            project_root=bindings.project_root,
+            project_root=root,
             change_summary=summary,
         )
+        # Keep full diff in metadata for maintenance-reviewer / writers; do not
+        # pass the raw blob into review_change kwargs (structured fields only).
+        implementation_diff = str(inferred.get("implementation_diff") or "")
         kwargs = {
             key: value
             for key, value in inferred.items()
@@ -628,6 +656,9 @@ class OrchestratedWorkflow:
         self.state.metadata["change_signals"] = {
             "inferred": inferred,
             "effective": dict(kwargs),
+            "project_root": root,
+            "implementation_diff": implementation_diff,
+            "implementation_diff_chars": len(implementation_diff),
         }
         decision = self.apply_maintenance_review(**kwargs)
 
@@ -654,6 +685,7 @@ class OrchestratedWorkflow:
     def _phase_verification(self) -> dict[str, Any]:
         bindings = self.bindings
         commands = bindings.verification_commands
+        root = self._effective_project_root()
         if not commands:
             report = VerificationReport(results=[])
             self.state.metadata["verification"] = report.to_dict()
@@ -666,8 +698,9 @@ class OrchestratedWorkflow:
                 "verification": report.to_dict(),
                 "missing_verification": True,
             }
-        report = run_verification(commands, cwd=bindings.project_root)
+        report = run_verification(commands, cwd=root)
         self.state.metadata["verification"] = report.to_dict()
+        self.state.metadata["verification_cwd"] = root
         return {
             "ok": report.ok,
             "detail": "verification ok" if report.ok else "verification failed",
@@ -676,20 +709,63 @@ class OrchestratedWorkflow:
 
     def _phase_lead_review(self) -> dict[str, Any]:
         bindings = self.bindings
-        if self.state.metadata.get("governance_pending") and not bindings.maintenance_kwargs.get(
-            "governance_resolved"
+        if (
+            self.state.metadata.get("governance_pending")
+            and not bindings.maintenance_kwargs.get("governance_resolved")
+            and not self.state.metadata.get("governance_resolved_via_orca")
         ):
-            pending = self.state.metadata["governance_pending"]
-            return {
-                "ok": False,
-                "detail": (
-                    "governance still pending before lead review "
-                    f"(ADR_REQUIRED={pending.get('ADR_REQUIRED')}, "
-                    f"SPEC_UPDATE={pending.get('SPEC_UPDATE')}); "
-                    "set maintenance_kwargs governance_resolved=True after ADR/spec work"
-                ),
-                "governance_pending": pending,
-            }
+            # Attempt one Orca governance task under the same Run before hard-stop.
+            if not self.state.metadata.get("governance_orca_attempted"):
+                pending = self.state.metadata["governance_pending"]
+                gov = self._run_via_orca(
+                    prompt=(
+                        "Resolve pending governance before final review: "
+                        f"ADR_REQUIRED={pending.get('ADR_REQUIRED')}, "
+                        f"SPEC_UPDATE={pending.get('SPEC_UPDATE')}. "
+                        "Create or update required ADR/spec artifacts in the worktree."
+                    ),
+                    role="governance",
+                    context={
+                        "agent": self._lead_agent_kind(),
+                        "governance_pending": pending,
+                        "worktree": (
+                            self.state.metadata.get("orca_worktree_id")
+                            or self.state.metadata.get("orca_worktree_path")
+                            or "current"
+                        ),
+                    },
+                    read_only=False,
+                    adopt_worktree=False,
+                )
+                self.state.metadata["governance_orca_attempted"] = True
+                self.state.metadata["governance_orca"] = gov
+                if gov.get("ok"):
+                    self.state.metadata["governance_resolved_via_orca"] = True
+                else:
+                    return {
+                        "ok": False,
+                        "detail": (
+                            "governance still pending before lead review "
+                            f"(ADR_REQUIRED={pending.get('ADR_REQUIRED')}, "
+                            f"SPEC_UPDATE={pending.get('SPEC_UPDATE')}); "
+                            "Orca governance task failed — set maintenance_kwargs "
+                            "governance_resolved=True after ADR/spec work"
+                        ),
+                        "governance_pending": pending,
+                        "governance_orca": gov,
+                    }
+            else:
+                pending = self.state.metadata["governance_pending"]
+                return {
+                    "ok": False,
+                    "detail": (
+                        "governance still pending before lead review "
+                        f"(ADR_REQUIRED={pending.get('ADR_REQUIRED')}, "
+                        f"SPEC_UPDATE={pending.get('SPEC_UPDATE')}); "
+                        "set maintenance_kwargs governance_resolved=True after ADR/spec work"
+                    ),
+                    "governance_pending": pending,
+                }
 
         verification_raw = self.state.metadata.get("verification", {})
         verification = (
@@ -724,16 +800,55 @@ class OrchestratedWorkflow:
                 else implement_summary,
                 "verification": verification,
                 "research": self.state.metadata.get("research"),
+                "change_signals": self.state.metadata.get("change_signals"),
+                "orca_integration": self.state.metadata.get("orca_integration"),
+                "orca_worktree_path": self.state.metadata.get("orca_worktree_path"),
+                "orca_run_id": self.state.metadata.get("orca_run_id"),
+                "agent": self._lead_agent_kind(),
             }
         )
-        return self._run_lead(
+        # Refresh worktree diff for final review when adoption occurred.
+        root = self._effective_project_root()
+        if root:
+            review_signals = infer_change_signals(
+                project_root=root,
+                change_summary=bindings.task_prompt or "review",
+            )
+            context["review_change_signals"] = sanitize_mapping(
+                {
+                    k: v
+                    for k, v in review_signals.items()
+                    if k
+                    in {
+                        "change_summary",
+                        "changed_paths",
+                        "implementation_diff",
+                        "git_status",
+                        "touches_behavior",
+                        "touches_public_api",
+                    }
+                }
+            )
+            if isinstance(review_signals.get("implementation_diff"), str):
+                diff = review_signals["implementation_diff"]
+                context["implementation_diff_excerpt"] = diff[:12000]
+        # Continue on adopted child worktree when present.
+        if self.state.metadata.get("orca_worktree_id"):
+            context["worktree"] = self.state.metadata["orca_worktree_id"]
+        elif self.state.metadata.get("orca_worktree_path"):
+            context["worktree"] = self.state.metadata["orca_worktree_path"]
+        else:
+            context["worktree"] = "current"
+
+        return self._run_via_orca(
             prompt=(
                 "Review verification results against the original task and "
                 "summarize outcome."
             ),
             role="lead_review",
             context=context,
-            hold_edit_lease=False,
+            read_only=True,
+            adopt_worktree=False,
         )
 
     def _run_writer(self, phase: Phase, *, plan_key: str) -> dict[str, Any]:
@@ -746,58 +861,246 @@ class OrchestratedWorkflow:
                 "detail": f"{phase.value} skipped by plan",
                 "plan": plan,
             }
-        if self.bindings.writer_fn is None:
+
+        decision = self.state.decision
+        plan_hint = ""
+        decision_payload: dict[str, Any] | None = None
+        if decision is not None:
+            decision_payload = decision.to_dict()
+            if phase is Phase.TEST_WRITER:
+                plan_hint = (
+                    f"TEST_DECISION={decision.TEST_DECISION}; "
+                    f"TEST_SCOPE={list(decision.TEST_SCOPE)}"
+                )
+            elif phase is Phase.DOC_WRITER:
+                plan_hint = (
+                    f"DOC_DECISION={decision.DOC_DECISION}; "
+                    f"DOC_TARGETS={list(decision.DOC_TARGETS)}"
+                )
+
+        prompt = (
+            f"Mode C {phase.value}: implement the required writer work. {plan_hint}"
+        ).strip()
+        context: dict[str, Any] = sanitize_mapping(
+            {
+                "phase": phase.value,
+                "plan_hint": plan_hint,
+                "plan": plan,
+                "task_prompt": self.bindings.task_prompt
+                or self.state.metadata.get("task_prompt", ""),
+                "decision": decision_payload,
+                "agent": self._lead_agent_kind(),
+            }
+        )
+        if self.state.metadata.get("orca_worktree_id"):
+            context["worktree"] = self.state.metadata["orca_worktree_id"]
+        elif self.state.metadata.get("orca_worktree_path"):
+            context["worktree"] = self.state.metadata["orca_worktree_path"]
+        else:
+            context["worktree"] = "current"
+
+        # Writers always go through Orca under the Mode C Run — no lead bypass.
+        if self.bindings.writer_fn is not None:
+            self.state.metadata["writer_fn_ignored"] = (
+                "Mode C ignores writer_fn; writers dispatch via Orca only"
+            )
+
+        return {
+            **self._run_via_orca(
+                prompt=prompt,
+                role=phase.value,
+                context=context,
+                read_only=False,
+                adopt_worktree=False,
+            ),
+            "plan": plan,
+        }
+
+    def _effective_project_root(self) -> str | None:
+        """Checkout used for gates: adopted Orca child worktree when present."""
+        adopted = self.state.metadata.get("orca_worktree_path")
+        if isinstance(adopted, str) and adopted.strip():
+            return adopted.strip()
+        return self.bindings.project_root
+
+    def _speckit_implement_gate(self) -> dict[str, Any] | None:
+        """Block implement when MEDIUM/LARGE Spec Kit artifacts are still pending."""
+        meta = self.state.metadata
+        scale = (meta.get("speckit_path") or {}).get("scale")
+        if scale == SpecKitScale.SMALL.value:
+            return None
+
+        pending: list[str] = []
+        if meta.get("brief_required"):
+            brief = meta.get("brief") if isinstance(meta.get("brief"), dict) else {}
+            status = str(brief.get("status") or "pending")
+            if status not in {"ready", "approved", "complete", "satisfied"}:
+                # Allow explicit override via bindings metadata injection.
+                if not meta.get("brief_satisfied"):
+                    pending.append("brief")
+        if meta.get("plan_required"):
+            plan = meta.get("plan") if isinstance(meta.get("plan"), dict) else {}
+            status = str(plan.get("status") or "pending")
+            if status not in {"ready", "approved", "complete", "satisfied"}:
+                if not meta.get("plan_satisfied"):
+                    pending.append("plan")
+        if meta.get("clarify_required") and not meta.get("clarify_satisfied"):
+            clarify = meta.get("clarify") if isinstance(meta.get("clarify"), dict) else {}
+            if str(clarify.get("status") or "pending") not in {
+                "ready",
+                "approved",
+                "complete",
+                "satisfied",
+            }:
+                pending.append("clarify")
+        if meta.get("tasks_required") and not meta.get("tasks_satisfied"):
+            tasks = meta.get("tasks") if isinstance(meta.get("tasks"), dict) else {}
+            if str(tasks.get("status") or "pending") not in {
+                "ready",
+                "approved",
+                "complete",
+                "satisfied",
+            }:
+                pending.append("tasks")
+
+        if not pending:
+            return None
+        detail = (
+            f"Spec Kit {scale} gate blocked implement; pending artifacts: "
+            + ", ".join(pending)
+            + ". Mark metadata statuses ready/approved or set *_satisfied before implement."
+        )
+        self.state.metadata["speckit_gate_blocked"] = pending
+        return {
+            "ok": False,
+            "detail": detail,
+            "failure": FailureClass.ERROR.value,
+            "pending_artifacts": pending,
+        }
+
+    def _ensure_orca_run(self, *, objective: str | None = None) -> dict[str, Any] | None:
+        """Create or reuse the single Mode C Orca Run. Returns failure dict or None."""
+        existing = self.state.metadata.get("orca_run_id")
+        if isinstance(existing, str) and existing.strip():
+            return None
+
+        orca = self.bindings.orca
+        if orca is None:
             return {
                 "ok": False,
                 "detail": (
-                    f"{phase.value} required (action={action or 'unknown'}) but no "
-                    "writer executor bound; inject WorkflowBindings.writer_fn"
+                    "Mode C requires Orca as the orchestration control plane; "
+                    "native Codex/Cursor remain Mode A and are not used as Mode C fallback"
                 ),
-                "plan": plan,
                 "failure": FailureClass.UNAVAILABLE.value,
             }
 
-        writer_fn = self.bindings.writer_fn
+        prompt = objective or self.bindings.task_prompt or "Aichestra Mode C run"
         root = self.bindings.project_root
-        holder = self.state.metadata.get("edit_lease_holder") or (
-            f"writer-{phase.value}-{id(self)}"
+        result = orca.execute_task(
+            ProviderTaskRequest(
+                prompt=prompt,
+                role="ensure_run",
+                context={},
+                cwd=root,
+                timeout_seconds=60.0,
+                read_only=True,
+            )
         )
-        if root:
-            # Share the serial lease held from implement → verification when present.
-            if not self.state.metadata.get("edit_lease_held"):
-                lease_fail = self._acquire_serial_edit_lease(
-                    role=phase.value, agent_id=holder
-                )
-                if lease_fail is not None:
-                    return {**lease_fail, "plan": plan}
-            else:
-                lease = request_edit_lease(root, str(holder))
-                self.state.metadata["edit_lease"] = {
-                    "role": phase.value,
-                    "agent_id": holder,
-                    "allowed": lease.allowed,
-                    "policy": lease.policy.value,
-                    "path": lease.path,
-                    "reason": lease.reason,
-                    "shared_holder": True,
-                }
-                if not lease.allowed:
-                    return {
-                        "ok": False,
-                        "detail": lease.reason,
-                        "plan": plan,
-                        "failure": FailureClass.ERROR.value,
-                        "edit_lease": self.state.metadata["edit_lease"],
-                    }
-            result = writer_fn(self.state, phase)
-            # Do not release here — lease spans through verification.
-        else:
-            result = writer_fn(self.state, phase)
+        self.state.metadata["orca_ensure_run"] = result.to_dict()
+        run_id = (result.metadata or {}).get("run_id")
+        if result.ok and isinstance(run_id, str) and run_id.strip():
+            self.state.metadata["orca_run_id"] = run_id.strip()
+            return None
+        if result.ok and not run_id:
+            # Fakes / degraded receipts: synthesize a stable workflow-local id only
+            # when the adapter explicitly marked reuse/success without an id.
+            synthesized = f"aichestra-run-{id(self)}"
+            self.state.metadata["orca_run_id"] = synthesized
+            self.state.metadata["orca_run_id_synthesized"] = True
+            return None
+        return {
+            "ok": False,
+            "detail": result.detail or "failed to create Orca Run",
+            "failure": result.failure.value,
+            "provider": result.to_dict(),
+        }
+
+    def _adopt_orca_worktree(self, result: ProviderTaskResult) -> None:
+        """Record child worktree from Orca receipt and switch effective root."""
+        meta = result.metadata or {}
+        path = meta.get("worktree_path")
+        worktree_id = meta.get("worktree_id")
+        parent = self.bindings.project_root
+        if isinstance(path, str) and path.strip():
+            self.state.metadata["orca_worktree_path"] = path.strip()
+        if isinstance(worktree_id, str) and worktree_id.strip():
+            self.state.metadata["orca_worktree_id"] = worktree_id.strip()
+        self.state.metadata["orca_integration"] = {
+            "policy": "adopt_child_worktree",
+            "parent_project_root": parent,
+            "worktree_path": self.state.metadata.get("orca_worktree_path"),
+            "worktree_id": self.state.metadata.get("orca_worktree_id"),
+            "note": (
+                "Remaining Mode C gates run against the adopted Orca worktree; "
+                "parent checkout is not silently verified as if it received the edits"
+            ),
+        }
+
+    def _run_via_orca(
+        self,
+        *,
+        prompt: str,
+        role: str,
+        context: Mapping[str, Any] | None = None,
+        read_only: bool = False,
+        adopt_worktree: bool = False,
+    ) -> dict[str, Any]:
+        """Dispatch an agent phase through Orca only (no Codex/Cursor bypass)."""
+        ensure = self._ensure_orca_run(objective=prompt)
+        if ensure is not None:
+            return ensure
+
+        orca = self.bindings.orca
+        assert orca is not None  # ensured above
+        run_id = str(self.state.metadata["orca_run_id"])
+        ctx = sanitize_mapping(dict(context or {}))
+        ctx["run_id"] = run_id
+        if "agent" not in ctx:
+            ctx["agent"] = self._lead_agent_kind()
+        if "research" in self.state.metadata and "research" not in ctx:
+            research = self.state.metadata["research"]
+            ctx["research"] = (
+                sanitize_mapping(research) if isinstance(research, dict) else research
+            )
+
+        root = self._effective_project_root()
+        result = orca.execute_task(
+            ProviderTaskRequest(
+                prompt=prompt,
+                role=role,
+                context=ctx,
+                cwd=root,
+                timeout_seconds=300.0,
+                read_only=read_only,
+                attachments=tuple(self.bindings.attachments or ()),
+            )
+        )
+        key = f"orca_{role}"
+        self.state.metadata[key] = result.to_dict()
+        if role == "lead_implement":
+            self.state.metadata["lead_lead_implement"] = result.to_dict()
+        if result.ok and adopt_worktree:
+            self._adopt_orca_worktree(result)
+        if self._is_quota_failure(result):
+            return self._quota_handoff_failure(result, role=role, source="orca")
         return {
             "ok": result.ok,
             "detail": result.detail,
-            "plan": plan,
             "provider": result.to_dict(),
+            "kind": "orca",
+            "via": "orca",
+            "run_id": run_id,
         }
 
     def _run_lead(
@@ -808,6 +1111,18 @@ class OrchestratedWorkflow:
         context: Mapping[str, Any] | None = None,
         hold_edit_lease: bool = False,
     ) -> dict[str, Any]:
+        """Direct lead adapter — Mode A / test seams only; not Mode C fallback."""
+        # Mode C must not reach here for agent work. Keep for explicit non-orchestrated
+        # callers and unit seams; refuse when an Orca binding is present.
+        if self.bindings.orca is not None:
+            return {
+                "ok": False,
+                "detail": (
+                    f"refusing direct lead dispatch for {role}: Mode C routes "
+                    "agent work through Orca only"
+                ),
+                "failure": FailureClass.ERROR.value,
+            }
         lead = self.bindings.lead
         if lead is None and self.bindings.providers:
             selection = select_lead(self.bindings.providers)
@@ -832,7 +1147,7 @@ class OrchestratedWorkflow:
         if lead is None:
             return {
                 "ok": False,
-                "detail": "no lead provider bound for Mode C execution",
+                "detail": "no lead provider bound",
                 "failure": FailureClass.UNAVAILABLE.value,
             }
         ctx = sanitize_mapping(dict(context or {}))
@@ -858,16 +1173,17 @@ class OrchestratedWorkflow:
                 )
             )
 
-        if needs_edit and self.bindings.project_root:
+        root = self._effective_project_root()
+        if needs_edit and root:
             if not hold_edit_lease and not self.state.metadata.get("edit_lease_held"):
                 lease_fail = self._acquire_serial_edit_lease(role=role)
                 if lease_fail is not None:
                     return lease_fail
-            result = _execute(self.bindings.project_root)
+            result = _execute(root)
             if not hold_edit_lease and not self.state.metadata.get("edit_lease_held"):
                 self._release_serial_edit_lease()
         else:
-            result = _execute(self.bindings.project_root)
+            result = _execute(root)
 
         key = f"lead_{role}"
         self.state.metadata[key] = result.to_dict()
@@ -886,7 +1202,7 @@ class OrchestratedWorkflow:
         role: str,
         agent_id: str | None = None,
     ) -> dict[str, Any] | None:
-        root = self.bindings.project_root
+        root = self._effective_project_root()
         if not root:
             return None
         if self.state.metadata.get("edit_lease_held"):
@@ -913,7 +1229,7 @@ class OrchestratedWorkflow:
         return None
 
     def _release_serial_edit_lease(self) -> None:
-        root = self.bindings.project_root
+        root = self._effective_project_root() or self.bindings.project_root
         holder = self.state.metadata.get("edit_lease_holder")
         if not root or not holder:
             self.state.metadata.pop("edit_lease_held", None)
@@ -925,11 +1241,12 @@ class OrchestratedWorkflow:
             self.state.metadata.pop("edit_lease_holder", None)
 
     def _report_orca_phase(self, phase: Phase, outcome: PhaseOutcome) -> None:
-        """Best-effort Orca phase metadata / read-only ping; never fails the workflow."""
+        """Record phase status locally; never create additional Orca Runs."""
         report = {
             "phase": phase.value,
             "status": outcome.status.value,
             "detail": outcome.detail,
+            "run_id": self.state.metadata.get("orca_run_id"),
         }
         reports = self.state.metadata.setdefault("orca_phase_reports", [])
         if isinstance(reports, list):
@@ -937,17 +1254,17 @@ class OrchestratedWorkflow:
         orca = self.bindings.orca
         if orca is None:
             return
-        if not self.bindings.project_root:
-            self.state.metadata.setdefault("orca_skipped_reason", "no_project_root")
+        run_id = self.state.metadata.get("orca_run_id")
+        if not run_id:
             return
         try:
             result = orca.execute_task(
                 ProviderTaskRequest(
                     prompt=f"Mode C phase report: {phase.value}={outcome.status.value}",
-                    role="control_plane",
-                    context=sanitize_mapping(report),
-                    cwd=self.bindings.project_root,
-                    timeout_seconds=30.0,
+                    role="phase_report",
+                    context=sanitize_mapping({**report, "run_id": run_id}),
+                    cwd=self._effective_project_root(),
+                    timeout_seconds=15.0,
                     read_only=True,
                 )
             )
@@ -955,6 +1272,7 @@ class OrchestratedWorkflow:
                 "ok": result.ok,
                 "failure": result.failure.value,
                 "detail": result.detail,
+                "run_id": (result.metadata or {}).get("run_id") or run_id,
             }
         except Exception as exc:  # noqa: BLE001 — best-effort only
             self.state.metadata[f"orca_report_{phase.value}"] = {
@@ -975,6 +1293,8 @@ class OrchestratedWorkflow:
             "reason": decision.reason,
             "summarized_text": decision.summarized_text,
             "paths": paths,
+            # Native bytes attach not yet wired through Orca worker-start.
+            "bytes_delivered": False,
         }
 
     def _apply_scale_phases(self, scale: SpecKitScale) -> None:
@@ -1164,6 +1484,10 @@ def _governance_pending(decision: MaintenanceReviewDecision) -> bool:
     return str(spec).lower() not in {"none", "", "false", "0"}
 
 
+# Compat alias — prefer ModeCRunController in new code.
+OrchestratedWorkflow = ModeCRunController
+
+
 def bound_writer_from_lead(
     lead: ProviderAdapter,
     *,
@@ -1231,7 +1555,7 @@ def bound_writer_from_lead(
 
 
 def run_phase_hooks(
-    workflow: OrchestratedWorkflow,
+    workflow: ModeCRunController,
     hooks: dict[Phase, Callable[[WorkflowState], None]] | None = None,
 ) -> WorkflowState:
     """Run all phases; optional hooks fire only after a phase succeeds/skips."""
