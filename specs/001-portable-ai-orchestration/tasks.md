@@ -9,11 +9,10 @@ description: "Task list for portable Aichestra platform implementation"
 **Prerequisites**: plan.md (required), spec.md (required)
 
 **Architecture contract status (2026-09-09)**: Spec/plan/AGENTS realigned to
-**single-Orca-Run Mode C**. Production Mode C is a thin coordinator
-(`ModeCRunController.run_all` → one `mode_c_agents` Orca handoff + local
-gates). Earlier Phase 20 `[x]` marks on T108–T124 were premature; acceptance
-is Phase 21 (T125–T137). Local pytest green; GitHub CI matrix pending push
-(T124/T137).
+**single-Orca-Run Mode C**. Phase 22 closes architect REQUEST CHANGES (Spec Kit
+via Orca, `mode_c_writers` handoff, policy-only lead, dead seams, contract
+tests). Local pytest green (T144). **Do not merge** until T124/T137 GitHub CI
+matrix is green.
 
 **Tests**: Included where required by success criteria (SC-001–SC-016) and
 architecture contract tests (MODE-C-001–010). Prefer minimal high-value coverage.
@@ -413,6 +412,37 @@ Feature ready for maintainer architecture review after Phase 21 / T137.
 
 ---
 
+## Phase 22: Architect REQUEST CHANGES (CURRENT)
+
+**Purpose**: Close remaining gaps from maintainer architecture review
+(dual-orchestrator residual, Spec Kit via Orca, policy-only lead, dead seams,
+contract-test honesty). Do not mark T124/T137/`converged` until this phase and
+GitHub CI are green.
+
+- [x] T138 CRITICAL: Spec Kit MEDIUM/LARGE artifacts produced via Orca under the
+      Mode C Run (role `speckit_artifacts`); Aichestra only file-gates — no
+      Python stub unlock (FR-070; architect P0#2)
+- [x] T139 CRITICAL: Collapse writer agent scheduling into one same-run Orca
+      handoff (`mode_c_writers`); delete unreachable per-phase agent handlers
+      from `_execute_phase` (FR-043/045; architect P0#1 / P2#15)
+- [x] T140 CRITICAL: Mode C CLI/bindings pass lead/local as **policy**
+      (`preferred_lead` / `fallback_lead` / `providers`) — do not construct
+      Codex/Cursor adapters for Mode C dispatch (FR-003/004/069; architect P1#9)
+- [x] T141 HIGH: Contract tests assert Orca-owned Spec Kit + single writers
+      handoff + refuse dual-orchestrator regression (SC-016; architect P1#8)
+- [x] T142 HIGH: `prepare_manual_handoff` auto-resolves recent run when
+      `project_root` given; README bootstrap honestly = probe/config not
+      installer (FR-072/073; architect P1#11/#12)
+- [x] T143 MEDIUM: Windows profiler prefers CIM/PowerShell before deprecated
+      `wmic` (FR-046; architect P2#17)
+- [x] T144 CRITICAL: Full local pytest green after Phase 22 (confirmed).
+      T124/T137 remain open until GitHub Actions matrix verified — do not merge.
+
+**Checkpoint**: Architecture review gaps addressed in code+tests; merge still
+gated on T137 GitHub CI.
+
+---
+
 ## Dependencies & Execution Order
 
 ### Phase Dependencies
@@ -420,8 +450,9 @@ Feature ready for maintainer architecture review after Phase 21 / T137.
 - Phases 1–13 historical foundation
 - Phase 20 contract artifacts (T103–T107) precede production realignment
 - Phase 21 (T125–T137) closes dual-orchestrator / fail-closed gaps
-- T108–T124 depend on T103–T107; T124/T137 gate converge
-- Converge / “feature complete” only after T137
+- Phase 22 (T138–T144) closes architect REQUEST CHANGES residuals
+- T108–T124 depend on T103–T107; T124/T137/T144 gate merge
+- Converge / “feature complete” only after T137 + Phase 22
 
 ### User Story Mapping
 

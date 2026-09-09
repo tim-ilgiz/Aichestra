@@ -294,6 +294,7 @@ def _cmd_handoff(args: argparse.Namespace) -> int:
         packet,
         execute=execute,
         run_id=run_id or None,
+        project_root=str(repo) if repo else None,
     )
     sys.stdout.write(json.dumps(payload, indent=2, default=str) + "\n")
     if payload.get("executed"):
@@ -328,15 +329,8 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
     from aichestra.orchestration.roles import select_lead
     from aichestra.orchestration.verification import verification_commands_from_config
     from aichestra.orchestration.workflow import ModeCRunController, WorkflowBindings
-    from aichestra.providers.codex import CodexProvider
-    from aichestra.providers.cursor import CursorProvider
     from aichestra.providers.discovery import discover_providers, enabled_map_from_config
-    from aichestra.providers.fakes import (
-        fake_codex_lead,
-        fake_cursor_lead,
-        fake_local_worker,
-        fake_orca,
-    )
+    from aichestra.providers.fakes import fake_local_worker, fake_orca
     from aichestra.providers.local_worker import LocalWorkerProvider
     from aichestra.providers.orca import OrcaProvider
     from aichestra.providers.quota_guard import real_provider_execution_blocked
@@ -376,36 +370,34 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         ollama_host=str(ollama_host) if ollama_host else None,
         enabled=enabled,
     )
+    # Policy resolution for observability / config_roots — not adapter construction.
     selection = select_lead(providers, preferred=preferred, fallback=fallback)
     attachments = tuple(str(Path(p).expanduser().resolve()) for p in (args.attach or []))
 
     if use_fakes:
         orca = fake_orca() if enabled.get("orca", True) else None
-        local = fake_local_worker(enabled=enabled_local)
-        lead: object | None = None
-        if selection.lead and selection.lead.value == "codex":
-            lead = fake_codex_lead()
-        elif selection.lead and selection.lead.value == "cursor":
-            lead = fake_cursor_lead()
-        elif selection.lead:
-            lead = fake_codex_lead()
+        local = fake_local_worker(enabled=enabled_local) if enabled_local else None
+        # Mode C: do not construct Codex/Cursor adapters — policy only.
+        lead = None
     else:
         orca = OrcaProvider() if enabled.get("orca", True) else None
-        local = LocalWorkerProvider(
-            local_enabled=enabled_local,
-            ollama_host=str(ollama_host) if ollama_host else None,
-            preferred_ids=preferred_ids,
-            allowed_ids=allowed_ids,
-            config=cfg,
+        local = (
+            LocalWorkerProvider(
+                local_enabled=enabled_local,
+                ollama_host=str(ollama_host) if ollama_host else None,
+                preferred_ids=preferred_ids,
+                allowed_ids=allowed_ids,
+                config=cfg,
+            )
+            if enabled_local
+            else None
         )
+        # Mode C: lead adapters are Mode A only. Pass discovery + preferred/fallback
+        # policy; Orca owns worker selection under the Mode C Run.
         lead = None
-        if selection.lead and selection.lead.value == "codex":
-            lead = CodexProvider()
-        elif selection.lead and selection.lead.value == "cursor":
-            lead = CursorProvider()
 
-    # Mode C: Orca is the control plane. lead/local_worker are discovery metadata
-    # and Mode A seams — agent work is not dispatched through them here.
+    # Mode C: Orca is the control plane. lead/local_worker are optional discovery
+    # probes only — never Mode C execute_task targets.
     bindings = WorkflowBindings(
         orca=orca,  # type: ignore[arg-type]
         lead=lead,  # type: ignore[arg-type]
@@ -435,6 +427,7 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         "local_enabled": enabled_local,
         "preferred_lead": preferred,
         "fallback_lead": fallback,
+        "lead_policy": selection.lead.value if selection.lead else None,
         "providers_enabled": enabled,
         "fake_providers": use_fakes,
         "verification_commands": bindings.verification_commands,

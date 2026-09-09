@@ -71,7 +71,13 @@ def test_one_run_id_reused_across_agent_phases(tmp_path: Path) -> None:
     supervised = [
         req
         for req in orca.sent
-        if (req.role or "") in {"mode_c_agents", "lead_review", "test_writer", "doc_writer"}
+        if (req.role or "")
+        in {
+            "mode_c_agents",
+            "lead_review",
+            "mode_c_writers",
+            "speckit_artifacts",
+        }
     ]
     assert supervised
     assert all(req.context.get("run_id") == run_id for req in supervised)
@@ -83,12 +89,13 @@ def test_one_run_id_reused_across_agent_phases(tmp_path: Path) -> None:
 
 
 def test_medium_speckit_writes_real_artifacts(tmp_path: Path) -> None:
-    """MEDIUM Spec Kit uses production file lifecycle — not metadata overrides."""
+    """MEDIUM Spec Kit artifacts come from Orca under the Mode C Run."""
+    orca = fake_orca("success")
     wf = OrchestratedWorkflow(
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(
-            orca=fake_orca("success"),
+            orca=orca,
             lead=fake_codex("success"),
             project_root=str(tmp_path),
             task_prompt="refactor across 12 files in multi-package monorepo",
@@ -96,13 +103,16 @@ def test_medium_speckit_writes_real_artifacts(tmp_path: Path) -> None:
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
-    assert wf.run_phase().status is PhaseStatus.SUCCEEDED  # classify + materialize
+    state = wf.run_all()
+    assert not state.failed, state.failed
+    assert any((r.role or "") == "speckit_artifacts" for r in orca.sent)
     brief = tmp_path / ".aichestra" / "speckit" / "brief.md"
     plan = tmp_path / ".aichestra" / "speckit" / "plan.md"
     assert brief.is_file()
     assert plan.is_file()
     assert wf.state.metadata["brief"]["status"] == "ready"
     assert wf.state.metadata["plan"]["status"] == "ready"
+    assert wf.state.metadata.get("speckit_artifacts", {}).get("lifecycle") == "orca_run"
     # Metadata hacks must not be required / honored as production path.
     assert "brief_satisfied" not in wf.state.metadata
 
@@ -120,12 +130,10 @@ def test_speckit_gate_blocks_when_artifacts_missing(tmp_path: Path) -> None:
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
-    assert wf.run_phase().status is PhaseStatus.SUCCEEDED
-    # Simulate lost artifacts after classify — implement gate must fail closed.
-    brief = Path(wf.state.metadata["brief"]["path"])
-    brief.unlink()
-    wf.state.metadata["brief"]["status"] = "pending"
-    wf.state.metadata["speckit_artifacts"] = {"written": []}
+    assert wf.run_phase().status is PhaseStatus.SUCCEEDED  # classify only
+    # Classify leaves Spec Kit pending until Orca produces files.
+    assert wf.state.metadata.get("brief_required") is True
+    assert str(wf.state.metadata.get("brief", {}).get("status") or "pending") == "pending"
     blocked = wf._speckit_implement_gate()
     assert blocked is not None
     assert blocked.get("ok") is False

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from aichestra.providers.base import (
     FailureClass,
     ProviderAdapter,
@@ -17,6 +19,51 @@ SCENARIOS = ("success", "unavailable", "quota", "auth", "timeout", "error")
 
 # Roles that mint/resume a Run; all other Mode C agent roles require context.run_id.
 _ENSURE_ROLES = frozenset({"ensure_run"})
+
+
+def _fake_write_speckit_artifacts(request: ProviderTaskRequest) -> list[str]:
+    """Simulate Orca producing Spec Kit files under the target project."""
+    ctx = request.context if isinstance(request.context, dict) else {}
+    root = request.cwd or ctx.get("project_root")
+    if not isinstance(root, str) or not root.strip():
+        return []
+    required = ctx.get("required_artifacts") or [
+        "brief.md",
+        "plan.md",
+        "clarify.md",
+        "tasks.md",
+    ]
+    if not isinstance(required, (list, tuple)):
+        required = ["brief.md", "plan.md"]
+    prompt = str(ctx.get("task_prompt") or request.prompt or "Mode C task")
+    scale = str(ctx.get("speckit_scale") or "medium")
+    steps = ctx.get("speckit_steps") or []
+    spec_dir = Path(root) / ".aichestra" / "speckit"
+    spec_dir.mkdir(parents=True, exist_ok=True)
+    bodies = {
+        "brief.md": f"# Brief\n\n{prompt}\n\n## Scale\n\n{scale}\n",
+        "plan.md": (
+            f"# Plan\n\nObjective: {prompt}\n\n"
+            f"Steps: {', '.join(str(s) for s in steps)}\n"
+        ),
+        "clarify.md": "# Clarify\n\nNo open clarifications recorded for this run.\n",
+        "tasks.md": (
+            "# Tasks\n\n"
+            "- [ ] Implement objective\n"
+            "- [ ] Maintenance review\n"
+            "- [ ] Verification\n"
+        ),
+    }
+    written: list[str] = []
+    for name in required:
+        name_s = str(name)
+        body = bodies.get(name_s)
+        if body is None:
+            continue
+        path = spec_dir / name_s
+        path.write_text(body, encoding="utf-8")
+        written.append(str(path))
+    return written
 
 
 def _status(
@@ -159,6 +206,12 @@ class FakeProvider(ProviderAdapter):
                     meta["attachment_count"] = len(request.attachments)
                 if role == "mode_c_agents":
                     meta["simulated_roles"] = ["research", "lead_implement"]
+                if role == "mode_c_writers":
+                    meta["simulated_roles"] = ["test_writer", "doc_writer"]
+                if role == "speckit_artifacts":
+                    written = _fake_write_speckit_artifacts(request)
+                    meta["speckit_written"] = written
+                    meta["simulated_roles"] = ["speckit_artifacts"]
             return ProviderTaskResult(
                 ok=True,
                 output=self._execute_output,

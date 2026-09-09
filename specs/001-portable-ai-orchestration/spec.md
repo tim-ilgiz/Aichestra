@@ -460,10 +460,11 @@ These are the non-negotiable Mode C contract. Contract tests MUST cover them.
 - **FR-069**: Provider disable/`available=False` is authoritative — Mode C MUST
   NOT dispatch disabled or unavailable Codex/Cursor/local-worker agents, and
   MUST NOT invent a preferred lead when none is available.
-- **FR-070**: Spec Kit MEDIUM/LARGE artifacts MUST be produced by the production
-  lifecycle under the target project's `.aichestra/speckit/` (or Spec Kit
-  tooling). Readiness is file-backed; test-only `*_satisfied` metadata MUST NOT
-  unlock implement.
+- **FR-070**: Spec Kit MEDIUM/LARGE artifacts MUST be produced via Orca under
+  the Mode C Run (role `speckit_artifacts` or equivalent Spec Kit tooling
+  invoked through that Run) into the target project's `.aichestra/speckit/`.
+  Readiness is file-backed; Aichestra MUST NOT unlock implement via Python
+  stub writes or test-only `*_satisfied` metadata.
 - **FR-071**: Mode C attachments MUST NOT be staged into the parent project
   checkout (no parent `.aichestra/attachments/`). Stage outside the repo or
   pass absolute paths to Orca `--attach`.

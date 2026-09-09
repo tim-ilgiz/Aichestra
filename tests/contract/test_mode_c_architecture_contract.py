@@ -429,7 +429,7 @@ def test_worker_done_requires_matching_dispatch() -> None:
 
 
 def test_mode_c_does_not_own_general_purpose_agent_phase_scheduler(tmp_path: Path) -> None:
-    """Observable: run_all uses one mode_c_agents handoff; run_phase refuses agents."""
+    """Observable: run_all uses Orca-owned handoffs; run_phase refuses agents."""
     orca = fake_orca("success")
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
@@ -454,6 +454,10 @@ def test_mode_c_does_not_own_general_purpose_agent_phase_scheduler(tmp_path: Pat
     assert agent_roles.count("mode_c_agents") == 1
     assert "research" not in agent_roles
     assert "lead_implement" not in agent_roles
+    # Writers are one handoff when needed — never per-writer Orca roles.
+    assert "test_writer" not in agent_roles
+    assert "doc_writer" not in agent_roles
+    assert agent_roles.count("mode_c_writers") <= 1
 
     # run_phase must refuse to schedule agent workers.
     wf2 = ModeCRunController(
@@ -467,6 +471,27 @@ def test_mode_c_does_not_own_general_purpose_agent_phase_scheduler(tmp_path: Pat
     assert refused.status is PhaseStatus.FAILED
     assert "refuses per-phase" in refused.detail.lower() or "run_all" in refused.detail
 
+
+def test_medium_speckit_artifacts_come_from_orca_not_python_stubs(tmp_path: Path) -> None:
+    """FR-070: Spec Kit files are produced via Orca role under the Mode C Run."""
+    orca = fake_orca("success")
+    wf = ModeCRunController(
+        mode=Mode.ORCHESTRATED,
+        research_useful=False,
+        bindings=_small_bindings(
+            tmp_path,
+            orca=orca,
+            task_prompt="refactor across 12 files in multi-package monorepo",
+        ),
+    )
+    state = wf.run_all()
+    assert not state.failed, state.failed
+    assert any((r.role or "") == "speckit_artifacts" for r in orca.sent)
+    assert state.metadata.get("speckit_artifacts", {}).get("lifecycle") == "orca_run"
+    agents = next(r for r in orca.sent if (r.role or "") == "mode_c_agents")
+    assert "preferred_lead" in (agents.context or {}) or "preferred_lead" in (
+        (agents.context or {}).get("policy_package") or {}
+    )
 
 def test_mode_c_orca_is_canonical_lifecycle_owner(tmp_path: Path) -> None:
     orca = fake_orca("success")
@@ -734,6 +759,7 @@ def test_medium_speckit_reaches_implementation_without_test_metadata_override(
     assert "plan_satisfied" not in state.metadata
     assert (tmp_path / ".aichestra" / "speckit" / "brief.md").is_file()
     assert (tmp_path / ".aichestra" / "speckit" / "plan.md").is_file()
+    assert any((r.role or "") == "speckit_artifacts" for r in orca.sent)
 
 
 def test_large_speckit_reaches_implementation_only_after_real_artifacts(

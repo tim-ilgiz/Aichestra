@@ -178,7 +178,8 @@ def test_required_writer_dispatches_via_orca(tmp_path: Path) -> None:
     )
     state = wf.run_all()
     assert Phase.TEST_WRITER.value in state.completed
-    assert any((req.role or "") == "test_writer" for req in orca.sent)
+    assert any((req.role or "") == "mode_c_writers" for req in orca.sent)
+    assert not any((req.role or "") in {"test_writer", "doc_writer"} for req in orca.sent)
 
 
 def test_orchestrate_separates_repo_and_project_roots(

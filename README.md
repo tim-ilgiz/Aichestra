@@ -12,7 +12,7 @@ python3 -m pip install -e ".[dev]"
 
 Or run without install by setting `PYTHONPATH=src`.
 
-## Bootstrap (idempotent)
+## Bootstrap (idempotent config / doctor)
 
 Pick the entrypoint for your OS (thin wrappers around the shared Python core):
 
@@ -26,6 +26,11 @@ Equivalent Python:
 python -m aichestra bootstrap
 python -m aichestra update
 ```
+
+Bootstrap writes/merges config, runs discovery + doctor, and can set
+`bootstrap_complete=true` when doctor is ok and no blocking remaining steps
+remain. It does **not** install Orca/Codex/Cursor/OpenCode/Ollama — install
+those tools separately; doctor reports what is missing.
 
 Machine-local settings are written to `.local/machine.local.json` (gitignored).
 `local.enabled` defaults to `false` and remains valid on any hardware.

@@ -4,11 +4,12 @@ Canonical Mode C lifecycle (``ModeCRunController.run_all``):
 
 ```text
 validate project root + Orca
-→ classify / Spec Kit policy + real artifacts (local)
+→ classify / Spec Kit policy (local)
 → ensure exactly ONE Orca Run
+→ Spec Kit artifacts via Orca (MEDIUM/LARGE; file-gated)
 → ONE mode_c_agents Orca handoff (research+implement under that run_id)
 → maintenance-reviewer (local)
-→ optional writers via Orca (same run)
+→ ONE mode_c_writers Orca handoff when needed (same run)
 → verification (local; config or safe auto-detect)
 → final lead review via Orca (same run)
 ```

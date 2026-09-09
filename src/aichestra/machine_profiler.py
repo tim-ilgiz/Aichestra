@@ -152,34 +152,34 @@ def _cpu_info() -> CpuInfo:
         except OSError:
             pass
     elif system == "windows":
-        out = _run(
-            ["wmic", "cpu", "get", "Name,NumberOfCores", "/format:list"],
-            timeout=8.0,
-        )
-        match = re.search(r"Name=(.+)", out)
-        if match:
-            name = match.group(1).strip()
-        cores = re.search(r"NumberOfCores=(\d+)", out)
-        if cores:
-            physical = int(cores.group(1))
+        # Prefer modern CIM/PowerShell; fall back to deprecated wmic.
+        ps = _run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "(Get-CimInstance Win32_Processor | Select-Object -First 1 "
+                "| ForEach-Object { $_.Name + '|' + $_.NumberOfCores })",
+            ],
+            timeout=12.0,
+        ).strip()
+        if "|" in ps:
+            ps_name, ps_cores = ps.split("|", 1)
+            if ps_name.strip():
+                name = ps_name.strip()
+            if ps_cores.strip().isdigit():
+                physical = int(ps_cores.strip())
         if not name or physical is None:
-            # PowerShell / CIM fallback when wmic is missing or empty.
-            ps = _run(
-                [
-                    "powershell",
-                    "-NoProfile",
-                    "-Command",
-                    "(Get-CimInstance Win32_Processor | Select-Object -First 1 "
-                    "| ForEach-Object { $_.Name + '|' + $_.NumberOfCores })",
-                ],
-                timeout=12.0,
-            ).strip()
-            if "|" in ps:
-                ps_name, ps_cores = ps.split("|", 1)
-                if not name and ps_name.strip():
-                    name = ps_name.strip()
-                if physical is None and ps_cores.strip().isdigit():
-                    physical = int(ps_cores.strip())
+            out = _run(
+                ["wmic", "cpu", "get", "Name,NumberOfCores", "/format:list"],
+                timeout=8.0,
+            )
+            match = re.search(r"Name=(.+)", out)
+            if match and not name:
+                name = match.group(1).strip()
+            cores = re.search(r"NumberOfCores=(\d+)", out)
+            if cores and physical is None:
+                physical = int(cores.group(1))
     return CpuInfo(name=name, cores_logical=logical, cores_physical=physical)
 
 
@@ -234,25 +234,26 @@ def _memory_info() -> MemoryInfo:
         except OSError:
             pass
     elif system == "windows":
-        out = _run(
-            ["wmic", "ComputerSystem", "get", "TotalPhysicalMemory", "/value"],
-            timeout=8.0,
-        )
-        match = re.search(r"TotalPhysicalMemory=(\d+)", out)
-        if match:
-            total = int(match.group(1))
+        # Prefer CIM; wmic is deprecated/absent on modern Windows.
+        ps = _run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory",
+            ],
+            timeout=12.0,
+        ).strip()
+        if ps.isdigit():
+            total = int(ps)
         if total <= 0:
-            ps = _run(
-                [
-                    "powershell",
-                    "-NoProfile",
-                    "-Command",
-                    "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory",
-                ],
-                timeout=12.0,
-            ).strip()
-            if ps.isdigit():
-                total = int(ps)
+            out = _run(
+                ["wmic", "ComputerSystem", "get", "TotalPhysicalMemory", "/value"],
+                timeout=8.0,
+            )
+            match = re.search(r"TotalPhysicalMemory=(\d+)", out)
+            if match:
+                total = int(match.group(1))
     if total <= 0:
         # Last-resort: report 0 rather than inventing values.
         total = 0
@@ -354,24 +355,26 @@ def _gpu_info() -> tuple[GpuInfo, ...]:
         except OSError:
             pass
     elif system == "windows":
-        out = _run(["wmic", "path", "win32_VideoController", "get", "Name", "/value"])
-        for match in re.findall(r"Name=(.+)", out):
-            name = match.strip()
+        ps = _run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_VideoController | "
+                "ForEach-Object { $_.Name }",
+            ],
+            timeout=12.0,
+        )
+        for line in ps.splitlines():
+            name = line.strip()
             if name:
                 gpus.append(GpuInfo(name=name, accelerator_kind="gpu"))
         if not gpus:
-            ps = _run(
-                [
-                    "powershell",
-                    "-NoProfile",
-                    "-Command",
-                    "Get-CimInstance Win32_VideoController | "
-                    "ForEach-Object { $_.Name }",
-                ],
-                timeout=12.0,
+            out = _run(
+                ["wmic", "path", "win32_VideoController", "get", "Name", "/value"]
             )
-            for line in ps.splitlines():
-                name = line.strip()
+            for match in re.findall(r"Name=(.+)", out):
+                name = match.strip()
                 if name:
                     gpus.append(GpuInfo(name=name, accelerator_kind="gpu"))
     # Deduplicate by name

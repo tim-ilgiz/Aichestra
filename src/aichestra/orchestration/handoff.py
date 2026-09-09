@@ -64,16 +64,21 @@ def prepare_manual_handoff(
     execute: bool = False,
     orca_binary: str | None = None,
     run_id: str | None = None,
+    project_root: str | None = None,
 ) -> dict[str, Any]:
     """Return a one-action handoff payload; optionally continue inside the Run.
 
     When ``run_id`` (or ``packet.orca_run_id``) is known, the suggested command
     reuses that Orca Run via ``run-use`` + ``task-create`` + ``worker-start``
-    with ``--agent cursor``. Detached ``worktree create --no-parent`` is only a
-    last-resort hint when no Run id exists (non-Mode-C / recovery).
+    with ``--agent cursor``. When neither is set but ``project_root`` is given,
+    auto-resolve the most recent Mode C run recorded for that project.
     """
     brief = _format_handoff_brief(packet)
     resolved_run = (run_id or packet.orca_run_id or "").strip()
+    if not resolved_run and project_root:
+        resolved_run = (resolve_recent_mode_c_run_id(project_root) or "").strip()
+        if resolved_run and not packet.orca_run_id:
+            packet.orca_run_id = resolved_run
     worktree = (packet.worktree_path or "current").strip() or "current"
     name = "aichestra-handoff"
 

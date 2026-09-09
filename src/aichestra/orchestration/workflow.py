@@ -211,7 +211,12 @@ class WorkflowBindings:
 
 @dataclass
 class ModeCPolicyPackage:
-    """Policy package handed to Orca for the single Mode C agent orchestration."""
+    """Policy package handed to Orca for Mode C agent orchestration.
+
+    Lead/local fields are **policy inputs** for Orca (preferred/fallback /
+    enabled). ``lead_agent`` / ``research_agent`` are the resolved suggestions
+    derived from that policy — never invented disabled providers.
+    """
 
     run_id: str
     task_prompt: str
@@ -223,6 +228,9 @@ class ModeCPolicyPackage:
     speckit_steps: tuple[str, ...]
     attachments: tuple[str, ...]
     project_root: str
+    preferred_lead: str = "codex"
+    fallback_lead: str = "cursor"
+    local_enabled: bool = False
     classify: dict[str, Any] = field(default_factory=dict)
     factory: dict[str, Any] = field(default_factory=dict)
     media_routing: dict[str, Any] | None = None
@@ -235,6 +243,9 @@ class ModeCPolicyPackage:
             "research_useful": self.research_useful,
             "lead_agent": self.lead_agent,
             "research_agent": self.research_agent,
+            "preferred_lead": self.preferred_lead,
+            "fallback_lead": self.fallback_lead,
+            "local_enabled": self.local_enabled,
             "speckit_scale": self.speckit_scale,
             "speckit_steps": list(self.speckit_steps),
             "attachments": list(self.attachments),
@@ -402,31 +413,22 @@ class ModeCRunController:
         """Thin Mode C coordinator — NOT a phase worker scheduler.
 
         Production path:
-        validate root → require Orca → classify/Spec Kit → ensure ONE run →
-        ONE ``mode_c_agents`` Orca handoff → maintenance gate → optional writers
-        (same run) → verification → final lead review (same run).
+        validate root → require Orca → classify (local policy) → ensure ONE run →
+        Spec Kit artifacts via Orca (MEDIUM/LARGE) → ONE ``mode_c_agents`` handoff →
+        maintenance gate → ONE ``mode_c_writers`` handoff when needed →
+        verification → final lead review (same run).
 
         Phase/WorkflowState remain observability/result representation only.
         """
         if self.state.stopped:
             return self.state
 
-        # 1–3. Validate root, require Orca, local classify + Spec Kit policy.
+        # 1–3. Validate root, require Orca, local classify + Spec Kit *policy*.
         classify_out = self._coord_record(Phase.CLASSIFY, self._phase_classify)
         if not classify_out:
             return self.state
 
-        # 4. Real Spec Kit artifact lifecycle (MEDIUM/LARGE) — no metadata hacks.
-        speckit_out = self._materialize_speckit_artifacts()
-        if not speckit_out.get("ok", False):
-            self._fail_stopped(
-                Phase.CLASSIFY,
-                detail=str(speckit_out.get("detail", "Spec Kit artifacts failed")),
-                result=speckit_out,
-            )
-            return self.state
-
-        # 5. Ensure exactly one Orca Run (already attempted in classify); fail closed.
+        # 4. Ensure exactly one Orca Run (classify also attempts); fail closed.
         run_id = self.state.metadata.get("orca_run_id")
         if not (isinstance(run_id, str) and run_id.strip()):
             ensure = self._ensure_orca_run(
@@ -451,6 +453,16 @@ class ModeCRunController:
             )
             return self.state
 
+        # 5. MEDIUM/LARGE Spec Kit artifacts via Orca under the same Run.
+        speckit_out = self._produce_speckit_via_orca()
+        if not speckit_out.get("ok", False):
+            self._fail_stopped(
+                Phase.CLASSIFY,
+                detail=str(speckit_out.get("detail", "Spec Kit artifacts failed")),
+                result=speckit_out,
+            )
+            return self.state
+
         lead_agent = self._lead_agent_kind()
         if not lead_agent:
             self._fail_stopped(
@@ -472,7 +484,7 @@ class ModeCRunController:
         if not self._coord_record(Phase.MAINTENANCE_REVIEW, self._phase_maintenance_review):
             return self.state
 
-        # 8. Writers via Orca under SAME run_id when needed.
+        # 8. Writers via ONE Orca handoff under SAME run_id when needed.
         if not self._coord_writers_if_needed():
             return self.state
 
@@ -565,6 +577,9 @@ class ModeCRunController:
             research_useful=research_useful,
             lead_agent=lead_agent,
             research_agent=research_agent,
+            preferred_lead=self.bindings.preferred_lead,
+            fallback_lead=self.bindings.fallback_lead,
+            local_enabled=bool(self.bindings.local_enabled),
             speckit_scale=str(scale),
             speckit_steps=tuple(str(s) for s in steps),
             attachments=tuple(self.bindings.attachments or ()),
@@ -665,6 +680,7 @@ class ModeCRunController:
         return True
 
     def _coord_writers_if_needed(self) -> bool:
+        """ONE Orca writers handoff under the Mode C Run (not per-writer phases)."""
         decision = self.state.decision
         if decision is None:
             return True
@@ -672,22 +688,94 @@ class ModeCRunController:
         if scale == SpecKitScale.SMALL.value:
             self._maybe_insert_writers_for_small(decision)
 
-        for phase in (Phase.TEST_WRITER, Phase.DOC_WRITER):
+        needs_tests = bool(
+            Phase.TEST_WRITER in self.state.phases and decision.needs_tests
+        )
+        needs_docs = bool(Phase.DOC_WRITER in self.state.phases and decision.needs_docs)
+
+        for phase, needed in (
+            (Phase.TEST_WRITER, needs_tests),
+            (Phase.DOC_WRITER, needs_docs),
+        ):
             if phase not in self.state.phases:
                 continue
-            if phase is Phase.TEST_WRITER and not decision.needs_tests:
+            if not needed:
                 self._mark_phase(
-                    phase, PhaseStatus.SKIPPED, detail="maintenance: no tests"
+                    phase,
+                    PhaseStatus.SKIPPED,
+                    detail=(
+                        "maintenance: no tests"
+                        if phase is Phase.TEST_WRITER
+                        else "maintenance: no docs"
+                    ),
                 )
-                continue
-            if phase is Phase.DOC_WRITER and not decision.needs_docs:
-                self._mark_phase(
-                    phase, PhaseStatus.SKIPPED, detail="maintenance: no docs"
-                )
-                continue
-            plan_key = "tests" if phase is Phase.TEST_WRITER else "docs"
-            if not self._coord_record(phase, lambda p=phase, k=plan_key: self._run_writer(p, plan_key=k)):
-                return False
+
+        if not needs_tests and not needs_docs:
+            return True
+
+        lead_agent = self._lead_agent_kind()
+        if not lead_agent:
+            self._fail_stopped(
+                Phase.TEST_WRITER if needs_tests else Phase.DOC_WRITER,
+                detail="Mode C writers: no available/enabled lead agent",
+                result={"ok": False, "failure": FailureClass.UNAVAILABLE.value},
+            )
+            return False
+
+        plans = self.writer_plans()
+        context = sanitize_mapping(
+            {
+                "agent": lead_agent,
+                "preferred_lead": self.bindings.preferred_lead,
+                "fallback_lead": self.bindings.fallback_lead,
+                "needs_tests": needs_tests,
+                "needs_docs": needs_docs,
+                "plans": plans,
+                "task_prompt": self.bindings.task_prompt
+                or self.state.metadata.get("task_prompt", ""),
+                "decision": decision.to_dict(),
+                "worktree": (
+                    self.state.metadata.get("orca_worktree_id")
+                    or self.state.metadata.get("orca_worktree_path")
+                    or "current"
+                ),
+            }
+        )
+        out = self._run_via_orca(
+            prompt=(
+                "Mode C writers under the same Orca Run. "
+                f"needs_tests={needs_tests} needs_docs={needs_docs}. "
+                "Prefer updating existing tests/docs before creating new files."
+            ),
+            role="mode_c_writers",
+            context=context,
+            read_only=False,
+            adopt_worktree=False,
+        )
+        if not out.get("ok"):
+            fail_phase = Phase.TEST_WRITER if needs_tests else Phase.DOC_WRITER
+            self._fail_stopped(
+                fail_phase,
+                detail=str(out.get("detail", "mode_c_writers failed")),
+                result=out,
+            )
+            return False
+
+        self.state.metadata["orca_mode_c_writers"] = out
+        if needs_tests:
+            self._mark_phase(
+                Phase.TEST_WRITER,
+                PhaseStatus.SUCCEEDED,
+                detail="test_writer via mode_c_writers",
+                result=out,
+            )
+        if needs_docs:
+            self._mark_phase(
+                Phase.DOC_WRITER,
+                PhaseStatus.SUCCEEDED,
+                detail="doc_writer via mode_c_writers",
+                result=out,
+            )
         return True
 
     def _mark_phase(
@@ -760,31 +848,22 @@ class ModeCRunController:
             self.state.stopped = True
 
     def _execute_phase(self, phase: Phase) -> dict[str, Any]:
-        bindings = self.bindings
+        """Local deterministic gates only — never schedule agent workers here."""
         if phase is Phase.CLASSIFY:
             return self._phase_classify()
-
-        if phase is Phase.RESEARCH:
-            return self._phase_research()
-
-        if phase is Phase.LEAD_IMPLEMENT:
-            return self._phase_lead_implement()
-
         if phase is Phase.MAINTENANCE_REVIEW:
             return self._phase_maintenance_review()
-
-        if phase is Phase.TEST_WRITER:
-            return self._run_writer(phase, plan_key="tests")
-
-        if phase is Phase.DOC_WRITER:
-            return self._run_writer(phase, plan_key="docs")
-
         if phase is Phase.VERIFICATION:
             return self._phase_verification()
-
-        if phase is Phase.LEAD_REVIEW:
-            return self._phase_lead_review()
-
+        if phase in self._AGENT_SCHEDULE_PHASES:
+            return {
+                "ok": False,
+                "detail": (
+                    f"unreachable agent phase handler for {phase.value}; "
+                    "Mode C schedules agents only via run_all thin coordinator"
+                ),
+                "failure": FailureClass.ERROR.value,
+            }
         return {"ok": False, "detail": f"unknown phase {phase.value}"}
 
     def _phase_classify(self) -> dict[str, Any]:
@@ -895,19 +974,13 @@ class ModeCRunController:
         self._apply_scale_phases(path.scale)
 
         # Mode C binds exactly one Orca Run at classify (policy → control plane).
+        # Spec Kit artifacts are produced later via Orca under this Run (run_all).
         ensure = self._ensure_orca_run(objective=prompt)
         if ensure is not None and not ensure.get("ok", False):
             # Missing Orca is a hard Mode C failure — not a lead fallback.
             if ensure.get("failure") == FailureClass.UNAVAILABLE.value:
                 return ensure
-            # Soft: non-unavailable ensure issues still fail Mode C start.
             return ensure
-
-        # Production Spec Kit lifecycle — real files, no metadata overrides.
-        if path.scale is not SpecKitScale.SMALL:
-            artifacts = self._materialize_speckit_artifacts()
-            if not artifacts.get("ok", False):
-                return artifacts
 
         classify_outcome = PhaseOutcome(
             phase=Phase.CLASSIFY,
@@ -919,149 +992,26 @@ class ModeCRunController:
         return {"ok": True, "detail": "classified", **data}
 
     def _phase_research(self) -> dict[str, Any]:
-        """Research agent via the same Orca Run; compact locally for handoff.
-
-        Prefer local/opencode only when local.enabled AND capable AND allowed;
-        otherwise cloud lead agent via Orca. Never hard-code agent=opencode when
-        local is disabled.
-        """
-        bindings = self.bindings
-        query = bindings.research_query or bindings.task_prompt or "repository research"
-        research_agent = self._research_agent_kind()
-        if not research_agent:
-            return {
-                "ok": False,
-                "detail": (
-                    "Mode C research has no available agent "
-                    "(local disabled/unavailable and no cloud lead)"
-                ),
-                "failure": FailureClass.UNAVAILABLE.value,
-            }
-        context: dict[str, Any] = {
-            "query": query,
-            "agent": research_agent,
-            "prefer_local_worker": research_agent == "opencode",
-            "read_only": True,
+        """Unreachable — research is owned by ``mode_c_agents`` in ``run_all``."""
+        return {
+            "ok": False,
+            "detail": (
+                "per-phase research scheduling removed; "
+                "use run_all() → mode_c_agents under one Orca Run"
+            ),
+            "failure": FailureClass.ERROR.value,
         }
-        orca_out = self._run_via_orca(
-            prompt=f"Repository research (read-only): {query}",
-            role="research",
-            context=context,
-            read_only=True,
-            adopt_worktree=False,
-        )
-        if not orca_out.get("ok"):
-            return orca_out
-
-        # Deterministic compaction helper (filesystem) — not a direct local-worker
-        # dispatch. Optional research_fn is a test seam for summary shape only.
-        if bindings.research_fn:
-            summary = bindings.research_fn(self.state)
-        else:
-            root = self._effective_project_root() or bindings.project_root or "."
-            summary = research_paths(
-                root,
-                query=query,
-                prefer_local_worker=False,
-                local_worker=None,
-            )
-        payload = summary.to_dict()
-        payload["via"] = "orca"
-        payload["orca"] = {
-            "ok": orca_out.get("ok"),
-            "detail": orca_out.get("detail"),
-            "run_id": orca_out.get("run_id"),
-            "agent": research_agent,
-        }
-        provider = orca_out.get("provider")
-        if isinstance(provider, dict) and isinstance(provider.get("output"), str):
-            payload["ORCA_OUTPUT"] = provider["output"][:2000]
-        self.state.metadata["research"] = payload
-        return {"ok": True, "detail": "research via Orca compacted", "research": payload}
 
     def _phase_lead_implement(self) -> dict[str, Any]:
-        bindings = self.bindings
-        prompt = bindings.task_prompt or "Implement the classified task."
-        gate = self._speckit_implement_gate()
-        if gate is not None:
-            return gate
-        attachment_routing = self._route_attachments(prompt=prompt)
-        if attachment_routing is not None:
-            self.state.metadata["media_routing"] = attachment_routing
-            if attachment_routing.get("vision_required") and not attachment_routing.get(
-                "bytes_delivered"
-            ):
-                # FR-058: vision inputs must reach a vision-capable provider via
-                # native attachments — path text alone is insufficient.
-                return {
-                    "ok": False,
-                    "detail": (
-                        "Mode C vision attachments require native byte delivery "
-                        "(Orca --attach / staged inbox); path-only prompts refused"
-                    ),
-                    "failure": FailureClass.ERROR.value,
-                    "media_routing": attachment_routing,
-                }
-            if attachment_routing.get("vision_required") and not attachment_routing.get(
-                "allowed", True
-            ):
-                return {
-                    "ok": False,
-                    "detail": attachment_routing.get("reason")
-                    or "vision routing refused",
-                    "failure": FailureClass.ERROR.value,
-                }
-
-        context: dict[str, Any] = {
-            "task_prompt": prompt,
-            "classify": self.state.metadata.get("classify", {}),
-            "attachments": list(bindings.attachments or []),
+        """Unreachable — implement is owned by ``mode_c_agents`` in ``run_all``."""
+        return {
+            "ok": False,
+            "detail": (
+                "per-phase lead_implement scheduling removed; "
+                "use run_all() → mode_c_agents under one Orca Run"
+            ),
+            "failure": FailureClass.ERROR.value,
         }
-        if "research" in self.state.metadata:
-            context["research"] = self.state.metadata["research"]
-        if "factory" in self.state.metadata:
-            factory = self.state.metadata["factory"]
-            context["factory"] = factory
-            if factory.get("present"):
-                context["factory_preserve"] = (
-                    "Preserve target-project Factory / AI Factory tooling; "
-                    "do not delete or migrate without explicit approval."
-                )
-        if self.state.metadata.get("plan_required") or self.state.metadata.get(
-            "brief_required"
-        ):
-            context["speckit_gate"] = {
-                "plan_required": bool(self.state.metadata.get("plan_required")),
-                "brief_required": bool(self.state.metadata.get("brief_required")),
-                "plan": self.state.metadata.get("plan"),
-                "brief": self.state.metadata.get("brief"),
-            }
-
-        # Worktrees/concurrency belong to Orca under the Mode C Run — Aichestra
-        # does not take a local .aichestra/edit.lock lease for Mode C writes.
-        lead_kind = self._lead_agent_kind()
-        if not lead_kind:
-            return {
-                "ok": False,
-                "detail": (
-                    "Mode C has no available/enabled lead provider; "
-                    "refusing disabled/unavailable agent dispatch"
-                ),
-                "failure": FailureClass.UNAVAILABLE.value,
-            }
-        context["agent"] = lead_kind
-        # First write placement: isolated Orca child worktree.
-        context["worktree"] = "new-child"
-        context = sanitize_mapping(context)
-
-        return self._run_via_orca(
-            prompt=prompt,
-            role="lead_implement",
-            context=context,
-            read_only=False,
-            adopt_worktree=True,
-        )
-
     def _phase_maintenance_review(self) -> dict[str, Any]:
         bindings = self.bindings
         summary = (
@@ -1379,12 +1329,11 @@ class ModeCRunController:
             return adopted.strip()
         return self.bindings.project_root
 
-    def _materialize_speckit_artifacts(self) -> dict[str, Any]:
-        """Write real Spec Kit artifacts under project ``.aichestra/speckit/``.
+    def _produce_speckit_via_orca(self) -> dict[str, Any]:
+        """Produce MEDIUM/LARGE Spec Kit artifacts via Orca under the Mode C Run.
 
-        MEDIUM/LARGE artifacts are marked ready only after files exist.
-        Production MUST NOT rely on ``brief_satisfied`` / ``plan_satisfied``
-        test metadata overrides.
+        Aichestra only file-gates readiness. Python stub writing is forbidden as
+        the unlock path — Orca (or the fake Orca in CI) must create the files.
         """
         meta = self.state.metadata
         scale = (meta.get("speckit_path") or {}).get("scale")
@@ -1398,97 +1347,84 @@ class ModeCRunController:
                 "detail": "Spec Kit artifacts require project_root",
                 "failure": FailureClass.ERROR.value,
             }
-        spec_dir = Path(root) / ".aichestra" / "speckit"
-        try:
-            spec_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
+        run_id = meta.get("orca_run_id")
+        if not (isinstance(run_id, str) and run_id.strip()):
             return {
                 "ok": False,
-                "detail": f"cannot create Spec Kit dir: {exc}",
+                "detail": "Spec Kit via Orca requires orca_run_id",
                 "failure": FailureClass.ERROR.value,
             }
 
-        prompt = self.bindings.task_prompt or meta.get("task_prompt") or "Mode C task"
-        path_info = meta.get("speckit_path") or {}
-        written: list[str] = []
-
-        def _write(name: str, body: str) -> Path:
-            path = spec_dir / name
-            path.write_text(body, encoding="utf-8")
-            written.append(str(path))
-            return path
-
+        required: list[str] = []
         if meta.get("brief_required") or scale in {
             SpecKitScale.MEDIUM.value,
             SpecKitScale.LARGE_HIGH_RISK.value,
         }:
-            brief_path = _write(
-                "brief.md",
-                f"# Brief\n\n{prompt}\n\n## Scale\n\n{scale}\n",
-            )
-            meta["brief"] = {
-                "required": True,
-                "status": "ready",
-                "path": str(brief_path),
-                "summary": prompt[:500],
-            }
+            required.append("brief.md")
             meta["brief_required"] = True
-
         if meta.get("plan_required") or scale in {
             SpecKitScale.MEDIUM.value,
             SpecKitScale.LARGE_HIGH_RISK.value,
         }:
-            plan_path = _write(
-                "plan.md",
-                (
-                    f"# Plan\n\nObjective: {prompt}\n\n"
-                    f"Steps: {', '.join(path_info.get('steps') or [])}\n"
-                ),
-            )
-            meta["plan"] = {
-                "required": True,
-                "status": "ready",
-                "path": str(plan_path),
-                "summary": prompt[:500],
-            }
+            required.append("plan.md")
             meta["plan_required"] = True
-
         if scale == SpecKitScale.LARGE_HIGH_RISK.value or meta.get("clarify_required"):
-            clarify_path = _write(
-                "clarify.md",
-                "# Clarify\n\nNo open clarifications recorded for this run.\n",
-            )
-            meta["clarify"] = {
-                "required": True,
-                "status": "ready",
-                "path": str(clarify_path),
-            }
+            required.append("clarify.md")
             meta["clarify_required"] = True
-
         if scale == SpecKitScale.LARGE_HIGH_RISK.value or meta.get("tasks_required"):
-            tasks_path = _write(
-                "tasks.md",
-                (
-                    "# Tasks\n\n"
-                    "- [ ] Implement objective\n"
-                    "- [ ] Maintenance review\n"
-                    "- [ ] Verification\n"
-                ),
-            )
-            meta["tasks"] = {
-                "required": True,
-                "status": "ready",
-                "path": str(tasks_path),
-            }
+            required.append("tasks.md")
             meta["tasks_required"] = True
 
-        meta["speckit_artifacts"] = {
-            "dir": str(spec_dir),
-            "written": written,
-            "lifecycle": "production_files",
-        }
-        meta["speckit_execution"] = "artifacts_ready"
-        # Explicitly ignore any legacy test-only overrides.
+        lead_agent = self._lead_agent_kind()
+        if not lead_agent:
+            return {
+                "ok": False,
+                "detail": (
+                    "Spec Kit via Orca: no available/enabled lead agent; "
+                    "refusing disabled provider invent"
+                ),
+                "failure": FailureClass.UNAVAILABLE.value,
+            }
+
+        prompt = self.bindings.task_prompt or meta.get("task_prompt") or "Mode C task"
+        path_info = meta.get("speckit_path") or {}
+        context = sanitize_mapping(
+            {
+                "agent": lead_agent,
+                "preferred_lead": self.bindings.preferred_lead,
+                "fallback_lead": self.bindings.fallback_lead,
+                "local_enabled": bool(self.bindings.local_enabled),
+                "speckit_scale": scale,
+                "speckit_steps": list(path_info.get("steps") or []),
+                "required_artifacts": required,
+                "project_root": str(root),
+                "task_prompt": prompt,
+                "worktree": "current",
+            }
+        )
+        out = self._run_via_orca(
+            prompt=(
+                f"Produce Spec Kit {scale} artifacts under .aichestra/speckit/: "
+                + ", ".join(required)
+                + f". Objective: {prompt}"
+            ),
+            role="speckit_artifacts",
+            context=context,
+            read_only=False,
+            adopt_worktree=False,
+        )
+        if not out.get("ok"):
+            return {
+                "ok": False,
+                "detail": str(out.get("detail") or "Spec Kit Orca handoff failed"),
+                "failure": out.get("failure") or FailureClass.ERROR.value,
+                "orca": out,
+            }
+
+        synced = self._sync_speckit_metadata_from_files(required)
+        if not synced.get("ok"):
+            return synced
+        meta["speckit_execution"] = "orca_artifacts_ready"
         for key in (
             "brief_satisfied",
             "plan_satisfied",
@@ -1496,9 +1432,72 @@ class ModeCRunController:
             "tasks_satisfied",
         ):
             meta.pop(key, None)
+        return synced
+
+    def _sync_speckit_metadata_from_files(
+        self, required: list[str]
+    ) -> dict[str, Any]:
+        """Mark Spec Kit artifacts ready only when required files exist on disk."""
+        meta = self.state.metadata
+        root = self.bindings.project_root
+        if not root:
+            return {
+                "ok": False,
+                "detail": "Spec Kit sync requires project_root",
+                "failure": FailureClass.ERROR.value,
+            }
+        spec_dir = Path(root) / ".aichestra" / "speckit"
+        written: list[str] = []
+        missing: list[str] = []
+        prompt = self.bindings.task_prompt or meta.get("task_prompt") or "Mode C task"
+
+        name_to_key = {
+            "brief.md": ("brief", "brief_required"),
+            "plan.md": ("plan", "plan_required"),
+            "clarify.md": ("clarify", "clarify_required"),
+            "tasks.md": ("tasks", "tasks_required"),
+        }
+        for name in required:
+            path = spec_dir / name
+            key, flag = name_to_key[name]
+            meta[flag] = True
+            if path.is_file():
+                written.append(str(path))
+                blob = {
+                    "required": True,
+                    "status": "ready",
+                    "path": str(path),
+                    "summary": prompt[:500],
+                }
+                meta[key] = blob
+            else:
+                missing.append(name)
+                meta[key] = {
+                    "required": True,
+                    "status": "pending",
+                    "path": str(path),
+                }
+
+        meta["speckit_artifacts"] = {
+            "dir": str(spec_dir),
+            "written": written,
+            "lifecycle": "orca_run",
+            "missing": missing,
+        }
+        if missing:
+            return {
+                "ok": False,
+                "detail": (
+                    "Spec Kit Orca handoff returned ok but required files missing: "
+                    + ", ".join(missing)
+                    + " under .aichestra/speckit/"
+                ),
+                "failure": FailureClass.ERROR.value,
+                "missing": missing,
+            }
         return {
             "ok": True,
-            "detail": f"Spec Kit artifacts ready ({len(written)} files)",
+            "detail": f"Spec Kit artifacts ready via Orca ({len(written)} files)",
             "written": written,
         }
 
@@ -1522,7 +1521,6 @@ class ModeCRunController:
                 path = blob.get("path")
                 if isinstance(path, str) and path.strip():
                     return Path(path).is_file()
-                # Status ready without path only after materialize wrote files.
                 artifacts = meta.get("speckit_artifacts") or {}
                 return bool(artifacts.get("written"))
             return False

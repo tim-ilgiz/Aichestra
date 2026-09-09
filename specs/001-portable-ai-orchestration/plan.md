@@ -176,12 +176,13 @@ decision, verification runner, provider/security policy, compaction.
 ```text
 1. validate existing project root (fail if missing/not a dir)
 2. require Orca binding (fail closed; never direct Codex/Cursor/local-worker)
-3. local classify + Spec Kit policy
-4. REAL Spec Kit artifact lifecycle for MEDIUM/LARGE (.aichestra/speckit/)
-5. ensure exactly ONE Orca Run (resume or create); no run_id → FAIL CLOSED
-6. ONE Orca-owned orchestration handoff (role mode_c_agents + ModeCPolicyPackage)
+3. local classify + Spec Kit policy (scale/steps only — not artifact stubs)
+4. ensure exactly ONE Orca Run (resume or create); no run_id → FAIL CLOSED
+5. MEDIUM/LARGE: ONE Orca handoff role=speckit_artifacts under that Run;
+   Aichestra file-gates readiness (no Python stub unlock / *_satisfied)
+6. ONE Orca-owned agents handoff (role mode_c_agents + ModeCPolicyPackage)
 7. local maintenance-reviewer gate
-8. writers via Orca under SAME run_id when needed
+8. writers via ONE Orca handoff role=mode_c_writers under SAME run_id when needed
 9. local verification (explicit config or safe auto-detect)
 10. final lead review via Orca under SAME run_id
 ```
@@ -198,7 +199,7 @@ worker scheduler.
 |---------|-------|
 | Agent / task / worker / worktree lifecycle | Orca (under one Run) |
 | Classify / Spec Kit path / proportionality | Aichestra (local policy) |
-| Spec Kit artifact files (MEDIUM/LARGE) | Aichestra lifecycle → project `.aichestra/speckit/` |
+| Spec Kit artifact files (MEDIUM/LARGE) | Orca task under Mode C Run → project `.aichestra/speckit/`; Aichestra gates on files |
 | maintenance-reviewer | Aichestra (deterministic) |
 | verification-runner | Aichestra (deterministic; results feed same Run) |
 | Attachments delivery | Orca `--attach` / temp outside parent checkout |
