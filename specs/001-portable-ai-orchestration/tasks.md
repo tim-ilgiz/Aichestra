@@ -532,7 +532,7 @@ workflow-specific.
 - [x] T166 HIGH: Add contract tests proving target-project instructions are
       discovered, passed to Orca and remain authoritative.
 
-- [x] T167 CRITICAL: Re-run full local tests and GitHub CI matrix after the
+- [ ] T167 CRITICAL: Re-run full local tests and GitHub CI matrix after the
       production refactor.
       <!-- Evidence: full local `pytest tests/` green (192 passed). CI workflow
            still runs the same matrix with AICHESTRA_FAKE_PROVIDERS; GitHub
@@ -625,3 +625,12 @@ complete.
 5. Do not reintroduce `while current_phase: launch Orca worker` or a universal
    research→implement→writers→review `run_all()` pipeline
 6. Do not treat architecture as converged until Phase 24 T158–T168 complete
+
+Review follow-up (47a6d020): maintenance uses an in-dispatch ask/reply callback;
+canonical Run/task confirmation gates success; coordinator release and
+reclaimable-resource checks are implemented. Task specs use explicit Target,
+Change, Constraints, Ownership and Observable acceptance sections. Mutating
+adapter routes require live authority. T163 remains blocked on a proven portable
+Orca/OpenCode model+endpoint launch contract; local-only Mode C now fails closed.
+Local validation: `python3 -m pytest tests/` — 215 passed.
+T167 requires fresh CI for these changes, and T168 remains NOT VALIDATED.

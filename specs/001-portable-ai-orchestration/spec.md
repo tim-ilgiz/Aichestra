@@ -680,6 +680,6 @@ uses a valid current checkout placement, with child placement owned by Orca.
 - "Equivalent environment" means equivalent orchestration capabilities and
   policies across OSes, not identical binary install paths.
 - Current production Mode C uses a thin coordinator (`run_all` → one
-  `mode_c_agents` Orca handoff + local gates). Reintroducing an Aichestra-owned
+  `mode_c_handoff` Orca handoff + deterministic gate handshake). Reintroducing an Aichestra-owned
   agent phase scheduler is a regression against this spec — not a reason to
   soften requirements.

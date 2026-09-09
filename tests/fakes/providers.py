@@ -159,6 +159,10 @@ class FakeProvider(ProviderAdapter):
             )
         if scenario in {"success", "ok", "available"}:
             meta: dict = {"fake": True}
+            if role == "mode_c_handoff" and request.gate_handler:
+                meta["gate_reply"] = request.gate_handler("maintenance")
+            if role == "run_status":
+                meta.update({"settled": True, "receipt": {"run": {"id": ctx_run}}})
             if role == "ensure_run":
                 self.run_creates += 1
                 run_id = f"fake-run-{session.session_id[:8]}-{self.run_creates}"

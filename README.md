@@ -160,8 +160,19 @@ Mode C bootstraps one explicit coordinator in the current Orca checkout using
 an available provider from policy. The coordinator reads project context,
 including scoped nested AGENTS.md, owns child Tasks/Dispatches and worktree
 placement in the same Run, waits for their outcomes and converges their results
-before completing. Aichestra then applies deterministic gates and reads
-`orchestration run-show`; gate results and canonical state are reported separately.
+before completing. At the implementation boundary it calls
+`orchestration ask --question AICHESTRA_GATE:maintenance`; Aichestra replies with
+TEST/DOC/ADR/SPEC decisions before Orca dispatches required writers. The
+coordinator releases settled child workers; Aichestra releases the coordinator
+and checks reclaimable resources. Success requires this handshake, explicit
+successful completion, passing verification, and a confirmed canonical Run with
+all Tasks completed. Missing or failed state is a non-success result.
+
+Local-only Mode C is currently unavailable: the installed Orca `worker-start`
+cannot pin OpenCode's model and endpoint. Such launches fail closed. Cloud Mode C
+uses enabled Codex/Cursor providers; direct local-worker usage remains available.
+A portable, proven Orca/OpenCode launch contract remains required before enabling
+local workers in Mode C.
 An ordinary headless shell without Orca terminal authority is unsupported and
 fails before Run creation. Do not invent or reuse a stale terminal handle.
 Adapter contract tests validate this handoff, not a live coordinator's DAG.

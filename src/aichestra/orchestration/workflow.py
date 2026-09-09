@@ -395,13 +395,16 @@ class ModeCRunController:
             if not self._handoff_to_orca(str(run_id).strip()):
                 return self.state
 
-            # Deterministic gates after Orca returns edit signals / run status.
-            if not self._gate_maintenance():
+            # Maintenance must have been answered while the coordinator was live.
+            if self.state.decision is None:
+                self._fail_gate(GateKind.MAINTENANCE, detail="Coordinator omitted maintenance gate handshake")
                 return self.state
             if not self._gate_verification():
                 return self.state
 
             self._finalize_orca_run_status(ok=True)
+            if self.state.stopped:
+                return self.state
             record_mode_c_run_id(self.bindings.project_root, str(run_id))
             self.state.metadata["orchestration_shape_agnostic"] = True
             self.state.current_gate = None
@@ -1065,6 +1068,7 @@ class ModeCRunController:
                 timeout_seconds=300.0,
                 read_only=read_only,
                 attachments=tuple(self.bindings.attachments or ()),
+                gate_handler=self._answer_orca_gate if role == MODE_C_HANDOFF_ROLE else None,
             )
         )
         self.state.metadata[f"orca_{role}"] = result.to_dict()
@@ -1082,6 +1086,15 @@ class ModeCRunController:
             "via": "orca",
             "run_id": run_id,
         }
+
+    def _answer_orca_gate(self, gate: str) -> dict[str, Any]:
+        """Deterministic callback, invoked by the adapter during a blocking Orca ask."""
+        if gate != "maintenance":
+            raise ValueError("Unsupported deterministic gate")
+        if not self._gate_maintenance():
+            return {"ok": False, "run_id": self.state.metadata.get("orca_run_id")}
+        return {"ok": True, "run_id": self.state.metadata.get("orca_run_id"),
+                "gate": gate, "decision": self.state.decision.to_dict()}
 
     def _finalize_orca_run_status(self, *, ok: bool) -> None:
         status = dict(self.state.metadata.get("orca_run_status") or {})
@@ -1101,8 +1114,17 @@ class ModeCRunController:
                 context={"run_id": run_id}, cwd=self.bindings.project_root,
             ))
             status["canonical_read"] = result.to_dict()
-            status["canonical_state"] = result.metadata.get("receipt") if result.ok else None
+            status["canonical_state"] = result.metadata.get("receipt")
             status["source"] = "orca_run_show_plus_aichestra_gates" if result.ok else "aichestra_gates_run_unverifiable"
+        canonical_ok = bool(run_id and self.bindings.orca and result.ok
+                            and result.metadata.get("settled") is True)
+        status["ok"] = bool(ok and canonical_ok)
+        if ok and not canonical_ok:
+            self._record(GateOutcome(gate=GateKind.ORCA_HANDOFF,
+                status=GateStatus.FAILED,
+                detail="Canonical Orca Run is failed, unsettled, or unverifiable",
+                result={"canonical_read": status.get("canonical_read")}), stop=True)
+            status["gates_failed"] = list(self.state.failed)
         self.state.metadata["orca_run_status"] = status
 
     def _cleanup_attachment_staging(self) -> None:

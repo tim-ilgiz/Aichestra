@@ -119,6 +119,10 @@ class FakeModeCProvider(ProviderAdapter):
         )
         has_run = isinstance(ctx_run, str) and bool(ctx_run.strip())
         meta: dict = {"fake": True}
+        if self.kind is ProviderKind.ORCA and role == "mode_c_handoff" and request.gate_handler:
+            meta["gate_reply"] = request.gate_handler("maintenance")
+        if self.kind is ProviderKind.ORCA and role == "run_status":
+            meta.update({"settled": True, "receipt": {"run": {"id": ctx_run}}})
 
         if self.kind is ProviderKind.ORCA and role == "ensure_run":
             self.run_creates += 1

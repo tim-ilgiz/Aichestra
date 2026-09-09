@@ -390,3 +390,18 @@ providers in CI; analysis-only maintenance audit classes.
 5. Complete real attachment forwarding; provider enable flags; handoff-in-run.
 6. Delete obsolete tests; keep minimal regression net.
 7. Only then mark feature tasks complete / converge.
+
+### Gate boundary decision
+
+Maintenance is a synchronous callback reached through the coordinator's Orca
+`ask` and Aichestra's `reply`, before writer dispatch. The callback computes
+policy only; it does not create Tasks or choose workers. Completion without the
+handshake fails closed. Run identity plus settled canonical Tasks and passing
+Aichestra gates determine success; a Run is a namespace and need not have its
+own terminal status field. A reported failure or an unverifiable receipt blocks
+success. Coordinator terminal cleanup uses Orca worker-release and worker-list.
+
+OpenCode cannot use worker-start's provider model flags. Until a portable launch
+contract carries model and endpoint into the Orca-owned process, Mode C rejects
+OpenCode launches. Passing environment to the RPC client or model text in the
+prompt does not establish worker configuration.

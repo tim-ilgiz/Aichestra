@@ -6,7 +6,7 @@ import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Mapping
+from typing import Any, Mapping, Callable
 
 
 class ProviderKind(str, Enum):
@@ -94,6 +94,8 @@ class ProviderTaskRequest:
     max_prompt_chars: int = 8_000
     cwd: str | None = None
     attachments: tuple[str, ...] = ()
+
+    gate_handler: Callable[[str], dict[str, Any]] | None = field(default=None, repr=False, compare=False)
 
     def bounded_prompt(self) -> str:
         """Build a bounded prompt; preserve trailing CONSTRAINT when truncating."""

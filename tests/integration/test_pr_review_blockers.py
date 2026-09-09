@@ -62,7 +62,7 @@ def test_orca_question_from_other_dispatch_not_success() -> None:
 
 def test_orca_worker_done_matching_dispatch_ok() -> None:
     ok, detail, _meta = interpret_orca_wait_event(
-        {"type": "worker_done", "dispatchId": "d1"},
+        {"type": "worker_done", "dispatchId": "d1", "outcome": "succeeded"},
         dispatch_id="d1",
     )
     assert ok is True
