@@ -7,7 +7,8 @@ cloud OpenCode default cannot be labeled as local-worker output.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Mapping, Sequence
+
 from aichestra.local_runtime.base import ModelCapability
 from aichestra.local_runtime.discovery import discover_local_runtimes
 from aichestra.local_runtime.model_selector import select_model
@@ -77,6 +78,28 @@ def build_local_opencode_config(
     }
 
 
+def _as_str_list(value: Any) -> list[str] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        return [str(item) for item in value]
+    return None
+
+
+def _host_from_config(config: Mapping[str, Any] | None) -> str | None:
+    if not config:
+        return None
+    local = config.get("local")
+    if isinstance(local, Mapping):
+        host = local.get("ollama_host") or local.get("endpoint")
+        if host:
+            return str(host)
+    host = config.get("ollama_host") or config.get("endpoint")
+    return str(host) if host else None
+
+
 class LocalWorkerProvider(ProviderAdapter):
     kind = ProviderKind.LOCAL_WORKER
 
@@ -87,11 +110,37 @@ class LocalWorkerProvider(ProviderAdapter):
         ollama_host: str | None = None,
         memory_total_gb: float | None = None,
         memory_available_gb: float | None = None,
+        preferred_ids: list[str] | None = None,
+        allowed_ids: list[str] | None = None,
+        max_parameter_billions: float | None = None,
+        config: Mapping[str, Any] | None = None,
     ) -> None:
+        cfg = dict(config or {})
+        local_cfg = cfg.get("local") if isinstance(cfg.get("local"), Mapping) else cfg
+        if not isinstance(local_cfg, Mapping):
+            local_cfg = {}
+
         self.local_enabled = local_enabled
-        self.ollama_host = ollama_host or DEFAULT_OLLAMA_HOST
+        self.ollama_host = (
+            ollama_host
+            or _host_from_config(cfg)
+            or DEFAULT_OLLAMA_HOST
+        )
         self.memory_total_gb = memory_total_gb
         self.memory_available_gb = memory_available_gb
+        self.preferred_ids = preferred_ids or _as_str_list(
+            local_cfg.get("preferred_models") or local_cfg.get("preferred_ids")
+        )
+        self.allowed_ids = allowed_ids or _as_str_list(
+            local_cfg.get("allowed_models") or local_cfg.get("allowed_ids")
+        )
+        self.max_parameter_billions = max_parameter_billions
+        if self.max_parameter_billions is None and local_cfg.get("max_parameter_billions") is not None:
+            try:
+                self.max_parameter_billions = float(local_cfg["max_parameter_billions"])
+            except (TypeError, ValueError):
+                self.max_parameter_billions = None
+        self.config = cfg
 
     def probe(self) -> ProviderStatus:
         if not self.local_enabled:
@@ -192,12 +241,32 @@ class LocalWorkerProvider(ProviderAdapter):
                 if profile.memory.available_bytes is not None:
                     available = profile.memory.available_bytes / (1024**3)
                 self.memory_available_gb = available
+                self.memory_total_gb = total
             except Exception:
                 return None
         return assess_resources(
             memory_total_gb=float(total),
             memory_available_gb=self.memory_available_gb,
         )
+
+    def _memory_gb_for_size_cap(self) -> float | None:
+        if self.memory_available_gb is not None:
+            return float(self.memory_available_gb)
+        if self.memory_total_gb is not None:
+            return float(self.memory_total_gb)
+        return None
+
+    def _effective_max_parameter_billions(self) -> float | None:
+        if self.max_parameter_billions is not None:
+            return float(self.max_parameter_billions)
+        mem_gb = self._memory_gb_for_size_cap()
+        if mem_gb is None:
+            self._assess()
+            mem_gb = self._memory_gb_for_size_cap()
+        if mem_gb is None:
+            return None
+        # Keep a floor so tiny machines still allow small models; cap large picks.
+        return max(3.0, float(mem_gb) * 0.35)
 
     def _select_local_model(self):
         runtime = OllamaRuntime(host=self.ollama_host)
@@ -206,6 +275,9 @@ class LocalWorkerProvider(ProviderAdapter):
             models,
             required_capability=ModelCapability.TEXT,
             local_enabled=True,
+            preferred_ids=self.preferred_ids,
+            allowed_ids=self.allowed_ids,
+            max_parameter_billions=self._effective_max_parameter_billions(),
         )
 
     def send(

@@ -177,7 +177,28 @@ def run_doctor(
             )
         )
 
+    # Selected local model hint from config (informational; never auto-download)
+    local_cfg = cfg.get("local") if isinstance(cfg.get("local"), dict) else {}
+    preferred = local_cfg.get("preferred_models") or local_cfg.get("preferred_ids")
+    if preferred:
+        report.checks.append(
+            CheckResult(
+                "local_model_hint",
+                CheckStatus.PASS,
+                f"preferred local model hint: {preferred}",
+            )
+        )
+    elif enabled:
+        report.checks.append(
+            CheckResult(
+                "local_model_hint",
+                CheckStatus.WARN,
+                "local enabled but no preferred_models/allowed_models in config",
+            )
+        )
+
     # Project
+    proj: Path | None = None
     if project_root is not None:
         proj = Path(project_root)
         if proj.is_dir():
@@ -188,6 +209,7 @@ def run_doctor(
             report.checks.append(
                 CheckResult("project", CheckStatus.FAIL, f"project root missing: {proj}")
             )
+            proj = None
     else:
         report.checks.append(
             CheckResult(
@@ -195,6 +217,54 @@ def run_doctor(
                 CheckStatus.PASS,
                 "no target project supplied (Aichestra-only check)",
             )
+        )
+
+    if proj is not None:
+        try:
+            from aichestra.orchestration.factory_preserve import detect_factory_tooling
+
+            factory = detect_factory_tooling(proj)
+            if factory.present:
+                report.checks.append(
+                    CheckResult(
+                        "factory",
+                        CheckStatus.PASS,
+                        f"Factory tooling present: {', '.join(factory.markers)}",
+                    )
+                )
+            else:
+                report.checks.append(
+                    CheckResult("factory", CheckStatus.PASS, "no Factory tooling detected")
+                )
+        except Exception as exc:  # noqa: BLE001
+            report.checks.append(
+                CheckResult("factory", CheckStatus.WARN, f"factory detection error: {exc}")
+            )
+
+    # Verification commands from project/config
+    try:
+        from aichestra.orchestration.verification import verification_commands_from_config
+
+        verify_cmds = verification_commands_from_config(cfg)
+        if verify_cmds:
+            report.checks.append(
+                CheckResult(
+                    "verification",
+                    CheckStatus.PASS,
+                    f"{len(verify_cmds)} verification command(s) configured",
+                )
+            )
+        elif proj is not None:
+            report.checks.append(
+                CheckResult(
+                    "verification",
+                    CheckStatus.WARN,
+                    "project root set but no verify commands in config",
+                )
+            )
+    except Exception as exc:  # noqa: BLE001
+        report.checks.append(
+            CheckResult("verification", CheckStatus.WARN, f"verify config error: {exc}")
         )
 
     # Staging

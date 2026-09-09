@@ -18,11 +18,12 @@ from tests.fakes.providers import fake_codex, fake_local_worker, fake_orca
 
 def test_phase_succeeded_only_after_operation_ok() -> None:
     lead = fake_codex("success")
+    # Orca unavailable so implement goes through the lead adapter under test.
     wf = OrchestratedWorkflow(
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(
-            orca=fake_orca("success"),
+            orca=fake_orca("unavailable"),
             lead=lead,
             task_prompt="implement feature",
             maintenance_kwargs={"change_summary": "feature"},
@@ -84,7 +85,7 @@ def test_mode_c_wires_providers_end_to_end(fixture_project_a: Path) -> None:
             lead=lead,
             local_worker=worker,
             project_root=str(fixture_project_a),
-            task_prompt="ship portable bootstrap",
+            task_prompt="ship portable bootstrap across 12 files in multi-package monorepo",
             research_query="README",
             research_fn=research_fn,
             maintenance_kwargs={

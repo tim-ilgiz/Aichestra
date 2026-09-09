@@ -40,7 +40,28 @@ def test_reviewer_tests_and_docs_needed() -> None:
     assert decision.DOC_DECISION == "update_canonical"
     assert decision.DOC_TARGETS == ["README.md"]
     assert decision.ADR_REQUIRED is True
-    assert decision.SPEC_UPDATE is True
+    assert decision.SPEC_UPDATE == "update-living-spec"
+
+
+def test_reviewer_existing_coverage_is_none() -> None:
+    decision = review_change(
+        change_summary="behavior already covered",
+        touches_behavior=True,
+        existing_tests_cover=True,
+        risk="medium",
+    )
+    assert decision.TEST_DECISION == "none"
+
+
+def test_reviewer_high_risk_without_behavior_skips_spec() -> None:
+    decision = review_change(
+        change_summary="noise",
+        touches_behavior=False,
+        touches_public_api=False,
+        risk="high",
+    )
+    assert decision.SPEC_UPDATE == "none"
+    assert decision.ADR_REQUIRED is False
 
 
 def test_writers_skip_on_none() -> None:
@@ -68,8 +89,11 @@ def test_workflow_skips_writers_when_none() -> None:
         ),
     )
     state = wf.run_all()
-    assert Phase.TEST_WRITER.value in state.skipped
-    assert Phase.DOC_WRITER.value in state.skipped
+    # SMALL/none path skips writer phases entirely (or marks them skipped if present).
+    assert Phase.TEST_WRITER.value not in state.completed
+    assert Phase.DOC_WRITER.value not in state.completed
+    assert Phase.TEST_WRITER.value not in state.failed
+    assert Phase.DOC_WRITER.value not in state.failed
     assert Phase.VERIFICATION.value in state.completed
     assert state.phase_outcomes[Phase.MAINTENANCE_REVIEW.value].status is PhaseStatus.SUCCEEDED
     assert Phase.LEAD_IMPLEMENT.value in state.completed

@@ -93,20 +93,46 @@ class ProviderTaskRequest:
     read_only: bool = False
     max_prompt_chars: int = 8_000
     cwd: str | None = None
+    attachments: tuple[str, ...] = ()
 
     def bounded_prompt(self) -> str:
-        parts = [self.prompt.strip()]
+        """Build a bounded prompt; preserve trailing CONSTRAINT when truncating."""
+        prompt = self.prompt.strip()
+        mid_parts: list[str] = []
         if self.context:
             # Keep context compact — callers should pre-compact research.
             ctx = str(self.context)
             if len(ctx) > 4_000:
                 ctx = ctx[:3_999] + "…"
-            parts.append(f"CONTEXT: {ctx}")
+            mid_parts.append(f"CONTEXT: {ctx}")
+        if self.attachments:
+            mid_parts.append("ATTACHMENTS: " + ", ".join(self.attachments[:40]))
+
+        constraint = ""
         if self.read_only:
-            parts.append("CONSTRAINT: read-only; do not modify production files.")
-        text = "\n\n".join(p for p in parts if p)
+            constraint = "CONSTRAINT: read-only; do not modify production files."
+
+        suffix_block = f"\n\n{constraint}" if constraint else ""
+        body = "\n\n".join(p for p in (prompt, *mid_parts) if p)
+        text = body + suffix_block
         if len(text) <= self.max_prompt_chars:
             return text
+
+        # Always keep full CONSTRAINT when it fits; truncate body first.
+        if constraint and len(constraint) <= self.max_prompt_chars:
+            if len(constraint) >= self.max_prompt_chars:
+                return constraint
+            # Prefer ending with the constraint block.
+            room = self.max_prompt_chars - len(suffix_block)
+            if room <= 1:
+                return constraint
+            truncated_body = (body[: room - 1] + "…") if body else ""
+            if truncated_body:
+                return truncated_body + suffix_block
+            return constraint
+
+        if constraint:
+            return constraint[: self.max_prompt_chars - 1] + "…"
         return text[: self.max_prompt_chars - 1] + "…"
 
 

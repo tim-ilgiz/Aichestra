@@ -155,6 +155,84 @@ def _dig_id(payload: dict[str, Any], *keys: str) -> str | None:
     return None
 
 
+def interpret_orca_wait_event(
+    payload: dict[str, Any] | None,
+    *,
+    dispatch_id: str | None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """Interpret ``orca orchestration check --wait`` receipt.
+
+    Only ``worker_done`` for the launched dispatch counts as success.
+    ``question`` / ``escalation`` and mismatched dispatch ids leave work incomplete.
+    """
+    data = payload if isinstance(payload, dict) else {}
+    event = _extract_wait_event(data)
+    event_type = str(
+        event.get("type")
+        or event.get("eventType")
+        or event.get("kind")
+        or data.get("type")
+        or data.get("eventType")
+        or ""
+    ).strip().lower()
+    event_dispatch = (
+        _dig_id(event, "dispatchId")
+        or _dig_id(event, "dispatch_id")
+        or _dig_id(event, "id")
+        or _dig_id(data, "dispatchId")
+        or _dig_id(data, "result", "dispatchId")
+    )
+    meta = {
+        "event_type": event_type or None,
+        "event_dispatch_id": event_dispatch,
+        "expected_dispatch_id": dispatch_id,
+        "event": event or data,
+    }
+    if event_type in {"question", "escalation"}:
+        return (
+            False,
+            f"worker incomplete: received {event_type} (not worker_done)",
+            meta,
+        )
+    if event_type and event_type != "worker_done":
+        return False, f"unexpected wait event type: {event_type}", meta
+    if not event_type:
+        # Some Orca builds nest the type; treat missing type as incomplete.
+        return False, "wait receipt missing worker_done event type", meta
+    if dispatch_id and event_dispatch and event_dispatch != dispatch_id:
+        return (
+            False,
+            (
+                f"dispatch_id mismatch: expected {dispatch_id}, "
+                f"got {event_dispatch}"
+            ),
+            meta,
+        )
+    # Optional explicit failure flag on the done event.
+    status = str(event.get("status") or event.get("result") or "").lower()
+    if status in {"failed", "error", "cancelled"}:
+        return False, f"worker_done with failure status: {status}", meta
+    return True, "worker_done", meta
+
+
+def _extract_wait_event(payload: dict[str, Any]) -> dict[str, Any]:
+    for key in ("event", "result", "check", "data"):
+        nested = payload.get(key)
+        if isinstance(nested, dict):
+            # Prefer nested event when present.
+            inner = nested.get("event")
+            if isinstance(inner, dict):
+                return inner
+            if any(k in nested for k in ("type", "eventType", "kind", "dispatchId")):
+                return nested
+    events = payload.get("events")
+    if isinstance(events, list) and events:
+        first = events[0]
+        if isinstance(first, dict):
+            return first
+    return payload
+
+
 class OrcaProvider(ProviderAdapter):
     kind = ProviderKind.ORCA
 
@@ -404,7 +482,17 @@ class OrcaProvider(ProviderAdapter):
             unavailable_detail="Orca binary unavailable",
         )
         wait_payload = _parse_orca_json(wait_result.output)
-        steps.append({"step": "check-wait", "ok": wait_result.ok})
+        done_ok, done_detail, done_meta = interpret_orca_wait_event(
+            wait_payload, dispatch_id=dispatch_id
+        )
+        steps.append(
+            {
+                "step": "check-wait",
+                "ok": wait_result.ok and done_ok,
+                "detail": done_detail,
+                **done_meta,
+            }
+        )
         meta = {
             "control_plane": True,
             "integration": "execution-v1",
@@ -415,6 +503,7 @@ class OrcaProvider(ProviderAdapter):
             "agent": agent,
             "steps": steps,
             "receipt": wait_payload or worker_payload,
+            "wait_interpretation": done_meta,
         }
         if not wait_result.ok:
             return ProviderTaskResult(
@@ -422,6 +511,15 @@ class OrcaProvider(ProviderAdapter):
                 output=wait_result.output,
                 failure=wait_result.failure,
                 detail=wait_result.detail,
+                session_id=session.session_id,
+                metadata=meta,
+            )
+        if not done_ok:
+            return ProviderTaskResult(
+                ok=False,
+                output=wait_result.output or worker_result.output,
+                failure=FailureClass.ERROR,
+                detail=done_detail,
                 session_id=session.session_id,
                 metadata=meta,
             )

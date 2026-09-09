@@ -94,8 +94,25 @@ def test_build_ssh_argv_quotes_entire_remote_command() -> None:
 
 def test_safe_typed_paths_still_build() -> None:
     op = build_op("cat_file", path="/var/log/app.log")
-    assert op.argv == ("cat", "/var/log/app.log")
+    assert op.argv[0] == "sh"
+    assert op.argv[-1] == "/var/log/app.log"
+    assert "symlink" in op.argv[2]
     op2 = build_op("tail_log", path="/var/log/syslog", lines="100")
-    assert op2.argv == ("tail", "-n", "100", "/var/log/syslog")
+    assert op2.argv[0] == "sh"
+    assert op2.argv[-2:] == ("/var/log/syslog", "100")
     op3 = build_op("curl_health", url="https://stg.example/health")
     assert op3.argv[0] == "curl"
+    assert op3.argv[1] == "-q"
+    assert "--get" in op3.argv
+
+
+def test_private_key_paths_rejected() -> None:
+    for path in (
+        "/home/deploy/.ssh/id_ed25519",
+        "/root/.ssh/id_rsa",
+        "/var/log/../.ssh/id_rsa",  # grammar / .. rejected earlier
+        "/etc/ssl/private/server.key",
+        "/tmp/app.pem",
+    ):
+        with pytest.raises(ValueError, match="allowlist|diagnostic"):
+            build_op("cat_file", path=path)

@@ -1,4 +1,4 @@
-"""Aichestra CLI — doctor / profile / bootstrap / update."""
+"""Aichestra CLI — doctor / profile / bootstrap / update / handoff / orchestrate."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from aichestra import __version__
 from aichestra.bootstrap.core import bootstrap, update
@@ -74,6 +74,43 @@ def build_parser() -> argparse.ArgumentParser:
     )
     research_p.add_argument("--json", action="store_true", default=True)
 
+    handoff_p = sub.add_parser(
+        "handoff",
+        help="Build a bounded Codex→Cursor manual handoff packet (JSON)",
+    )
+    handoff_p.add_argument("--prompt", required=True, help="Original request / brief")
+    handoff_p.add_argument("--repo", type=Path, default=None, help="Repository path")
+    handoff_p.add_argument("--worktree", type=Path, default=None, help="Worktree path")
+    handoff_p.add_argument("--phase", default="", help="Workflow phase name")
+    handoff_p.add_argument("--next-action", default="", help="Suggested next action")
+    handoff_p.add_argument(
+        "--decision",
+        action="append",
+        default=[],
+        help="Accepted decision (repeatable)",
+    )
+    handoff_p.add_argument(
+        "--done",
+        action="append",
+        default=[],
+        help="Completed work item (repeatable)",
+    )
+    handoff_p.add_argument(
+        "--remaining",
+        action="append",
+        default=[],
+        help="Remaining work item (repeatable)",
+    )
+    handoff_p.add_argument(
+        "--failure",
+        action="append",
+        default=[],
+        help="Known failure (repeatable)",
+    )
+    handoff_p.add_argument("--git-status", default="", help="Bounded git status text")
+    handoff_p.add_argument("--git-diff", default="", help="Bounded git diff text")
+    handoff_p.add_argument("--json", action="store_true", default=True)
+
     orch_p = sub.add_parser(
         "orchestrate",
         help="Start Mode C orchestrated workflow (opt-in; does not wrap native CLIs)",
@@ -91,6 +128,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Target project root (.aichestra/project.json + verify commands)",
+    )
+    orch_p.add_argument(
+        "--attach",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Attachment path for media routing (repeatable)",
     )
     orch_p.add_argument("--no-research", action="store_true")
     orch_p.add_argument("--json", action="store_true", default=True)
@@ -167,11 +211,50 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stdout.write(json.dumps(payload, indent=2, default=str) + "\n")
         return 0
 
+    if args.command == "handoff":
+        return _cmd_handoff(args)
+
     if args.command == "orchestrate":
         return _cmd_orchestrate(args)
 
     parser.error(f"unknown command: {args.command}")
     return 2
+
+
+def _cmd_handoff(args: argparse.Namespace) -> int:
+    from aichestra.orchestration.handoff import (
+        build_handoff_packet,
+        prepare_manual_handoff,
+    )
+
+    packet = build_handoff_packet(
+        original_request=args.prompt,
+        repo_path=str(args.repo.resolve()) if args.repo else "",
+        worktree_path=str(args.worktree.resolve()) if args.worktree else "",
+        workflow_phase=args.phase or "",
+        next_action=args.next_action or "",
+        accepted_decisions=list(args.decision or []),
+        completed_work=list(args.done or []),
+        remaining_work=list(args.remaining or []),
+        known_failures=list(args.failure or []),
+        git_status=args.git_status or "",
+        git_diff=args.git_diff or "",
+    )
+    payload = prepare_manual_handoff(packet)
+    sys.stdout.write(json.dumps(payload, indent=2, default=str) + "\n")
+    return 0
+
+
+def _local_cfg_list(local_cfg: dict[str, Any], *keys: str) -> list[str] | None:
+    for key in keys:
+        raw = local_cfg.get(key)
+        if raw is None:
+            continue
+        if isinstance(raw, str):
+            return [raw]
+        if isinstance(raw, (list, tuple)):
+            return [str(item) for item in raw]
+    return None
 
 
 def _cmd_orchestrate(args: argparse.Namespace) -> int:
@@ -200,13 +283,23 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
     repo_root = Path(args.repo_root).resolve() if args.repo_root else find_repo_root()
     project_root = Path(args.project_root).resolve() if args.project_root else None
     cfg = resolve_config(repo_root=repo_root, project_root=project_root)
+    local_cfg = cfg.get("local") if isinstance(cfg.get("local"), dict) else {}
+    ollama_host = local_cfg.get("ollama_host") or local_cfg.get("endpoint")
+    preferred_ids = _local_cfg_list(local_cfg, "preferred_models", "preferred_ids")
+    allowed_ids = _local_cfg_list(local_cfg, "allowed_models", "allowed_ids")
+    enabled_local = local_enabled(cfg)
+
     use_fakes = real_provider_execution_blocked()
-    providers = discover_providers(local_enabled=local_enabled(cfg))
+    providers = discover_providers(
+        local_enabled=enabled_local,
+        ollama_host=str(ollama_host) if ollama_host else None,
+    )
     selection = select_lead(providers)
+    attachments = tuple(str(p) for p in (args.attach or []))
 
     if use_fakes:
         orca = fake_orca()
-        local = fake_local_worker(enabled=local_enabled(cfg))
+        local = fake_local_worker(enabled=enabled_local)
         lead: object | None = None
         if selection.lead and selection.lead.value == "codex":
             lead = fake_codex_lead()
@@ -216,12 +309,29 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
             lead = fake_codex_lead()
     else:
         orca = OrcaProvider()
-        local = LocalWorkerProvider(local_enabled=local_enabled(cfg))
+        local = LocalWorkerProvider(
+            local_enabled=enabled_local,
+            ollama_host=str(ollama_host) if ollama_host else None,
+            preferred_ids=preferred_ids,
+            allowed_ids=allowed_ids,
+            config=cfg,
+        )
         lead = None
         if selection.lead and selection.lead.value == "codex":
             lead = CodexProvider()
         elif selection.lead and selection.lead.value == "cursor":
             lead = CursorProvider()
+
+    # Prefer local_worker for writers when available; else lead (review P2#12).
+    writer_adapter: object | None = None
+    if local is not None:
+        try:
+            if local.probe().available:
+                writer_adapter = local
+        except Exception:
+            writer_adapter = None
+    if writer_adapter is None and lead is not None:
+        writer_adapter = lead
 
     bindings = WorkflowBindings(
         orca=orca,  # type: ignore[arg-type]
@@ -231,13 +341,15 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         project_root=str(project_root) if project_root else None,
         task_prompt=args.prompt,
         research_query=args.query,
+        attachments=attachments,
         verification_commands=verification_commands_from_config(cfg),
         writer_fn=(
             bound_writer_from_lead(
-                lead,  # type: ignore[arg-type]
+                writer_adapter,  # type: ignore[arg-type]
                 project_root=str(project_root) if project_root else None,
+                attachments=attachments,
             )
-            if lead is not None
+            if writer_adapter is not None
             else None
         ),
     )
@@ -248,12 +360,14 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
     )
     state = wf.run_all()
     payload = state.to_dict()
+    # manual_handoff already flows via state.metadata when the workflow sets it.
     payload["config_roots"] = {
         "repo_root": str(repo_root),
         "project_root": str(project_root) if project_root else None,
-        "local_enabled": local_enabled(cfg),
+        "local_enabled": enabled_local,
         "fake_providers": use_fakes,
         "verification_commands": bindings.verification_commands,
+        "attachments": list(attachments),
     }
     sys.stdout.write(json.dumps(payload, indent=2, default=str) + "\n")
     return 0 if not state.failed and not state.stopped else 1

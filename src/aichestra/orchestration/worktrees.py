@@ -39,8 +39,15 @@ def _lock_path(project_root: Path | str) -> Path:
 
 
 def _pid_alive(pid: int) -> bool:
+    """Return True if *pid* appears to exist without signaling/terminating it.
+
+    On Windows, ``os.kill(pid, 0)`` maps to ``TerminateProcess`` and must not be
+    used for liveness checks (Python docs). Use ``OpenProcess`` instead.
+    """
     if pid <= 0:
         return False
+    if os.name == "nt":
+        return _pid_alive_windows(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -50,6 +57,23 @@ def _pid_alive(pid: int) -> bool:
     except OSError:
         return False
     return True
+
+
+def _pid_alive_windows(pid: int) -> bool:
+    """Query Windows process existence without terminating the process."""
+    import ctypes
+    from ctypes import wintypes
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if handle:
+        kernel32.CloseHandle(handle)
+        return True
+    # ERROR_ACCESS_DENIED (5) still means the PID exists.
+    if kernel32.GetLastError() == 5:
+        return True
+    return False
 
 
 def _read_lock(lock_file: Path) -> dict | None:

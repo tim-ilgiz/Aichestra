@@ -88,7 +88,13 @@ def select_model(
     preferred_models = [
         m for m in allowed_models if m.id.lower() in preferred or m.name.lower() in preferred
     ]
-    chosen = (preferred_models or allowed_models or [None])[0]
+    # Without a preferred match, pick the smallest capable model (unknown sizes last).
+    if preferred_models:
+        chosen = preferred_models[0]
+    elif allowed_models:
+        chosen = min(allowed_models, key=_size_sort_key)
+    else:
+        chosen = None
 
     axes = {
         SelectionAxis.AVAILABLE.value: available,
@@ -157,3 +163,11 @@ def _within_size(model: LocalModel, max_b: float | None) -> bool:
     if size is None:
         return True
     return size <= max_b
+
+
+def _size_sort_key(model: LocalModel) -> tuple[int, float]:
+    """Sort key: known sizes ascending; unknown parameter sizes last."""
+    size = parse_parameter_billions(model.parameter_size)
+    if size is None:
+        return (1, float("inf"))
+    return (0, size)

@@ -28,7 +28,9 @@ _CODE_SUFFIXES = {
     ".hpp",
 }
 _DOC_SUFFIXES = {".md", ".rst", ".adoc", ".txt"}
-_TEST_HINTS = ("test", "spec", "tests/", "__tests__/", "testing/")
+_TEST_DIR_SEGMENTS = frozenset(
+    {"tests", "test", "__tests__", "testing", "spec", "specs"}
+)
 _API_HINTS = (
     "api/",
     "/api.",
@@ -54,12 +56,37 @@ _HIGH_RISK_HINTS = (
 
 
 def list_changed_paths(project_root: Path | str | None) -> list[str]:
-    """Return changed paths under the target project (git when available)."""
+    """Return changed paths under the target project (git when available).
+
+    Paths are constrained to ``project_root``. If git resolves a parent
+    repository (nested fixture / subdirectory), only entries that remain under
+    the project root are returned — never the parent repo's full dirty tree.
+    """
     if project_root is None:
         return []
-    root = Path(project_root)
+    root = Path(project_root).resolve()
     if not root.is_dir():
         return []
+    try:
+        top = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if top.returncode != 0:
+        return []
+    toplevel = Path((top.stdout or "").strip()).resolve()
+    if not toplevel.exists():
+        return []
+    try:
+        root.relative_to(toplevel)
+    except ValueError:
+        return []
+
     paths: list[str] = []
     for args in (
         ["git", "-C", str(root), "diff", "--name-only", "HEAD"],
@@ -80,8 +107,15 @@ def list_changed_paths(project_root: Path | str | None) -> list[str]:
             continue
         for line in (completed.stdout or "").splitlines():
             item = line.strip().replace("\\", "/")
-            if item and item not in paths:
-                paths.append(item)
+            if not item:
+                continue
+            abs_path = (toplevel / item).resolve()
+            try:
+                rel = abs_path.relative_to(root).as_posix()
+            except ValueError:
+                continue
+            if rel not in paths:
+                paths.append(rel)
     return paths
 
 
@@ -150,10 +184,26 @@ def infer_change_signals(
 
 
 def _is_test_path(path: str) -> bool:
-    name = Path(path).name.lower()
-    if name.startswith("test_") or name.endswith("_test.py") or ".test." in name:
+    """True for test dirs / test filename patterns — not substring 'test' in names.
+
+    ``src/latest.py`` must not match (``latest`` contains the letters ``test``).
+    """
+    normalized = path.replace("\\", "/").lower()
+    parts = Path(normalized).parts
+    name = parts[-1] if parts else Path(normalized).name
+
+    if any(seg in _TEST_DIR_SEGMENTS for seg in parts[:-1]):
         return True
-    return any(hint in path for hint in _TEST_HINTS)
+
+    if name.startswith("test_") or name.startswith("test-"):
+        return True
+    if name.endswith(("_test.py", "_test.go", "_test.ts", "_test.js", "_test.rb")):
+        return True
+    if ".test." in name or ".spec." in name:
+        return True
+    if name.endswith((".spec.ts", ".spec.tsx", ".spec.js", ".spec.jsx", "_spec.rb")):
+        return True
+    return False
 
 
 def _looks_like_api(path: str) -> bool:

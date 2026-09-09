@@ -165,6 +165,36 @@ def _cpu_info() -> CpuInfo:
     return CpuInfo(name=name, cores_logical=logical, cores_physical=physical)
 
 
+def _darwin_available_bytes() -> int | None:
+    """Best-effort free+inactive+purgeable pages via vm_stat (or None on failure)."""
+    out = _run(["vm_stat"])
+    if not out.strip():
+        return None
+    page_size = 4096
+    ps_match = re.search(r"page size of\s+(\d+)\s+bytes", out, re.I)
+    if ps_match:
+        page_size = int(ps_match.group(1))
+    else:
+        pagesize_raw = _run(["sysctl", "-n", "hw.pagesize"]).strip()
+        if pagesize_raw.isdigit():
+            page_size = int(pagesize_raw)
+
+    def _pages(label: str) -> int | None:
+        match = re.search(rf"^{re.escape(label)}:\s+([\d.]+)", out, re.M)
+        if not match:
+            return None
+        # vm_stat prints trailing periods on counts (e.g. "12345.")
+        return int(float(match.group(1)))
+
+    free_p = _pages("Pages free")
+    inactive_p = _pages("Pages inactive")
+    purgeable_p = _pages("Pages purgeable")
+    if free_p is None and inactive_p is None and purgeable_p is None:
+        return None
+    pages = (free_p or 0) + (inactive_p or 0) + (purgeable_p or 0)
+    return pages * page_size
+
+
 def _memory_info() -> MemoryInfo:
     system = platform.system().lower()
     total = 0
@@ -173,7 +203,7 @@ def _memory_info() -> MemoryInfo:
         raw = _run(["sysctl", "-n", "hw.memsize"]).strip()
         if raw.isdigit():
             total = int(raw)
-        # vm_stat page size * free-ish pages is approximate; leave available optional.
+        available = _darwin_available_bytes()
     elif system == "linux":
         try:
             text = Path("/proc/meminfo").read_text(encoding="utf-8", errors="ignore")

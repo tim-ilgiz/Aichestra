@@ -1,6 +1,8 @@
 """Cursor fallback-lead provider — discovery + opt-in Mode C execution.
 
 Never intercepts native Cursor CLI/IDE usage; Mode C calls this adapter explicitly.
+Only ``cursor-agent`` (and Windows ``.exe``/``.cmd`` variants) are Mode-C-executable.
+The plain ``cursor`` IDE launcher is never treated as available for Mode C.
 """
 
 from __future__ import annotations
@@ -21,23 +23,42 @@ from aichestra.providers.base import (
 )
 from aichestra.providers.execution import run_cli_task
 
-# Cursor agent / CLI names vary; probe common ones without wrapping them.
-_CURSOR_BINARIES = ("cursor-agent", "cursor")
+# Mode C requires cursor-agent; do not discover the plain IDE launcher.
+_CURSOR_AGENT_BINARIES = ("cursor-agent", "cursor-agent.exe", "cursor-agent.cmd")
+_AGENT_EXTENSIONS = (".exe", ".cmd", ".bat")
+
+
+def _strip_windows_ext(name: str) -> str:
+    lower = name.lower()
+    for ext in _AGENT_EXTENSIONS:
+        if lower.endswith(ext):
+            return name[: -len(ext)]
+    return name
+
+
+def _is_cursor_agent_basename(path: str) -> bool:
+    """True when basename is cursor-agent* after stripping Windows extensions."""
+    base = _strip_windows_ext(Path(path).name).lower()
+    return base == "cursor-agent" or base.startswith("cursor-agent")
 
 
 class CursorProvider(ProviderAdapter):
     kind = ProviderKind.CURSOR
 
     def probe(self) -> ProviderStatus:
-        binary = which_binary(_CURSOR_BINARIES)
-        if not binary:
+        binary = which_binary(_CURSOR_AGENT_BINARIES)
+        if not binary or not _is_cursor_agent_basename(binary):
             return ProviderStatus(
                 kind=self.kind,
                 available=False,
                 role=ProviderRole.FALLBACK_LEAD,
                 failure=FailureClass.UNAVAILABLE,
-                detail="Cursor binary not found on PATH",
+                detail=(
+                    "cursor-agent not found on PATH "
+                    "(plain cursor IDE is not Mode-C-executable)"
+                ),
                 intercepts_native_cli=False,
+                metadata={"executable": False},
             )
         version = probe_version(binary)
         return ProviderStatus(
@@ -47,10 +68,14 @@ class CursorProvider(ProviderAdapter):
             binary_path=binary,
             version=version,
             failure=FailureClass.NONE,
-            detail="Cursor available as fallback lead (native use unintercepted)",
+            detail="cursor-agent available as fallback lead (native IDE unintercepted)",
             intercepts_native_cli=False,
-            metadata={"integration": "execution-v1"},
+            metadata={"integration": "execution-v1", "executable": True},
         )
+
+    def supports_execution(self) -> bool:
+        status = self.probe()
+        return bool(status.available and status.metadata.get("executable", False))
 
     def send(
         self,
@@ -65,9 +90,7 @@ class CursorProvider(ProviderAdapter):
                 detail=status.detail or "Cursor unavailable",
                 session_id=session.session_id,
             )
-        prompt = request.bounded_prompt()
-        # Prefer cursor-agent print/non-interactive style when available.
-        if Path(status.binary_path).name.lower() != "cursor-agent":
+        if not _is_cursor_agent_basename(status.binary_path):
             # Avoid launching the GUI IDE as Mode C work.
             return ProviderTaskResult(
                 ok=False,
@@ -78,7 +101,12 @@ class CursorProvider(ProviderAdapter):
                 ),
                 session_id=session.session_id,
             )
-        argv = [status.binary_path, "-p", "--force", prompt]
+        prompt = request.bounded_prompt()
+        # Print/non-interactive; omit --force when read_only.
+        if request.read_only:
+            argv = [status.binary_path, "-p", prompt]
+        else:
+            argv = [status.binary_path, "-p", "--force", prompt]
         return run_cli_task(
             binary=status.binary_path,
             argv=argv,

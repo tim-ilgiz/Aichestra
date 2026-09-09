@@ -61,11 +61,23 @@ def compact_research(
     )
 
 
+_DEFAULT_RESEARCH_PATTERNS: tuple[str, ...] = (
+    "README*",
+    "AGENTS.md",
+    "pyproject.toml",
+    "package.json",
+    "**/*auth*",
+    "src/**/*.py",
+    "lib/**/*.py",
+    "**/README*",
+)
+
+
 def research_paths(
     project_root: Path | str,
     *,
     query: str = "",
-    patterns: tuple[str, ...] = ("README*", "AGENTS.md", "pyproject.toml", "package.json"),
+    patterns: tuple[str, ...] = _DEFAULT_RESEARCH_PATTERNS,
     max_files: int = 20,
     prefer_local_worker: bool = True,
     local_worker_available: bool | None = None,
@@ -174,24 +186,29 @@ def _filesystem_research(
     found: list[str] = []
     findings: list[str] = []
     query_l = query.lower()
+    remaining = max_files
     for pattern in patterns:
-        for path in sorted(root.glob(pattern))[:max_files]:
-            if path.is_file():
-                rel = str(path.relative_to(root)) if path.is_relative_to(root) else str(path)
-                try:
-                    text = path.read_text(encoding="utf-8", errors="ignore")
-                except OSError:
-                    continue
-                if query_l and query_l not in rel.lower() and query_l not in text.lower():
-                    continue
-                found.append(rel)
-                first = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
-                if first:
-                    findings.append(f"{rel}: {first[:160]}")
-            if len(found) >= max_files:
-                break
-        if len(found) >= max_files:
+        if remaining <= 0:
             break
+        for path in _glob_capped(root, pattern, limit=remaining):
+            if not path.is_file():
+                continue
+            rel = str(path.relative_to(root)) if path.is_relative_to(root) else str(path)
+            if rel in found:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if query_l and query_l not in rel.lower() and query_l not in text.lower():
+                continue
+            found.append(rel)
+            first = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+            if first:
+                findings.append(f"{rel}: {first[:160]}")
+            remaining = max_files - len(found)
+            if remaining <= 0:
+                break
 
     if query:
         summary = (
@@ -216,6 +233,23 @@ def _filesystem_research(
         provider="filesystem",
         query=query,
     )
+
+
+def _glob_capped(root: Path, pattern: str, *, limit: int) -> list[Path]:
+    """Match files under root with an early stop so recursive globs stay bounded."""
+    if limit <= 0:
+        return []
+    out: list[Path] = []
+    try:
+        # Path.glob already supports **; iterate without materializing the full tree.
+        for path in root.glob(pattern):
+            if path.is_file():
+                out.append(path)
+                if len(out) >= limit:
+                    break
+    except OSError:
+        return out
+    return out
 
 
 def summarize_large_text(text: str, *, max_chars: int = 2_000) -> str:

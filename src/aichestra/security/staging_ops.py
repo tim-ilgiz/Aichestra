@@ -34,6 +34,39 @@ _URL_RE = re.compile(
 )
 _LINES_RE = re.compile(r"^[1-9][0-9]{0,4}$")
 
+# Diagnostic file reads only — never private keys / SSH material (FR-033/035).
+_CAT_ALLOWED_EXACT = frozenset(
+    {
+        "/etc/os-release",
+        "/etc/hostname",
+        "/etc/issue",
+        "/proc/uptime",
+        "/proc/meminfo",
+        "/proc/loadavg",
+        "/proc/version",
+        "/proc/cpuinfo",
+    }
+)
+_CAT_ALLOWED_PREFIXES = (
+    "/var/log/",
+    "/var/log/journal/",
+    "/run/log/",
+)
+_CAT_DENIED_NAME_RE = re.compile(
+    r"(?i)(^|/)("
+    r"\.ssh|"
+    r"id_[a-z0-9]+|"
+    r".*\.pem|"
+    r".*\.key|"
+    r"authorized_keys|"
+    r"known_hosts|"
+    r"private[_-]?key|"
+    r".*_rsa|"
+    r".*_ed25519|"
+    r".*_ecdsa"
+    r")(/|$)"
+)
+
 
 @dataclass(frozen=True)
 class StagingOp:
@@ -93,9 +126,21 @@ def _tail_log(path: str, lines: str) -> tuple[str, ...]:
             "log path required and must match allowlist path grammar "
             "(no shell metacharacters, no '..')"
         )
+    if not _allow_diagnostic_file(path):
+        raise ValueError(
+            "log path not on staging diagnostic allowlist "
+            "(private keys / SSH material and non-diagnostic paths denied)"
+        )
     if not _allow_lines(str(lines)):
         raise ValueError("lines must be a positive integer (1-99999)")
-    return ("tail", "-n", str(lines), path)
+    script = (
+        'p="$1"; n="$2"; '
+        'if [ -L "$p" ] || [ -h "$p" ]; then '
+        'echo "aichestra: symlink refused" >&2; exit 1; '
+        "fi; "
+        'exec tail -n "$n" -- "$p"'
+    )
+    return ("sh", "-c", script, "aichestra-tail", path, str(lines))
 
 
 def _cat_file(path: str) -> tuple[str, ...]:
@@ -104,7 +149,21 @@ def _cat_file(path: str) -> tuple[str, ...]:
             "file path required and must match allowlist path grammar "
             "(no shell metacharacters, no '..')"
         )
-    return ("cat", path)
+    if not _allow_diagnostic_file(path):
+        raise ValueError(
+            "file path not on staging diagnostic allowlist "
+            "(private keys / SSH material and non-diagnostic paths denied)"
+        )
+    # Refuse symlink bypass: resolve only if not a symlink, then cat.
+    # ``sh`` is allowlisted only for this fixed aichestra-cat wrapper.
+    script = (
+        'p="$1"; '
+        'if [ -L "$p" ] || [ -h "$p" ]; then '
+        'echo "aichestra: symlink refused" >&2; exit 1; '
+        "fi; "
+        'exec cat -- "$p"'
+    )
+    return ("sh", "-c", script, "aichestra-cat", path)
 
 
 def _curl_health(url: str) -> tuple[str, ...]:
@@ -112,7 +171,9 @@ def _curl_health(url: str) -> tuple[str, ...]:
         raise ValueError(
             "health URL must be http(s) and match allowlist host/path grammar"
         )
-    return ("curl", "-fsS", "--max-time", "10", url)
+    # ``-q`` / ``--disable`` MUST be first so user ``.curlrc`` cannot force POST
+    # or other mutating defaults (FR-033/034).
+    return ("curl", "-q", "-fsS", "--max-time", "10", "--get", url)
 
 
 def _allow_service(value: str) -> bool:
@@ -124,6 +185,17 @@ def _allow_path(value: str) -> bool:
         return False
     # Defense in depth: never allow parent traversal segments.
     return ".." not in value.split("/")
+
+
+def _allow_diagnostic_file(value: str) -> bool:
+    """Allow only known diagnostic paths; never private key / SSH material."""
+    if not value or not _allow_path(value):
+        return False
+    if _CAT_DENIED_NAME_RE.search(value):
+        return False
+    if value in _CAT_ALLOWED_EXACT:
+        return True
+    return any(value.startswith(prefix) for prefix in _CAT_ALLOWED_PREFIXES)
 
 
 def _allow_lines(value: str) -> bool:

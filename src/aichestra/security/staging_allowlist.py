@@ -68,8 +68,11 @@ _ALLOWED_BINARIES = frozenset(
         "id",
         "whoami",
         "ls",
+        "sh",
     }
 )
+
+_AICHESTRA_SH_WRAPPERS = frozenset({"aichestra-cat", "aichestra-tail"})
 
 _ALLOWED_SYSTEMCTL_SUBCOMMANDS = frozenset({"status", "is-active", "is-enabled", "show"})
 
@@ -187,6 +190,11 @@ def evaluate_command(
             environment="staging",
         )
 
+    if binary == "sh":
+        sh_deny = _evaluate_aichestra_sh_wrapper(cmd)
+        if sh_deny is not None:
+            return sh_deny
+
     if binary == "systemctl":
         sub = cmd[1].lower() if len(cmd) > 1 else ""
         if sub not in _ALLOWED_SYSTEMCTL_SUBCOMMANDS:
@@ -198,7 +206,18 @@ def evaluate_command(
             )
 
     # Reject shell metacharacters / redirects even inside args.
-    for token in cmd:
+    # Fixed aichestra sh wrappers carry a trusted script body at index 2.
+    skip_meta_indexes: set[int] = set()
+    if (
+        binary == "sh"
+        and len(cmd) >= 4
+        and cmd[1] == "-c"
+        and cmd[3] in _AICHESTRA_SH_WRAPPERS
+    ):
+        skip_meta_indexes.add(2)
+    for idx, token in enumerate(cmd):
+        if idx in skip_meta_indexes:
+            continue
         if token in _DENIED_REDIRECT_TOKENS or token.startswith(">"):
             return StagingDecision(
                 allowed=False,
@@ -225,6 +244,48 @@ def evaluate_command(
         argv=tuple(cmd),
         environment="staging",
     )
+
+
+def _evaluate_aichestra_sh_wrapper(cmd: list[str]) -> StagingDecision | None:
+    """Allow only fixed aichestra-cat / aichestra-tail wrappers (symlink-safe)."""
+    if len(cmd) < 4 or cmd[1] != "-c":
+        return StagingDecision(
+            allowed=False,
+            reason="sh on staging allowlist only for fixed aichestra wrappers",
+            argv=tuple(cmd),
+            environment="staging",
+        )
+    wrapper = cmd[3] if len(cmd) > 3 else ""
+    if wrapper not in _AICHESTRA_SH_WRAPPERS:
+        return StagingDecision(
+            allowed=False,
+            reason=f"sh wrapper not allowlisted: {wrapper}",
+            argv=tuple(cmd),
+            environment="staging",
+        )
+    script = cmd[2]
+    if "aichestra: symlink refused" not in script:
+        return StagingDecision(
+            allowed=False,
+            reason="sh script missing symlink refusal guard",
+            argv=tuple(cmd),
+            environment="staging",
+        )
+    if wrapper == "aichestra-cat" and "exec cat --" not in script:
+        return StagingDecision(
+            allowed=False,
+            reason="aichestra-cat wrapper must exec cat",
+            argv=tuple(cmd),
+            environment="staging",
+        )
+    if wrapper == "aichestra-tail" and "exec tail -n" not in script:
+        return StagingDecision(
+            allowed=False,
+            reason="aichestra-tail wrapper must exec tail",
+            argv=tuple(cmd),
+            environment="staging",
+        )
+    return None
 
 
 def _evaluate_curl_readonly(cmd: list[str]) -> StagingDecision | None:
