@@ -8,17 +8,21 @@ description: "Task list for portable Aichestra platform implementation"
 
 **Prerequisites**: plan.md (required), spec.md (required)
 
-**Architecture contract status (2026-09-09)**: Spec/plan/AGENTS realigned to
-**single-Orca-Run Mode C**. Phase 22 closes architect REQUEST CHANGES (Spec Kit
-via Orca, `mode_c_writers` handoff, policy-only lead, dead seams, contract
-tests). Local pytest green (T144). **Do not merge** until T124/T137 GitHub CI
-matrix is green.
+**Architecture contract status (2026-09-09)**: Spec/plan are source of truth for
+**single-Orca-Run Mode C** with provider/runtime/model-agnostic
+**ExecutionTargets**. Coordinator under Orca owns the concrete workflow/DAG;
+Orca owns canonical Run/Task/Dispatch/worker/terminal/worktree lifecycle;
+Aichestra owns discovery, ExecutionTarget resolution, policy, security,
+deterministic gates and verification. Phase 24 production realignment
+(T163, T169–T176, T167–T168) remains open. **Do not merge** until fresh GitHub
+CI matrix is green on current HEAD (T167) and live Mode C smoke (T168) passes.
 
 **Tests**: Included where required by success criteria (SC-001–SC-016) and
-architecture contract tests (MODE-C-001–010). Prefer minimal high-value coverage.
+architecture contract tests (MODE-C-001–010, MODE-C-017–020). Prefer minimal
+high-value coverage.
 
 **Organization**: Phases follow foundation → user stories → CI/smoke/docs →
-architecture realignment.
+architecture realignment → ExecutionTarget / launch-proof work.
 
 ## Format: `[ID] [P?] [Story?] Description`
 
@@ -474,34 +478,52 @@ streams, truthful bootstrap readiness semantics, and legacy seam removal.
 
 ---
 
-## Phase 24: Workflow ownership / project-execution realignment (CURRENT)
+## Phase 24: Workflow ownership / ExecutionTarget realignment (CURRENT)
 
 **Purpose**: Remove the remaining architectural assumption that Mode C has a
-fixed Aichestra-owned agent-phase workflow. Make Orca the owner of the workflow
-graph/state machine and make Aichestra project-aware rather than
-workflow-specific.
+fixed Aichestra-owned agent-phase workflow. Make the coordinator under Orca
+own the concrete workflow/DAG; Orca own canonical Run/Task/Dispatch/worker/
+terminal/worktree lifecycle; and Aichestra own discovery, ExecutionTarget
+resolution, policy, security, deterministic gates and verification
+(provider/runtime/model-agnostic).
+
+Key contract:
+
+```text
+Agent Runtime != Model Provider
+
+Agent Runtime + compatible provider/model + proven Orca launch path
+= ExecutionTarget
+
+Coordinator under Orca owns concrete workflow/DAG.
+Orca owns canonical Run/Task/Dispatch/worker/terminal/worktree lifecycle.
+Aichestra owns discovery, ExecutionTarget resolution, policy,
+security, deterministic gates and verification.
+```
 
 ### Architecture source-of-truth correction
 
-- [x] T154 CRITICAL: Update `spec.md` to state that Orca owns the workflow graph
-      and execution state machine; forbid a universal Aichestra
-      research→implement→writers→review pipeline (MODE-C-011/012).
+- [x] T154 CRITICAL: Update `spec.md` so coordinator under Orca owns the
+      concrete workflow/DAG and Orca owns canonical lifecycle/state; forbid a
+      universal Aichestra research→implement→writers→review pipeline
+      (MODE-C-011/012).
 
 - [x] T155 CRITICAL: Update `spec.md` with project-context discovery and
       project-owned instruction precedence requirements
       (MODE-C-013/014; FR-078/079/080).
 
 - [x] T156 CRITICAL: Update `plan.md` to replace the fixed Mode C step pipeline
-      with `task + project → Aichestra context/policy → one Orca Run → Orca-owned
-      workflow`.
+      with `task + project → Aichestra context/policy/ExecutionTargets → one
+      Orca Run → coordinator DAG under Orca lifecycle`.
 
-- [x] T157 HIGH: Update `plan.md` ownership boundaries: workflow graph,
-      agent/task ordering, workers, handoffs and worktrees belong to Orca;
+- [x] T157 HIGH: Update `plan.md` ownership boundaries: concrete DAG belongs to
+      the coordinator under Orca; Run/Task/Dispatch/worker/handoff/worktree
+      lifecycle belongs to Orca; discovery/ExecutionTarget resolution/
       project context/policy/security/verification belong to Aichestra.
 
-### Production realignment — NOT COMPLETE
+### Production realignment — workflow ownership (landed)
 
-- [ ] T158 CRITICAL: Refactor Mode C production controller so `run_all()` no
+- [x] T158 CRITICAL: Refactor Mode C production controller so `run_all()` no
       longer hard-codes a universal research/implement/writers/review workflow.
 
 - [x] T159 CRITICAL: Remove production dependence on fixed agent `Phase` values.
@@ -518,42 +540,223 @@ workflow-specific.
       structure when the target project already has a canonical Spec Kit
       lifecycle. Define compatibility/migration behavior.
 
-- [ ] T163 HIGH: Make provider/capability selection policy data consumed by Orca
-      rather than Aichestra-owned agent scheduling decisions.
-
-- [ ] T164 HIGH: Derive Mode C execution status from Orca Run state plus
+- [x] T164 HIGH: Derive Mode C execution status from Orca Run state plus
       deterministic Aichestra gate results; do not maintain a parallel agent
       workflow state machine.
 
-- [ ] T165 HIGH: Add architecture contract tests proving two materially
+- [x] T165 HIGH: Add architecture contract tests proving two materially
       different task/project workflows can execute without adding/changing
       Python `Phase` scheduling code.
 
 - [x] T166 HIGH: Add contract tests proving target-project instructions are
       discovered, passed to Orca and remain authoritative.
 
+### Production realignment — ExecutionTarget / launch proof (OPEN)
+
+- [ ] T163 CRITICAL: Implement provider/runtime/model-agnostic ExecutionTarget
+      discovery and resolution.
+
+      Aichestra must independently discover Agent Runtimes, Model
+      Providers/models, compatibility and proven Orca launch strategies, and
+      expose only runnable ExecutionTargets to Mode C.
+
+      Legacy `local-worker` is compatibility input only and must not remain the
+      canonical execution abstraction.
+
+      OpenCode + Ollama MAY appear as one example/implementation target only —
+      not an architectural or mandatory local path.
+      (MODE-C-017–020; FR-005/047/050/051/065/066/069)
+
+- [ ] T169 CRITICAL: Introduce canonical domain models for:
+
+      - AgentRuntime
+      - ModelProvider
+      - ExecutionTarget
+      - ExecutionCapabilities
+      - ExecutionPolicy
+      - LaunchStrategy
+
+      ExecutionTarget must include enough data to identify:
+
+      - runtime
+      - optional provider
+      - optional model
+      - optional endpoint
+      - locality
+      - capabilities
+      - enabled
+      - available
+      - launch_strategy
+
+      Existing provider/local-worker structures may temporarily adapt into this
+      model, but must not remain the Mode C canonical abstraction.
+      (MODE-C-017–020; FR-005/047/050/051/065/066/069)
+
+- [ ] T170 CRITICAL: Separate discovery of:
+
+      - installed/configured Agent Runtimes
+      - Model Providers / inference backends
+      - available models
+      - configured endpoints
+      - model capabilities
+      - machine capabilities
+
+      Discovery facts alone must NOT mark an ExecutionTarget runnable.
+
+      Examples (`OpenCode installed = true`, `Ollama reachable = true`,
+      `model installed = true`) must still require compatibility + launch proof.
+      (MODE-C-017–020; FR-005/047/050/051/065/066/069)
+
+- [ ] T171 CRITICAL: Implement ExecutionTarget compatibility/resolution.
+
+      Resolver must combine runtime/provider/model/machine/project facts and
+      produce only valid target candidates.
+
+      Target state must distinguish at least:
+
+      - enabled / disabled
+      - available / unavailable
+      - capable / incapable
+      - allowed / forbidden
+      - preferred / non-preferred
+      - launchable / unsupported
+
+      Disabling one runtime/provider/model removes only affected targets.
+      (MODE-C-017–020; FR-005/047/050/051/065/066/069)
+
+- [ ] T172 HIGH: Pass resolved ExecutionTargets and their capabilities/policy
+      into the generic coordinator bootstrap context.
+
+      Coordinator must select inner workers using capabilities/policy.
+
+      Aichestra must NOT introduce product-name phase routing such as:
+
+      research = OpenCode
+      implementation = Codex
+      docs = local-worker
+
+      Product preferences are allowed only as explicit user/project/default
+      policy.
+      (MODE-C-017–020; FR-005/047/050/051/065/066/069)
+
+- [ ] T173 CRITICAL: Resolve exactly one runnable bootstrap ExecutionTarget
+      solely for launching the generic Mode C coordinator.
+
+      This is a narrow bootstrap placement exception.
+
+      It MUST NOT allow Aichestra to select/schedule research, implementation,
+      writers, review or other inner DAG workers.
+
+      No runnable coordinator target → Mode C fail closed.
+      (MODE-C-017–020; FR-005/047/050/051/065/066/069)
+
+- [ ] T174 CRITICAL: Implement launch-strategy abstraction for ExecutionTargets.
+
+      Supported strategy types:
+
+      - orca-native
+      - orca-existing-terminal
+      - orca-terminal-bridge
+      - unsupported
+
+      Prefer native Orca worker launch.
+
+      A terminal bridge may be used only when native Orca launch cannot express
+      the required runtime/provider/model binding and when the actual
+      Orca-supervised agent process can be proven to use the intended
+      configuration.
+
+      The bridge must not create an Aichestra-owned agent loop.
+      (MODE-C-017–020; FR-005/047/050/051/065/066/069)
+
+- [ ] T175 CRITICAL: An ExecutionTarget may be advertised as runnable only when
+      its launch strategy is proven to bind the actual agent process to the
+      intended runtime/provider/model/endpoint.
+
+      The following are insufficient proof:
+
+      - endpoint discovery alone
+      - installed model alone
+      - model/provider text in prompt
+      - environment variables applied only to the Aichestra/RPC client process
+
+      If proof is unavailable:
+
+      launch_strategy = unsupported
+
+      and Mode C must not select the target.
+      (MODE-C-017–020; FR-005/047/050/051/065/066/069)
+
+- [ ] T176 HIGH: Implement Orca worker-release recovery semantics.
+
+      Handle at least:
+
+      - released
+      - already_released
+      - release_pending
+      - release_unknown
+
+      `release_pending` must not automatically be treated as hard failure merely
+      because the worker was not immediately released.
+
+      Follow the exact recovery action / `projection.nextAction` supplied by
+      Orca, within a bounded allowlisted recovery flow, then re-check exact
+      worker state.
+
+      Never substitute broad `orca terminal close`.
+
+      Success requires no unresolved reclaimable worker resources.
+
+      Add production-adapter tests for:
+
+      * released
+      * already_released
+      * release_pending recovery
+      * release_unknown
+      * unresolved reclaimable resources
+
+### Validation gates (OPEN)
+
 - [ ] T167 CRITICAL: Re-run full local tests and GitHub CI matrix after the
-      production refactor.
-      <!-- Evidence: full local `pytest tests/` green (192 passed). CI workflow
-           still runs the same matrix with AICHESTRA_FAKE_PROVIDERS; GitHub
-           Actions run 34396617374 passed at reviewed HEAD (review-supplied evidence).
-           Subsequent coordinator fixes require a new matrix run. -->
+      current documentation/architecture HEAD.
+      <!-- Evidence: do NOT reuse older HEAD (e.g. run 34396617374). Keep open
+           until a fresh GitHub Actions matrix completes successfully on Ubuntu,
+           macOS, and Windows for the current HEAD. Update this comment only
+           after that green run. Local pytest alone is insufficient. -->
 
-- [ ] T168 CRITICAL: Run at least one real Mode C integration smoke proving
-      `task + project → one real Orca Run → real worker → worktree/result`
-      without an Aichestra-owned fixed workflow.
-      <!-- NOT VALIDATED: authority is now an explicit production precondition.
-           Current live status probe: app.running=false, runtime.reachable=false,
-           state=stale_bootstrap. No real coordinator DAG has been observed. -->
+- [ ] T168 CRITICAL: Run at least one real Mode C integration smoke proving:
 
-Coordinator review fixes: explicit policy-selected coordinator contract, valid
-bootstrap placement, authority precondition, canonical run-show read, nested
-instruction discovery, vision model binding, and removal of duplicate attachment
-staging are implemented. Production adapter tests cover the handoff contract;
-T158/T163/T164/T165 remain open until live convergence is established.
+      ```text
+      real Aichestra CLI
+      → real Orca runtime
+      → exactly ONE Run
+      → generic coordinator through runnable bootstrap ExecutionTarget
+      → coordinator dynamically creates at least one child Task/Dispatch
+      → child uses an allowed ExecutionTarget
+      → maintenance ask/reply gate
+      → convergence
+      → worker_done
+      → worker cleanup
+      → deterministic verification
+      → canonical task/run validation
+      → SUCCESS
+      ```
 
-**Checkpoint**: Do not treat architecture as converged until T158–T168 are
-complete.
+      Smoke must prove that Aichestra did NOT execute a fixed
+      research→implement→writers→review Python pipeline.
+
+      If local-only support is claimed, add a separate local-only smoke where
+      Codex/Cursor are unavailable and a proven local ExecutionTarget performs
+      real work through Orca.
+      <!-- NOT VALIDATED: no fresh live Mode C smoke on current HEAD. -->
+
+Do not mark T163/T169–T176 complete merely because documentation describes the
+architecture. Coordinator bootstrap, project-context, and workflow-ownership
+fixes already landed (T158–T162, T164–T166) do not satisfy ExecutionTarget
+discovery/resolution or launch-proof work.
+
+**Checkpoint**: Do not treat architecture as converged until T163, T167–T176
+are complete.
 
 ---
 
@@ -566,24 +769,26 @@ complete.
 - Phase 21 (T125–T137) closes dual-orchestrator / fail-closed gaps
 - Phase 22 (T138–T144) closes architect REQUEST CHANGES residuals
 - Phase 23 (T145–T153) closes corrective alignment follow-up
-- Phase 24 (T158/T163/T164/T165 reopened pending coordinator convergence;
-  T168 live smoke still open) is the current architecture
-  convergence gate for workflow ownership / project-execution control plane
-- T108–T124 depend on T103–T107; T124/T137/T144 gate merge
-- Converge / “feature complete” only after T137 + Phase 22 + Phase 24 T158–T168
+- Phase 24 workflow-ownership slice (T158–T162, T164–T166) landed; open gate is
+  ExecutionTarget work (T163, T169–T175), worker-release recovery (T176),
+  fresh CI (T167), and live smoke (T168)
+- T108–T124 depend on T103–T107; T167 gates merge on current HEAD CI
+- Converge / “feature complete” only after Phase 24 T163 + T167–T176
 - Phase 24 supersedes any earlier interpretation of T108/T125/T139 that allows
-  `ModeCRunController.run_all()` to remain the owner of a fixed agent workflow.
+  `ModeCRunController.run_all()` to remain the owner of a fixed agent workflow
+  or that treats legacy `local-worker` as the Mode C canonical abstraction
 - Earlier green tests prove the previous contract only; they do not prove
-  MODE-C-011–016.
+  MODE-C-011–020 ExecutionTarget launch proof
 
 ### User Story Mapping
 
 - **US1** (bootstrap/portability): Phases 2, 8, 9, T134
-- **US2** (modes/providers/Orca): Phases 4, 5, 20, 21, 24
+- **US2** (modes/providers/Orca/ExecutionTargets): Phases 4, 5, 20, 21, 24
 - **US3** (project-aware Orca execution): Phase 6, 20, 21, 24
 - **US4** (staging security): Phase 7
 - **US5** (isolation/CI/smoke): Phases 10–12, T137, T167–T168
-- **US6** (machine/local AI): Phase 3, parts of 9, T122
+- **US6** (machine/local AI / ExecutionTarget inputs): Phase 3, parts of 9,
+  T122, T169–T175
 
 ### Parallel Opportunities
 
@@ -591,6 +796,9 @@ complete.
 - T114–T116 parallel once T111 lands
 - After T154–T157: T160–T162 can proceed in parallel with T158–T159 once
   controller seams are identified
+- T169 → T170 → T171 → T172/T173/T174 (T175 depends on T174 proof);
+  T176 can proceed in parallel with T169–T175 once Orca adapter seams exist
+- T167/T168 remain after production ExecutionTarget/launch work lands
 
 ---
 
@@ -599,38 +807,48 @@ complete.
 | Requirement cluster | Tasks |
 |---------------------|-------|
 | MODE-C-001–010 architecture contract | T103–T107, T108–T123, T125–T136 |
-| MODE-C-011–016 workflow ownership | T154–T157 (docs), T158–T168 (code) |
-| FR-078–083 project-execution control plane | T154–T157 (docs), T158–T166 (code) |
+| MODE-C-011–016 workflow ownership | T154–T157 (docs), T158–T162, T164–T166 (code landed); T167–T168 (validation) |
+| MODE-C-017–020 ExecutionTarget / launch proof | T163, T169–T175 |
+| FR-005 / FR-047 / FR-050 / FR-051 / FR-065 / FR-066 / FR-069 | T163, T169–T175 |
+| FR-078–083 project-execution control plane | T154–T157 (docs), T158–T162, T164–T166 (code) |
+| Orca release lifecycle | T176 |
 | FR-067–073 hardening | T125–T135 |
 | Dual-orchestrator regression tests | T136 |
 | Windows/Linux native bootstrap | T006, T041–T043 |
 | Arbitrary clone path / no fixed home | T005, T009, T053, T054 |
-| Machine profiler / local runtime / routing | T010–T014, T122 |
-| Three modes + graceful degradation | T015–T024, T108–T117 |
+| Machine profiler / local runtime / routing | T010–T014, T122 (inputs); T169–T175 (ExecutionTarget resolution) |
+| Three modes + graceful degradation | T015–T024, T108–T117, T163, T169–T175 |
 | maintenance-reviewer + verifier + audit | T025–T034, T114–T116 |
 | Staging read-only + sanitization | T035–T039 |
 | GitHub Actions matrix / no quota | T055–T057, T124, T137, T167 |
 | Isolation fixtures | T050–T052 |
-| Truthful validation + operator UX | T058–T061, T064 |
+| Truthful validation + operator UX | T058–T061, T064, T168 |
 
 ---
 
 ## Implementation Strategy
 
 1. Spec/plan/AGENTS are source of truth — do not soften for code
-2. Mode C is `task + project → discovery/context/policy → one Orca Run`;
-   Orca owns the workflow graph — Aichestra is not a fixed agent-phase engine
-3. Do not mark T124/T137 `[x]` until GitHub CI matrix is green
+2. Mode C is `task + project → discovery/ExecutionTargets/policy → one Orca Run
+   → bootstrap coordinator`; coordinator under Orca owns the concrete DAG;
+   Orca owns canonical lifecycle — Aichestra is not a fixed agent-phase engine
+   and must not treat legacy `local-worker` as the canonical abstraction
+3. Do not mark T167 `[x]` until a **fresh** GitHub CI matrix is green on the
+   current HEAD (Ubuntu + macOS + Windows); do not reuse older HEAD evidence
 4. Do not claim Windows/Linux live validation from macOS-only execution
 5. Do not reintroduce `while current_phase: launch Orca worker` or a universal
    research→implement→writers→review `run_all()` pipeline
-6. Do not treat architecture as converged until Phase 24 T158–T168 complete
+6. Do not treat architecture as converged until Phase 24 T163 + T167–T176
+   complete; docs describing ExecutionTargets do not close those tasks
+7. Advertise an ExecutionTarget as runnable only with proven launch binding;
+   discovery/install alone is insufficient
 
-Review follow-up (47a6d020): maintenance uses an in-dispatch ask/reply callback;
-canonical Run/task confirmation gates success; coordinator release and
-reclaimable-resource checks are implemented. Task specs use explicit Target,
-Change, Constraints, Ownership and Observable acceptance sections. Mutating
-adapter routes require live authority. T163 remains blocked on a proven portable
-Orca/OpenCode model+endpoint launch contract; local-only Mode C now fails closed.
-Local validation: `python3 -m pytest tests/` — 215 passed.
-T167 requires fresh CI for these changes, and T168 remains NOT VALIDATED.
+Review follow-up: maintenance uses an in-dispatch ask/reply callback; canonical
+Run/task confirmation gates success. Task specs use explicit Target, Change,
+Constraints, Ownership and Observable acceptance sections. Mutating adapter
+routes require live authority. Remaining open work is provider/runtime/
+model-agnostic ExecutionTarget discovery/resolution with proven Orca launch
+strategies (T163, T169–T175), Orca worker-release recovery (T176), fresh CI
+(T167), and live Mode C smoke (T168). OpenCode + Ollama is one possible example
+target only — not a mandatory architecture. Local pytest green does not close
+T167/T168.
