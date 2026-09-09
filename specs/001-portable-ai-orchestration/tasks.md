@@ -9,10 +9,11 @@ description: "Task list for portable Aichestra platform implementation"
 **Prerequisites**: plan.md (required), spec.md (required)
 
 **Architecture contract status (2026-09-09)**: Spec/plan/AGENTS realigned to
-**single-Orca-Run Mode C**. Production Mode C is `ModeCRunController` /
-`mode_c.py`: one Orca Run, agent work via Orca only, local deterministic gates.
-Phase 20 (T103–T124) is complete for this contract. Converge / PR merge still
-requires maintainer review against live Orca when available.
+**single-Orca-Run Mode C**. Production Mode C is a thin coordinator
+(`ModeCRunController.run_all` → one `mode_c_agents` Orca handoff + local
+gates). Earlier Phase 20 `[x]` marks on T108–T124 were premature; acceptance
+is Phase 21 (T125–T137). Local pytest green; GitHub CI matrix pending push
+(T124/T137).
 
 **Tests**: Included where required by success criteria (SC-001–SC-016) and
 architecture contract tests (MODE-C-001–010). Prefer minimal high-value coverage.
@@ -353,36 +354,62 @@ test_attachments_are_forwarded_to_orca
 
 ### Production realignment
 
-- [x] T108 CRITICAL: Define single-Orca-run Mode C contract in code
-      (`mode_c` thin controller; remove general-purpose phase engine)
-- [x] T109 CRITICAL: Make project-root mandatory/resolvable for Mode C; fail
-      before orchestration if unresolved (MODE-C-005)
-- [x] T110 CRITICAL: Fail Mode C when Orca unavailable; never direct lead
-      fallback (MODE-C-001/006)
-- [x] T111 CRITICAL: Replace direct provider execution with Orca worker
-      dispatch for implement/research/writers/review (MODE-C-003/004)
-- [x] T112 CRITICAL: Ensure exactly one `orca orchestration run-create` per
-      Mode C invocation; count==1 contract (MODE-C-002)
-- [x] T113 CRITICAL: Associate every Orca task/worker/worktree with the same
-      `run_id` (MODE-C-007)
-- [x] T114 HIGH: Route research through Orca (not LocalWorkerProvider scheduler)
-- [x] T115 HIGH: Route test/doc writers through Orca
-- [x] T116 HIGH: Route final lead review through Orca
-- [x] T117 HIGH: Remove direct Mode-C Codex/Cursor/local-worker fallback paths
-- [x] T118 HIGH: Rework/remove custom worktree edit-lock if Orca owns worktrees
-- [x] T119 HIGH: Provider enabled/disabled configuration (MODE-C-009; FR-066)
-- [x] T120 HIGH: Real attachment forwarding through Orca (MODE-C-010); honest
-      limitation if primitive missing
-- [x] T121 HIGH: Codex→Cursor handoff inside existing Orca context (FR-035/036)
-- [x] T122 MEDIUM: Capability-based profiles only; quarantine Mac identity
-      fixtures; fix tier ordering
-- [x] T123 CRITICAL: Remove obsolete tests asserting Orca-less Mode C or
-      direct-lead fallback; keep SC-016 contract suite green against target
-- [x] T124: After T108–T123, re-run full suite; only then consider converge
+Earlier `[x]` on T108–T124 were premature (agent phase scheduler, soft-fail
+`run-use`, synthetic run ids, Spec Kit `*_satisfied` hacks, `/tmp/mode-c-proj`
+CI failures). Re-verified under Phase 21.
+
+- [x] T108 CRITICAL: Thin Mode C controller (`run_all` → `mode_c_agents`);
+      `run_phase` refuses agent-phase worker scheduling
+- [x] T109 CRITICAL: Project-root mandatory/resolvable (MODE-C-005)
+- [x] T110 CRITICAL: Fail Mode C when Orca unavailable (MODE-C-001/006)
+- [x] T111 CRITICAL: Agent work via Orca only (MODE-C-003/004)
+- [x] T112 CRITICAL: Exactly one `run-create` / resume (MODE-C-002)
+- [x] T113 CRITICAL: Same-run association fail-closed (MODE-C-007; FR-068)
+- [x] T114 HIGH: Research via Orca policy package (not LocalWorkerProvider)
+- [x] T115 HIGH: Writers via Orca under same run
+- [x] T116 HIGH: Final lead review via Orca
+- [x] T117 HIGH: No direct Mode C Codex/Cursor/local-worker fallback
+- [x] T118 HIGH: No Mode C edit.lock ownership (Orca worktrees)
+- [x] T119 HIGH: Provider enabled/disabled authoritative (MODE-C-009; FR-069)
+- [x] T120 HIGH: Attachments outside parent checkout (MODE-C-010; FR-071)
+- [x] T121 HIGH: Codex→Cursor handoff same-run executable UX (FR-035/036/073)
+- [x] T122 MEDIUM: Capability-based profiles; Windows CIM; macOS GPU harden
+- [x] T123 CRITICAL: Obsolete dual-orchestrator assertions removed
+- [ ] T124: Full suite + GitHub CI matrix green — local pytest green;
+      CI pending push/merge verification
 
 **Checkpoint**: Architecture contract locked in docs+tests+production Mode C
 path. Live Orca smoke on developer machines remains optional for converge.
-Feature ready for maintainer architecture review before merge.
+Feature ready for maintainer architecture review after Phase 21 / T137.
+
+---
+
+## Phase 21: Dual-orchestrator removal & fail-closed hardening (CURRENT)
+
+**Purpose**: Close gaps that Phase 20 prematurely marked complete.
+
+- [x] T125 CRITICAL: Remove remaining Aichestra-owned Mode C agent phase
+      scheduler (`run_all` thin coordinator; `run_phase` refuses agent phases)
+- [x] T126 CRITICAL: Real MEDIUM Spec Kit artifact lifecycle
+      (`.aichestra/speckit/` files; no `*_satisfied` metadata unlocks)
+- [x] T127 CRITICAL: LARGE Spec Kit clarify/plan/tasks lifecycle (file-backed)
+- [x] T128 CRITICAL: Provider disable authoritative for Orca dispatch
+      (never invent disabled lead; never force opencode when local disabled)
+- [x] T129 CRITICAL: Same-run task association fail-closed
+      (`run-use` failure → no `task-create`; no unbound retry)
+- [x] T130 CRITICAL: Remove synthetic `aichestra-run-*` run ids (fail closed)
+- [x] T131 HIGH: Isolate attachments from parent checkout
+- [x] T132 HIGH: Executable same-run handoff (`--run-id` / recent-run resolve;
+      README matches)
+- [x] T133 HIGH: Arbitrary-project verification detection/bootstrap
+      (.NET / Python / Node safe fallback)
+- [x] T134 HIGH: Bootstrap can honestly reach `bootstrap_complete=true`
+- [x] T135 MEDIUM: Orca wait completion correlated to expected dispatch_id
+- [x] T136 CRITICAL: Architecture tests against dual-orchestrator regression
+- [ ] T137 CRITICAL: Full green CI / convergence (local `pytest` green;
+      GitHub Actions macOS/Windows/Linux after push — do not claim until green)
+
+**Checkpoint**: Do not merge until T124/T137 GitHub CI matrix is green.
 
 ---
 
@@ -392,16 +419,17 @@ Feature ready for maintainer architecture review before merge.
 
 - Phases 1–13 historical foundation
 - Phase 20 contract artifacts (T103–T107) precede production realignment
-- T108–T124 depend on T103–T107
-- Converge / “feature complete” only after T124
+- Phase 21 (T125–T137) closes dual-orchestrator / fail-closed gaps
+- T108–T124 depend on T103–T107; T124/T137 gate converge
+- Converge / “feature complete” only after T137
 
 ### User Story Mapping
 
-- **US1** (bootstrap/portability): Phases 2, 8, 9
-- **US2** (modes/providers/Orca): Phases 4, 5, 20
-- **US3** (research/reviewer/verify): Phase 6, 20
+- **US1** (bootstrap/portability): Phases 2, 8, 9, T134
+- **US2** (modes/providers/Orca): Phases 4, 5, 20, 21
+- **US3** (research/reviewer/verify): Phase 6, 20, 21
 - **US4** (staging security): Phase 7
-- **US5** (isolation/CI/smoke): Phases 10–12
+- **US5** (isolation/CI/smoke): Phases 10–12, T137
 - **US6** (machine/local AI): Phase 3, parts of 9, T122
 
 ### Parallel Opportunities
@@ -415,14 +443,16 @@ Feature ready for maintainer architecture review before merge.
 
 | Requirement cluster | Tasks |
 |---------------------|-------|
-| MODE-C-001–010 architecture contract | T103–T107, T108–T123 |
+| MODE-C-001–010 architecture contract | T103–T107, T108–T123, T125–T136 |
+| FR-067–073 hardening | T125–T135 |
+| Dual-orchestrator regression tests | T136 |
 | Windows/Linux native bootstrap | T006, T041–T043 |
 | Arbitrary clone path / no fixed home | T005, T009, T053, T054 |
 | Machine profiler / local runtime / routing | T010–T014, T122 |
 | Three modes + graceful degradation | T015–T024, T108–T117 |
 | maintenance-reviewer + verifier + audit | T025–T034, T114–T116 |
 | Staging read-only + sanitization | T035–T039 |
-| GitHub Actions matrix / no quota | T055–T057 |
+| GitHub Actions matrix / no quota | T055–T057, T124, T137 |
 | Isolation fixtures | T050–T052 |
 | Truthful validation + operator UX | T058–T061, T064 |
 
@@ -430,8 +460,8 @@ Feature ready for maintainer architecture review before merge.
 
 ## Implementation Strategy
 
-1. **This pass**: lock contract in spec/plan/tasks/AGENTS + architecture tests
-2. **Next pass**: remove/refactor dual-orchestrator production code (T108+)
-3. Run architecture contract tests continuously; delete obsolete assertions
+1. Spec/plan/AGENTS are source of truth — do not soften for code
+2. Production Mode C is thin coordinator + one Orca Run
+3. Do not mark T124/T137 `[x]` until GitHub CI matrix is green
 4. Do not claim Windows/Linux live validation from macOS-only execution
-5. Do not mark converged while `OrchestratedWorkflow` remains a worker scheduler
+5. Do not reintroduce `while current_phase: launch Orca worker`

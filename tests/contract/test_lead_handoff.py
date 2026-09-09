@@ -42,6 +42,7 @@ def test_manual_handoff_flag_and_bounded_packet() -> None:
     assert payload["automatic_quota_fallback_reliable"] is False
     assert payload["preserves_orca_run"] is True
     assert "run-use" in payload["suggested_orca_command"]
+    assert "--run" in payload["suggested_orca_command"]
     assert "--no-parent" not in payload["suggested_orca_command"]
     assert "packet" in payload
 

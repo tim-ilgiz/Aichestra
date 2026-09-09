@@ -65,24 +65,25 @@ def test_one_run_id_reused_across_agent_phases(tmp_path: Path) -> None:
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
-    # Drive classify + implement only.
-    assert wf.run_phase().status is PhaseStatus.SUCCEEDED
-    run_id = wf.state.metadata["orca_run_id"]
-    assert wf.run_phase().status is PhaseStatus.SUCCEEDED  # implement
+    state = wf.run_all()
+    assert not state.failed, state.failed
+    run_id = state.metadata["orca_run_id"]
     supervised = [
         req
         for req in orca.sent
-        if (req.role or "") == "lead_implement"
+        if (req.role or "") in {"mode_c_agents", "lead_review", "test_writer", "doc_writer"}
     ]
     assert supervised
     assert all(req.context.get("run_id") == run_id for req in supervised)
+    assert orca.run_creates == 1
     # phase_report must not look like ensure_run / run-create
     reports = [req for req in orca.sent if (req.role or "") == "phase_report"]
     assert reports
     assert all(req.context.get("run_id") == run_id for req in reports)
 
 
-def test_medium_speckit_blocks_implement_until_brief_ready(tmp_path: Path) -> None:
+def test_medium_speckit_writes_real_artifacts(tmp_path: Path) -> None:
+    """MEDIUM Spec Kit uses production file lifecycle — not metadata overrides."""
     wf = OrchestratedWorkflow(
         mode=Mode.ORCHESTRATED,
         research_useful=False,
@@ -95,15 +96,47 @@ def test_medium_speckit_blocks_implement_until_brief_ready(tmp_path: Path) -> No
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
-    assert wf.run_phase().status is PhaseStatus.SUCCEEDED  # classify
-    # MEDIUM keeps research before implement.
-    while wf.state.current_phase is not Phase.LEAD_IMPLEMENT:
-        assert wf.run_phase().status is PhaseStatus.SUCCEEDED
-    blocked = wf.run_phase()  # implement
+    assert wf.run_phase().status is PhaseStatus.SUCCEEDED  # classify + materialize
+    brief = tmp_path / ".aichestra" / "speckit" / "brief.md"
+    plan = tmp_path / ".aichestra" / "speckit" / "plan.md"
+    assert brief.is_file()
+    assert plan.is_file()
+    assert wf.state.metadata["brief"]["status"] == "ready"
+    assert wf.state.metadata["plan"]["status"] == "ready"
+    # Metadata hacks must not be required / honored as production path.
+    assert "brief_satisfied" not in wf.state.metadata
+
+
+def test_speckit_gate_blocks_when_artifacts_missing(tmp_path: Path) -> None:
+    wf = OrchestratedWorkflow(
+        mode=Mode.ORCHESTRATED,
+        research_useful=False,
+        bindings=WorkflowBindings(
+            orca=fake_orca("success"),
+            lead=fake_codex("success"),
+            project_root=str(tmp_path),
+            task_prompt="refactor across 12 files in multi-package monorepo",
+            maintenance_kwargs={"touches_behavior": False},
+            verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
+        ),
+    )
+    assert wf.run_phase().status is PhaseStatus.SUCCEEDED
+    # Simulate lost artifacts after classify — implement gate must fail closed.
+    brief = Path(wf.state.metadata["brief"]["path"])
+    brief.unlink()
+    wf.state.metadata["brief"]["status"] = "pending"
+    wf.state.metadata["speckit_artifacts"] = {"written": []}
+    blocked = wf._speckit_implement_gate()
     assert blocked is not None
-    assert blocked.status is PhaseStatus.FAILED
-    assert "Spec Kit" in blocked.detail
-    assert "brief" in (blocked.result.get("pending_artifacts") or [])
+    assert blocked.get("ok") is False
+    assert "Spec Kit" in str(blocked.get("detail") or "")
+    assert "brief" in (blocked.get("pending_artifacts") or [])
+    # run_phase must refuse agent scheduling (no dual-orchestrator loop).
+    wf.state.current_index = wf.state.phases.index(Phase.LEAD_IMPLEMENT)
+    refused = wf.run_phase()
+    assert refused is not None
+    assert refused.status is PhaseStatus.FAILED
+    assert "refuses per-phase" in refused.detail.lower() or "run_all" in refused.detail
 
 
 def test_worktree_adoption_switches_effective_root(tmp_path: Path) -> None:
@@ -117,7 +150,7 @@ def test_worktree_adoption_switches_effective_root(tmp_path: Path) -> None:
 
     def send_with_child(session, request):
         result = original_send(session, request)
-        if (request.role or "") == "lead_implement" and result.ok:
+        if (request.role or "") in {"lead_implement", "mode_c_agents"} and result.ok:
             meta = dict(result.metadata)
             meta["worktree_path"] = str(child)
             meta["worktree_id"] = f"fake-repo::{child}"
@@ -145,8 +178,8 @@ def test_worktree_adoption_switches_effective_root(tmp_path: Path) -> None:
             verification_commands=[["true"]],
         ),
     )
-    wf.run_phase()  # classify
-    wf.run_phase()  # implement
+    state = wf.run_all()
+    assert not state.failed, state.failed
     assert wf.state.metadata.get("orca_worktree_path") == str(child)
     assert wf._effective_project_root() == str(child)
     assert wf.state.metadata["orca_integration"]["policy"] == "adopt_child_worktree"

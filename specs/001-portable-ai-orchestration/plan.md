@@ -171,22 +171,49 @@ src/aichestra/
 Allowed to remain as **small deterministic helpers**: classify, maintenance
 decision, verification runner, provider/security policy, compaction.
 
-## Mode C control flow (target)
+## Mode C control flow (target — thin coordinator)
 
 ```text
-1. resolve target project root (fail if unresolved)
-2. load policy/config (providers.*.enabled, preferred lead, local.enabled)
-3. discover Orca + providers
-4. fail if Orca unavailable / unreachable / cannot create Run
-5. classify task / Spec Kit path (deterministic policy helper)
-6. create ONE Orca Run (or resume one run_id)
-7. create tasks/workers inside this run (research, implement, writers, review)
-8. perform deterministic maintenance/verification gates locally
-9. feed gate results into the SAME run
-10. obtain final review/state from that run
+1. validate existing project root (fail if missing/not a dir)
+2. require Orca binding (fail closed; never direct Codex/Cursor/local-worker)
+3. local classify + Spec Kit policy
+4. REAL Spec Kit artifact lifecycle for MEDIUM/LARGE (.aichestra/speckit/)
+5. ensure exactly ONE Orca Run (resume or create); no run_id → FAIL CLOSED
+6. ONE Orca-owned orchestration handoff (role mode_c_agents + ModeCPolicyPackage)
+7. local maintenance-reviewer gate
+8. writers via Orca under SAME run_id when needed
+9. local verification (explicit config or safe auto-detect)
+10. final lead review via Orca under SAME run_id
 ```
 
 Canonical lifecycle identity: Orca `run_id`.
+
+`Phase` / `WorkflowState` may remain as observability/result representation.
+Production `run_all()` MUST NOT be a `while current_phase: _execute_phase`
+worker scheduler.
+
+### Ownership boundary
+
+| Concern | Owner |
+|---------|-------|
+| Agent / task / worker / worktree lifecycle | Orca (under one Run) |
+| Classify / Spec Kit path / proportionality | Aichestra (local policy) |
+| Spec Kit artifact files (MEDIUM/LARGE) | Aichestra lifecycle → project `.aichestra/speckit/` |
+| maintenance-reviewer | Aichestra (deterministic) |
+| verification-runner | Aichestra (deterministic; results feed same Run) |
+| Attachments delivery | Orca `--attach` / temp outside parent checkout |
+| Codex/Cursor native CLIs | Mode A only (unintercepted) |
+| Lead/local selection | Policy input to Orca — not Mode C `execute_task` |
+
+### Forbidden production seams (Mode C)
+
+- `aichestra-run-{id}` synthetic run ids
+- Soft-fail `run-use` then unbound `task-create`
+- `bound_writer_from_lead` / `writer_fn` direct lead execution
+- `WorkflowBindings.lead` / `local_worker` used for Mode C `execute_task`
+- Hard-coded `agent=opencode` when `local.enabled=false`
+- Parent-checkout `.aichestra/attachments/` staging
+- `brief_satisfied` / `plan_satisfied` metadata unlocks
 
 ## Architecture Notes
 

@@ -163,6 +163,24 @@ def test_quota_failure_prepares_manual_handoff(tmp_path: Path) -> None:
     orca = fake_orca("success")
     proj = tmp_path / "proj"
     proj.mkdir()
+    original = orca.send
+
+    def send_quota_on_agents(session, request):
+        result = original(session, request)
+        if (request.role or "") == "mode_c_agents":
+            from aichestra.providers.base import FailureClass, ProviderTaskResult
+
+            return ProviderTaskResult(
+                ok=False,
+                output="",
+                failure=FailureClass.QUOTA,
+                detail="fake execution quota",
+                session_id=session.session_id,
+                metadata={"fake": True, "run_id": (request.context or {}).get("run_id")},
+            )
+        return result
+
+    orca.send = send_quota_on_agents  # type: ignore[method-assign]
     wf = OrchestratedWorkflow(
         mode=Mode.ORCHESTRATED,
         research_useful=False,
@@ -175,14 +193,10 @@ def test_quota_failure_prepares_manual_handoff(tmp_path: Path) -> None:
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
-    # Classify then fail implement on quota via Orca (not direct lead).
-    wf.run_phase()
-    orca._execute_scenario = "quota"
-    outcome = wf.run_phase()  # lead_implement
-    assert outcome is not None
-    assert outcome.status.value == "failed"
-    assert "manual_handoff" in wf.state.metadata
-    assert wf.state.metadata["manual_handoff"]["mode"] == "manual_one_action"
+    state = wf.run_all()
+    assert state.failed
+    assert "manual_handoff" in state.metadata
+    assert state.metadata["manual_handoff"]["mode"] == "manual_one_action"
 
 
 def test_bounded_prompt_keeps_read_only_constraint() -> None:

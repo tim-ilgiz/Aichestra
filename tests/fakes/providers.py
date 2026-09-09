@@ -15,6 +15,9 @@ from aichestra.providers.base import (
 
 SCENARIOS = ("success", "unavailable", "quota", "auth", "timeout", "error")
 
+# Roles that mint/resume a Run; all other Mode C agent roles require context.run_id.
+_ENSURE_ROLES = frozenset({"ensure_run"})
+
 
 def _status(
     kind: ProviderKind,
@@ -53,6 +56,8 @@ class FakeProvider(ProviderAdapter):
         self._execute_output = execute_output
         self.sessions: list[ProviderSession] = []
         self.sent: list[ProviderTaskRequest] = []
+        self.run_creates: int = 0
+        self._minted_run_id: str | None = None
 
     def probe(self) -> ProviderStatus:
         return self._status
@@ -78,37 +83,82 @@ class FakeProvider(ProviderAdapter):
         self.sent.append(request)
         scenario = self._execute_scenario.lower().strip()
         role = (request.role or "").strip().lower()
-        run_id = request.context.get("run_id")
-        if not (isinstance(run_id, str) and run_id.strip()):
-            run_id = f"fake-run-{session.session_id[:8]}"
-        else:
-            run_id = run_id.strip()
+        ctx_run = request.context.get("run_id") if isinstance(request.context, dict) else None
+        has_run = isinstance(ctx_run, str) and bool(ctx_run.strip())
 
+        # Mode C Orca agent roles must bind to a real run_id (never synthesize).
+        if (
+            self.kind is ProviderKind.ORCA
+            and role not in _ENSURE_ROLES
+            and role
+            not in {
+                "control_plane",
+                "classify",
+                "status_ping",
+                "phase_report",
+            }
+            and not has_run
+        ):
+            return ProviderTaskResult(
+                ok=False,
+                output="",
+                failure=FailureClass.ERROR,
+                detail=(
+                    f"fake Orca refuses role={role!r} without context.run_id "
+                    "(no synthetic production ids)"
+                ),
+                session_id=session.session_id,
+                metadata={"fake": True},
+            )
         if scenario in {"success", "ok", "available"}:
-            meta: dict = {"fake": True, "run_id": run_id}
-            # Only ensure_run corresponds to `orca orchestration run-create`.
-            # Classify/control_plane/phase_report must NOT mint additional Runs.
+            meta: dict = {"fake": True}
             if role == "ensure_run":
-                meta["orca_command"] = "orchestration run-create"
-                meta["reused"] = False
+                self.run_creates += 1
+                run_id = f"fake-run-{session.session_id[:8]}-{self.run_creates}"
+                self._minted_run_id = run_id
+                meta.update(
+                    {
+                        "run_id": run_id,
+                        "orca_command": "orchestration run-create",
+                        "reused": False,
+                    }
+                )
             elif role in {"control_plane", "classify", "phase_report", "status_ping"}:
-                meta["orca_command"] = "noop-phase-report"
-                meta["reused"] = True
+                run_id = (
+                    ctx_run.strip()
+                    if has_run
+                    else (self._minted_run_id or f"fake-run-{session.session_id[:8]}")
+                )
+                meta.update(
+                    {
+                        "run_id": run_id,
+                        "orca_command": "noop-phase-report",
+                        "reused": True,
+                    }
+                )
             else:
+                # Agent roles (mode_c_agents, research, lead_*, writers, …)
+                run_id = ctx_run.strip()
                 cwd = request.cwd
-                # Fakes keep the same checkout so verification can run; real Orca
-                # returns a distinct managed child path that workflow then adopts.
                 worktree_path = cwd or f"/tmp/fake-orca-worktree-{session.session_id[:8]}"
                 meta.update(
                     {
+                        "run_id": run_id,
                         "orca_command": "orchestration worker-start",
                         "task_id": f"fake-task-{len(self.sent)}",
                         "dispatch_id": f"fake-dispatch-{len(self.sent)}",
                         "worktree_path": worktree_path,
                         "worktree_id": f"fake-repo::{worktree_path}",
                         "integration_policy": "adopt_child_worktree",
+                        "agent_complete": True,
                     }
                 )
+                if request.attachments:
+                    meta["attachments"] = list(request.attachments)
+                    meta["bytes_delivered"] = True
+                    meta["attachment_count"] = len(request.attachments)
+                if role == "mode_c_agents":
+                    meta["simulated_roles"] = ["research", "lead_implement"]
             return ProviderTaskResult(
                 ok=True,
                 output=self._execute_output,
@@ -128,6 +178,7 @@ class FakeProvider(ProviderAdapter):
             "generic": FailureClass.ERROR,
         }
         failure = failure_map.get(scenario, FailureClass.ERROR)
+        run_id = ctx_run.strip() if has_run else None
         return ProviderTaskResult(
             ok=False,
             output="",

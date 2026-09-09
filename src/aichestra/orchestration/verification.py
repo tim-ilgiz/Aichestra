@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import subprocess
@@ -152,3 +153,71 @@ def verification_commands_from_config(config: Mapping[str, Any] | None) -> list[
         elif isinstance(item, (list, tuple)) and item:
             commands.append([str(part) for part in item])
     return commands
+
+
+def detect_verification_commands(project_root: Path | str | None) -> list[list[str]]:
+    """Safe fallback verify commands when ``.aichestra/project.json`` has none.
+
+    Preference order for callers:
+    1. Explicit ``verify`` from project / layered config
+    2. This detector (.NET / Python / Node heuristics)
+
+    Never invents destructive commands; only common build/test entrypoints.
+    """
+    if project_root is None:
+        return []
+    root = Path(project_root)
+    if not root.is_dir():
+        return []
+
+    # Explicit project config wins when present with verify keys.
+    project_cfg = root / ".aichestra" / "project.json"
+    if project_cfg.is_file():
+        try:
+            data = json.loads(project_cfg.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                explicit = verification_commands_from_config(data)
+                if explicit:
+                    return explicit
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            pass
+
+    # .NET
+    if any(root.glob("*.sln")) or any(root.glob("*.csproj")):
+        cmds: list[list[str]] = [["dotnet", "build"]]
+        # Prefer test when test projects likely exist.
+        if any(root.rglob("*Test*.csproj")) or any(root.rglob("*Tests*.csproj")):
+            cmds.append(["dotnet", "test", "--no-build"])
+        else:
+            cmds.append(["dotnet", "test"])
+        return cmds
+
+    # Python
+    py_markers = (
+        "pyproject.toml",
+        "pytest.ini",
+        "setup.cfg",
+        "tox.ini",
+    )
+    if any((root / m).is_file() for m in py_markers) or (root / "tests").is_dir():
+        return [["python", "-m", "pytest"]]
+
+    # Node
+    pkg = root / "package.json"
+    if pkg.is_file():
+        try:
+            data = json.loads(pkg.read_text(encoding="utf-8"))
+            scripts = data.get("scripts") if isinstance(data, dict) else None
+            if isinstance(scripts, dict):
+                cmds = []
+                if "test" in scripts:
+                    cmds.append(["npm", "test", "--", "--watchAll=false"])
+                if "build" in scripts:
+                    cmds.append(["npm", "run", "build"])
+                if cmds:
+                    return cmds
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            pass
+        return [["npm", "test"]]
+
+    return []

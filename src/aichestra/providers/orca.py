@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -281,6 +282,17 @@ def interpret_orca_wait_event(
             ),
             meta,
         )
+    # Fail closed: if we launched a specific dispatch, the wait event MUST
+    # correlate to it. Missing dispatch id is not success.
+    if dispatch_id and not event_dispatch:
+        return (
+            False,
+            (
+                f"wait event missing dispatch id (expected {dispatch_id}); "
+                "refusing to treat as worker_done success"
+            ),
+            meta,
+        )
     # Optional explicit failure flag on the done event.
     status = str(event.get("status") or event.get("result") or "").lower()
     if status in {"failed", "error", "cancelled"}:
@@ -533,10 +545,29 @@ class OrcaProvider(ProviderAdapter):
                 "detail": use_result.detail,
             }
         )
-        # Soft-fail run-use: some environments already have the Run bound.
+        # Fail closed: never task-create without a proven Run binding.
+        if not use_result.ok:
+            return self._failed_dispatch(
+                ProviderTaskResult(
+                    ok=False,
+                    failure=use_result.failure
+                    if use_result.failure is not FailureClass.NONE
+                    else FailureClass.ERROR,
+                    detail=(
+                        use_result.detail
+                        or f"orca run-use failed for run_id={run_id}; "
+                        "refusing unbound task-create"
+                    ),
+                    session_id=session.session_id,
+                    output=use_result.output,
+                ),
+                steps,
+                session.session_id,
+            )
 
         title = (request.role or "aichestra-task")[:80]
         # Explicitly associate the task with the Mode C Run (run-use + --run).
+        # Never retry task-create without --run after a failed --run attempt.
         task_argv = [
             binary,
             "orchestration",
@@ -556,27 +587,6 @@ class OrcaProvider(ProviderAdapter):
             request=request,
             unavailable_detail="Orca binary unavailable",
         )
-        # Older Orca builds may not accept --run; retry after run-use only.
-        if (
-            not task_result.ok
-            and "unknown" in f"{task_result.detail} {task_result.output}".lower()
-        ):
-            task_result = run_cli_task(
-                binary=binary,
-                argv=[
-                    binary,
-                    "orchestration",
-                    "task-create",
-                    "--spec",
-                    prompt,
-                    "--task-title",
-                    title,
-                    "--json",
-                ],
-                session=session,
-                request=request,
-                unavailable_detail="Orca binary unavailable",
-            )
         task_payload = _parse_orca_json(task_result.output)
         task_id = (
             _dig_id(task_payload, "result", "id")
@@ -606,9 +616,12 @@ class OrcaProvider(ProviderAdapter):
             or request.context.get("worktree_id")
             or "new-child"
         )
-        # Stage attachment bytes into cwd (parent/project) so workers can read them;
-        # also pass native --attach flags for Orca when files resolve.
-        delivery = stage_attachments(request.attachments, request.cwd)
+        # Do NOT stage into the parent project checkout. Prefer absolute paths
+        # for Orca --attach; optionally stage under a temp dir outside the repo.
+        attach_stage_root: str | None = None
+        if request.attachments:
+            attach_stage_root = tempfile.mkdtemp(prefix="aichestra-orca-attach-")
+        delivery = stage_attachments(request.attachments, attach_stage_root)
         attach_flags = orca_attach_flags(
             delivery.staged or delivery.resolved or request.attachments
         )

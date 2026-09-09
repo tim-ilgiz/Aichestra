@@ -15,6 +15,7 @@ escapes the Mode C Run.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
 
 # Documented v1 policy: manual one-action handoff (FR-036).
@@ -80,30 +81,31 @@ def prepare_manual_handoff(
         suggested = (
             f"orca orchestration run-use --id {resolved_run} --json && "
             f"orca orchestration task-create --spec <bounded-brief> "
-            f"--task-title {name} --json && "
+            f"--task-title {name} --run {resolved_run} --json && "
             f"orca orchestration worker-start --task <task-id> "
             f"--worktree {worktree} --name {name} --agent cursor "
             f"--setup skip --json"
         )
         instruction = (
             "One-action handoff inside the existing Orca Run: run-use the Mode C "
-            "run_id, create a Cursor handoff task, worker-start with --agent cursor. "
-            "Do not create a detached --no-parent worktree that leaves the Run. "
-            "Automatic quota fallback is not enabled in v1."
+            "run_id, create a Cursor handoff task bound with --run, worker-start "
+            "with --agent cursor. Do not create a detached --no-parent worktree "
+            "that leaves the Run. Automatic quota fallback is not enabled in v1."
         )
     else:
         suggested = (
             "orca orchestration run-use --id <run_id> --json && "
             "orca orchestration task-create --spec <bounded-brief> "
-            f"--task-title {name} --json && "
+            f"--task-title {name} --run <run_id> --json && "
             "orca orchestration worker-start --task <task-id> "
             f"--worktree {worktree} --name {name} --agent cursor "
             "--setup skip --json"
         )
         instruction = (
             "One-action handoff requires an Orca run_id to stay inside Mode C. "
-            "Supply --run-id / packet.orca_run_id before execute. Automatic quota "
-            "fallback is not enabled in v1."
+            "Supply --run-id / packet.orca_run_id (or rely on recent Mode C run "
+            "auto-resolve) before execute. Automatic quota fallback is not "
+            "enabled in v1."
         )
 
     payload: dict[str, Any] = {
@@ -166,6 +168,8 @@ def prepare_manual_handoff(
             brief,
             "--task-title",
             name,
+            "--run",
+            resolved_run,
             "--json",
         ]
     )
@@ -174,7 +178,10 @@ def prepare_manual_handoff(
     payload["orca_exit_code"] = create.returncode
     if create.returncode != 0:
         payload["executed"] = False
-        payload["execute_error"] = f"orca task-create exited {create.returncode}"
+        payload["execute_error"] = (
+            f"orca task-create exited {create.returncode} "
+            f"(fail-closed same-run binding via --run {resolved_run})"
+        )
         return payload
 
     task_id = _extract_id(create.stdout or "")
@@ -284,6 +291,64 @@ def _format_handoff_brief(packet: HandoffPacket) -> str:
 def should_auto_fallback_on_quota() -> bool:
     """Automatic Codex→Cursor quota fallback is disabled unless reliable."""
     return automatic_quota_fallback_reliable
+
+
+def resolve_recent_mode_c_run_id(
+    *,
+    project_root: Path | str | None = None,
+    max_age_seconds: float = 86_400.0,
+) -> str | None:
+    """Best-effort resolve of a recent Mode C run_id from project metadata.
+
+    Looks for ``.aichestra/last_mode_c_run.json`` written by Mode C completion.
+    Returns None when missing, stale, or unreadable (caller must require
+    ``--run-id`` or fail closed on execute).
+    """
+    import json
+    import time
+
+    if project_root is None:
+        return None
+    path = Path(project_root) / ".aichestra" / "last_mode_c_run.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    run_id = data.get("run_id")
+    if not isinstance(run_id, str) or not run_id.strip():
+        return None
+    ts = data.get("updated_at")
+    if isinstance(ts, (int, float)):
+        if time.time() - float(ts) > max_age_seconds:
+            return None
+    return run_id.strip()
+
+
+def record_mode_c_run_id(project_root: Path | str | None, run_id: str) -> None:
+    """Persist last Mode C run_id for reliable handoff auto-resolve."""
+    import json
+    import time
+
+    if not project_root or not run_id.strip():
+        return
+    root = Path(project_root)
+    dest = root / ".aichestra" / "last_mode_c_run.json"
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(
+            json.dumps(
+                {"run_id": run_id.strip(), "updated_at": time.time()},
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
 
 
 def _truncate(text: str, limit: int) -> str:

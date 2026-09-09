@@ -40,5 +40,10 @@ Thumbs.db
 *.swp
 *~
 
+# Mode C / Spec Kit runtime under target projects (never commit from fixtures)
+**/.aichestra/attachments/
+**/.aichestra/speckit/
+**/.aichestra/last_mode_c_run.json
+
 # Do NOT ignore Spec Kit / agent integration skill files:
 # .cursor/skills, .cursor/rules, .agents/skills, .opencode/commands are tracked.

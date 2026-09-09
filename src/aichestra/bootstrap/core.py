@@ -130,9 +130,12 @@ def bootstrap(
         local_enabled=local_enabled,
         actions=actions,
         approve_model_download=approve_model_download,
+        doctor_ok=doctor_ok,
     )
     if remaining:
         actions.append("report_remaining_bootstrap_steps")
+    elif doctor_ok:
+        actions.append("bootstrap_complete")
 
     return BootstrapResult(
         repo_root=str(root),
@@ -251,13 +254,15 @@ def _remaining_bootstrap_steps(
     local_enabled: bool,
     actions: list[str],
     approve_model_download: bool,
+    doctor_ok: bool | None = None,
 ) -> list[str]:
-    """Honest list of bootstrap contract steps not yet performed."""
+    """Honest list of bootstrap contract steps not yet performed.
+
+    When doctor is ok and there are no blocking remaining steps, mark
+    ``bootstrap_complete=True`` — do not append forever-pending advisories.
+    """
     remaining: list[str] = []
     action_set = set(actions)
-    if any(a.startswith("missing_orca") for a in actions) or "probe_orca" in action_set:
-        # probe always happens; missing_* only when unavailable
-        pass
     if "missing_orca" in action_set:
         remaining.append("install_orca_and_enable_orchestration")
     if "missing_codex" in action_set and "missing_cursor" in action_set:
@@ -268,8 +273,8 @@ def _remaining_bootstrap_steps(
         remaining.append(
             "model_download_still_manual — approve flag recorded, weights not fetched"
         )
-    remaining.append("configure_orca_provider_integration_if_needed")
-    remaining.append("run_safe_smoke_tests_on_this_machine")
+    if doctor_ok is False:
+        remaining.append("resolve_doctor_failures")
     # Deduplicate while preserving order.
     seen: set[str] = set()
     ordered: list[str] = []
@@ -277,6 +282,8 @@ def _remaining_bootstrap_steps(
         if item not in seen:
             seen.add(item)
             ordered.append(item)
+    # Completable: doctor ok + no blocking steps ⇒ bootstrap_complete.
+    complete = bool(doctor_ok) and not ordered
     # Persist for operators.
     try:
         ml_path = machine_local_path(root)
@@ -285,7 +292,7 @@ def _remaining_bootstrap_steps(
             notes = existing.setdefault("notes", {})
             if isinstance(notes, dict):
                 notes["bootstrap_remaining_steps"] = ordered
-                notes["bootstrap_complete"] = False
+                notes["bootstrap_complete"] = complete
                 save_machine_local(existing, root)
     except OSError:
         pass

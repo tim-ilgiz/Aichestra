@@ -9,6 +9,7 @@ adapter under that Run.
 from __future__ import annotations
 
 import re
+import tempfile
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -16,7 +17,11 @@ from typing import Any, Callable, Mapping
 
 from aichestra.orchestration.change_signals import _is_test_path, infer_change_signals
 from aichestra.orchestration.factory_preserve import detect_factory_tooling
-from aichestra.orchestration.handoff import build_handoff_packet, prepare_manual_handoff
+from aichestra.orchestration.handoff import (
+    build_handoff_packet,
+    prepare_manual_handoff,
+    record_mode_c_run_id,
+)
 from aichestra.orchestration.maintenance_reviewer import (
     MaintenanceReviewDecision,
     review_change,
@@ -30,7 +35,11 @@ from aichestra.orchestration.speckit_policy import (
     SpecKitScale,
     classify_speckit_scale,
 )
-from aichestra.orchestration.verification import VerificationReport, run_verification
+from aichestra.orchestration.verification import (
+    VerificationReport,
+    detect_verification_commands,
+    run_verification,
+)
 from aichestra.orchestration.writers import plan_doc_writes, plan_test_writes
 from aichestra.providers.base import (
     FailureClass,
@@ -173,7 +182,11 @@ class WorkflowState:
 
 @dataclass
 class WorkflowBindings:
-    """Injectable Mode C bindings — Orca required; fakes in CI."""
+    """Injectable Mode C bindings — Orca required; fakes in CI.
+
+    ``lead`` / ``local_worker`` are policy/discovery inputs for Orca agent
+    selection. Mode C MUST NOT call their ``execute_task`` for agent roles.
+    """
 
     orca: ProviderAdapter | None = None
     lead: ProviderAdapter | None = None
@@ -195,6 +208,41 @@ class WorkflowBindings:
     # Deprecated Mode C seam — ignored when orca is bound (writers go via Orca).
     writer_fn: Callable[[WorkflowState, Phase], ProviderTaskResult] | None = None
 
+
+@dataclass
+class ModeCPolicyPackage:
+    """Policy package handed to Orca for the single Mode C agent orchestration."""
+
+    run_id: str
+    task_prompt: str
+    research_query: str
+    research_useful: bool
+    lead_agent: str
+    research_agent: str | None
+    speckit_scale: str
+    speckit_steps: tuple[str, ...]
+    attachments: tuple[str, ...]
+    project_root: str
+    classify: dict[str, Any] = field(default_factory=dict)
+    factory: dict[str, Any] = field(default_factory=dict)
+    media_routing: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "task_prompt": self.task_prompt,
+            "research_query": self.research_query,
+            "research_useful": self.research_useful,
+            "lead_agent": self.lead_agent,
+            "research_agent": self.research_agent,
+            "speckit_scale": self.speckit_scale,
+            "speckit_steps": list(self.speckit_steps),
+            "attachments": list(self.attachments),
+            "project_root": self.project_root,
+            "classify": dict(self.classify),
+            "factory": dict(self.factory),
+            "media_routing": dict(self.media_routing) if self.media_routing else None,
+        }
 
 class ModeCRunController:
     """Thin Mode C controller over one Orca Run + local policy/gates.
@@ -260,15 +308,35 @@ class ModeCRunController:
             ).__dict__,
         }
 
+    # Local deterministic gates allowed via run_phase (observability / early fail).
+    _LOCAL_GATE_PHASES = frozenset(
+        {Phase.CLASSIFY, Phase.MAINTENANCE_REVIEW, Phase.VERIFICATION}
+    )
+    # Agent roles MUST go through run_all() → mode_c_agents (Orca-owned).
+    _AGENT_SCHEDULE_PHASES = frozenset(
+        {
+            Phase.RESEARCH,
+            Phase.LEAD_IMPLEMENT,
+            Phase.TEST_WRITER,
+            Phase.DOC_WRITER,
+            Phase.LEAD_REVIEW,
+        }
+    )
+
     def run_phase(self) -> PhaseOutcome | None:
-        """Execute the current phase; mark succeeded only after real work ok."""
+        """Run a local gate phase, or refuse agent-phase scheduling.
+
+        Production Mode C uses ``run_all()`` (thin coordinator). ``run_phase``
+        remains for classify / early-failure checks and maintenance-gate
+        enforcement. It MUST NOT schedule Orca workers per agent Phase.
+        """
         if self.state.stopped:
             return None
         phase = self.state.current_phase
         if phase is None:
             return None
 
-        # Writers are gated by a successful maintenance-reviewer phase (FR-023).
+        # Writers: still enforce maintenance gate before any further action.
         if phase in {Phase.TEST_WRITER, Phase.DOC_WRITER}:
             gate = self._maintenance_gate_status()
             if gate is not PhaseStatus.SUCCEEDED:
@@ -282,24 +350,18 @@ class ModeCRunController:
                 )
                 self._record(outcome, advance=False, stop=True)
                 return outcome
-            decision = self.state.decision
-            assert decision is not None
-            if phase is Phase.TEST_WRITER and not decision.needs_tests:
-                outcome = PhaseOutcome(
-                    phase=phase,
-                    status=PhaseStatus.SKIPPED,
-                    detail="maintenance-reviewer decided no tests",
-                )
-                self._record(outcome, advance=True)
-                return outcome
-            if phase is Phase.DOC_WRITER and not decision.needs_docs:
-                outcome = PhaseOutcome(
-                    phase=phase,
-                    status=PhaseStatus.SKIPPED,
-                    detail="maintenance-reviewer decided no docs",
-                )
-                self._record(outcome, advance=True)
-                return outcome
+
+        if phase in self._AGENT_SCHEDULE_PHASES:
+            outcome = PhaseOutcome(
+                phase=phase,
+                status=PhaseStatus.FAILED,
+                detail=(
+                    "Mode C refuses per-phase agent worker scheduling; "
+                    "use run_all() thin coordinator (mode_c_agents under one Orca Run)"
+                ),
+            )
+            self._record(outcome, advance=False, stop=True)
+            return outcome
 
         running = PhaseOutcome(phase=phase, status=PhaseStatus.RUNNING)
         self.state.phase_outcomes[phase.value] = running
@@ -336,11 +398,328 @@ class ModeCRunController:
         self._record(outcome, advance=False, stop=True)
         return outcome
 
+    def run_all(self) -> WorkflowState:
+        """Thin Mode C coordinator — NOT a phase worker scheduler.
+
+        Production path:
+        validate root → require Orca → classify/Spec Kit → ensure ONE run →
+        ONE ``mode_c_agents`` Orca handoff → maintenance gate → optional writers
+        (same run) → verification → final lead review (same run).
+
+        Phase/WorkflowState remain observability/result representation only.
+        """
+        if self.state.stopped:
+            return self.state
+
+        # 1–3. Validate root, require Orca, local classify + Spec Kit policy.
+        classify_out = self._coord_record(Phase.CLASSIFY, self._phase_classify)
+        if not classify_out:
+            return self.state
+
+        # 4. Real Spec Kit artifact lifecycle (MEDIUM/LARGE) — no metadata hacks.
+        speckit_out = self._materialize_speckit_artifacts()
+        if not speckit_out.get("ok", False):
+            self._fail_stopped(
+                Phase.CLASSIFY,
+                detail=str(speckit_out.get("detail", "Spec Kit artifacts failed")),
+                result=speckit_out,
+            )
+            return self.state
+
+        # 5. Ensure exactly one Orca Run (already attempted in classify); fail closed.
+        run_id = self.state.metadata.get("orca_run_id")
+        if not (isinstance(run_id, str) and run_id.strip()):
+            ensure = self._ensure_orca_run(
+                objective=self.bindings.task_prompt or "Aichestra Mode C run"
+            )
+            if ensure is not None:
+                self._fail_stopped(
+                    Phase.CLASSIFY,
+                    detail=str(ensure.get("detail", "Orca Run missing")),
+                    result=ensure,
+                )
+                return self.state
+            run_id = self.state.metadata.get("orca_run_id")
+        if not (isinstance(run_id, str) and run_id.strip()):
+            self._fail_stopped(
+                Phase.CLASSIFY,
+                detail=(
+                    "Mode C FAIL CLOSED: Orca ok but no run_id; "
+                    "refusing synthetic aichestra-run ids"
+                ),
+                result={"ok": False, "failure": FailureClass.ERROR.value},
+            )
+            return self.state
+
+        lead_agent = self._lead_agent_kind()
+        if not lead_agent:
+            self._fail_stopped(
+                Phase.LEAD_IMPLEMENT,
+                detail=(
+                    "Mode C has no available/enabled lead provider "
+                    "(Codex/Cursor); refuse to invent a disabled agent"
+                ),
+                result={"ok": False, "failure": FailureClass.UNAVAILABLE.value},
+            )
+            return self.state
+
+        # 6. ONE Orca-owned orchestration handoff (research + implement).
+        agents_ok = self._coord_mode_c_agents(lead_agent=lead_agent)
+        if not agents_ok:
+            return self.state
+
+        # 7. Local maintenance-reviewer gate.
+        if not self._coord_record(Phase.MAINTENANCE_REVIEW, self._phase_maintenance_review):
+            return self.state
+
+        # 8. Writers via Orca under SAME run_id when needed.
+        if not self._coord_writers_if_needed():
+            return self.state
+
+        # 9. Local verification (explicit config or safe auto-detect).
+        if not self._coord_record(Phase.VERIFICATION, self._phase_verification):
+            return self.state
+
+        # 10. Final lead review via Orca under SAME run_id.
+        if not self._coord_record(Phase.LEAD_REVIEW, self._phase_lead_review):
+            return self.state
+
+        record_mode_c_run_id(self.bindings.project_root, str(run_id))
+        self.state.metadata["thin_coordinator"] = True
+        self.state.current_index = len(self.state.phases)
+        return self.state
+
+    def _fail_stopped(
+        self,
+        phase: Phase,
+        *,
+        detail: str,
+        result: dict[str, Any] | None = None,
+    ) -> None:
+        outcome = PhaseOutcome(
+            phase=phase,
+            status=PhaseStatus.FAILED,
+            detail=detail,
+            result=result or {},
+        )
+        self._record(outcome, advance=False, stop=True)
+
+    def _coord_record(
+        self,
+        phase: Phase,
+        fn: Callable[[], dict[str, Any]],
+    ) -> bool:
+        """Run a local/agent step and record PhaseOutcome for observability."""
+        if phase not in self.state.phases:
+            # Insert missing observability phase at end before verification/review
+            # is already handled by _apply_scale_phases; skip if truly absent.
+            self.state.phases.append(phase)
+            self.state.phase_outcomes[phase.value] = PhaseOutcome(
+                phase=phase, status=PhaseStatus.PENDING
+            )
+        # Align current_index for observability.
+        try:
+            self.state.current_index = self.state.phases.index(phase)
+        except ValueError:
+            pass
+        self.state.phase_outcomes[phase.value] = PhaseOutcome(
+            phase=phase, status=PhaseStatus.RUNNING
+        )
+        try:
+            result = fn()
+        except Exception as exc:  # noqa: BLE001
+            self._fail_stopped(phase, detail=str(exc))
+            return False
+        if result.get("ok", False):
+            outcome = PhaseOutcome(
+                phase=phase,
+                status=PhaseStatus.SUCCEEDED,
+                detail=str(result.get("detail", "ok")),
+                result=result,
+            )
+            self._record(outcome, advance=True)
+            if phase is not Phase.CLASSIFY:
+                self._report_orca_phase(phase, outcome)
+            return True
+        self._fail_stopped(
+            phase,
+            detail=str(result.get("detail", "step failed")),
+            result=result,
+        )
+        return False
+
+    def _coord_mode_c_agents(self, *, lead_agent: str) -> bool:
+        """Dispatch research+implement as ONE Orca orchestration handoff."""
+        research_useful = Phase.RESEARCH in self.state.phases
+        research_agent = self._research_agent_kind() if research_useful else None
+        scale = (self.state.metadata.get("speckit_path") or {}).get("scale", "small")
+        steps = tuple(
+            (self.state.metadata.get("speckit_path") or {}).get("steps") or ()
+        )
+        package = ModeCPolicyPackage(
+            run_id=str(self.state.metadata["orca_run_id"]),
+            task_prompt=self.bindings.task_prompt or "Mode C task",
+            research_query=self.bindings.research_query
+            or self.bindings.task_prompt
+            or "",
+            research_useful=research_useful,
+            lead_agent=lead_agent,
+            research_agent=research_agent,
+            speckit_scale=str(scale),
+            speckit_steps=tuple(str(s) for s in steps),
+            attachments=tuple(self.bindings.attachments or ()),
+            project_root=str(self.bindings.project_root or ""),
+            classify=dict(self.state.metadata.get("classify") or {}),
+            factory=dict(self.state.metadata.get("factory") or {}),
+            media_routing=self.state.metadata.get("media_routing")
+            if isinstance(self.state.metadata.get("media_routing"), dict)
+            else None,
+        )
+        self.state.metadata["mode_c_policy_package"] = package.to_dict()
+
+        # Spec Kit implement gate (artifacts must already be ready files).
+        gate = self._speckit_implement_gate()
+        if gate is not None:
+            self._fail_stopped(
+                Phase.LEAD_IMPLEMENT,
+                detail=str(gate.get("detail", "Spec Kit gate blocked")),
+                result=gate,
+            )
+            return False
+
+        context = sanitize_mapping(
+            {
+                **package.to_dict(),
+                "agent": lead_agent,
+                "worktree": "new-child",
+                "policy_package": package.to_dict(),
+            }
+        )
+        out = self._run_via_orca(
+            prompt=(
+                f"Mode C agents orchestration under run {package.run_id}. "
+                f"Lead={lead_agent}. "
+                + (
+                    f"Research via {research_agent} then implement. "
+                    if research_useful
+                    else "Implement the classified task. "
+                )
+                + package.task_prompt
+            ),
+            role="mode_c_agents",
+            context=context,
+            read_only=False,
+            adopt_worktree=True,
+        )
+        if not out.get("ok"):
+            self._fail_stopped(
+                Phase.LEAD_IMPLEMENT,
+                detail=str(out.get("detail", "mode_c_agents failed")),
+                result=out,
+            )
+            return False
+
+        # Observability: mark research/implement without launching more workers.
+        if research_useful:
+            query = package.research_query or package.task_prompt
+            if self.bindings.research_fn:
+                summary = self.bindings.research_fn(self.state)
+            else:
+                root = self._effective_project_root() or self.bindings.project_root or "."
+                summary = research_paths(
+                    root,
+                    query=query,
+                    prefer_local_worker=False,
+                    local_worker=None,
+                )
+            payload = summary.to_dict()
+            payload["via"] = "orca"
+            payload["orca"] = {
+                "ok": True,
+                "role": "mode_c_agents",
+                "run_id": package.run_id,
+                "research_agent": research_agent,
+            }
+            self.state.metadata["research"] = payload
+            self._mark_phase(
+                Phase.RESEARCH,
+                PhaseStatus.SUCCEEDED,
+                detail="research via mode_c_agents",
+                result={"ok": True, "research": payload},
+            )
+        elif Phase.RESEARCH in self.state.phases:
+            self._mark_phase(
+                Phase.RESEARCH,
+                PhaseStatus.SKIPPED,
+                detail="research not on path",
+            )
+
+        self.state.metadata["orca_mode_c_agents"] = out
+        self.state.metadata["lead_lead_implement"] = out.get("provider") or out
+        self._mark_phase(
+            Phase.LEAD_IMPLEMENT,
+            PhaseStatus.SUCCEEDED,
+            detail="lead_implement via mode_c_agents",
+            result=out,
+        )
+        return True
+
+    def _coord_writers_if_needed(self) -> bool:
+        decision = self.state.decision
+        if decision is None:
+            return True
+        scale = (self.state.metadata.get("speckit_path") or {}).get("scale")
+        if scale == SpecKitScale.SMALL.value:
+            self._maybe_insert_writers_for_small(decision)
+
+        for phase in (Phase.TEST_WRITER, Phase.DOC_WRITER):
+            if phase not in self.state.phases:
+                continue
+            if phase is Phase.TEST_WRITER and not decision.needs_tests:
+                self._mark_phase(
+                    phase, PhaseStatus.SKIPPED, detail="maintenance: no tests"
+                )
+                continue
+            if phase is Phase.DOC_WRITER and not decision.needs_docs:
+                self._mark_phase(
+                    phase, PhaseStatus.SKIPPED, detail="maintenance: no docs"
+                )
+                continue
+            plan_key = "tests" if phase is Phase.TEST_WRITER else "docs"
+            if not self._coord_record(phase, lambda p=phase, k=plan_key: self._run_writer(p, plan_key=k)):
+                return False
+        return True
+
+    def _mark_phase(
+        self,
+        phase: Phase,
+        status: PhaseStatus,
+        *,
+        detail: str = "",
+        result: dict[str, Any] | None = None,
+    ) -> None:
+        if phase.value not in self.state.phase_outcomes:
+            self.state.phase_outcomes[phase.value] = PhaseOutcome(
+                phase=phase, status=PhaseStatus.PENDING
+            )
+        outcome = PhaseOutcome(
+            phase=phase,
+            status=status,
+            detail=detail,
+            result=result or {},
+        )
+        advance = status in {PhaseStatus.SUCCEEDED, PhaseStatus.SKIPPED}
+        self._record(outcome, advance=advance, stop=False)
+        if status is PhaseStatus.SUCCEEDED and phase is not Phase.CLASSIFY:
+            self._report_orca_phase(phase, outcome)
+
     def advance(self) -> Phase | None:
         """Run the current phase once; return it only when it succeeded or skipped.
 
         Failed phases return None and stop the workflow so callers cannot treat
         failure as completion.
+
+        Prefer ``run_all()`` for production Mode C (thin coordinator).
         """
         before = self.state.current_phase
         outcome = self.run_phase()
@@ -349,11 +728,6 @@ class ModeCRunController:
         if outcome.status in {PhaseStatus.SUCCEEDED, PhaseStatus.SKIPPED}:
             return outcome.phase
         return None if before is not None else None
-
-    def run_all(self) -> WorkflowState:
-        while self.state.current_phase is not None and not self.state.stopped:
-            self.run_phase()
-        return self.state
 
     def _maintenance_gate_status(self) -> PhaseStatus:
         outcome = self.state.phase_outcomes.get(Phase.MAINTENANCE_REVIEW.value)
@@ -529,6 +903,12 @@ class ModeCRunController:
             # Soft: non-unavailable ensure issues still fail Mode C start.
             return ensure
 
+        # Production Spec Kit lifecycle — real files, no metadata overrides.
+        if path.scale is not SpecKitScale.SMALL:
+            artifacts = self._materialize_speckit_artifacts()
+            if not artifacts.get("ok", False):
+                return artifacts
+
         classify_outcome = PhaseOutcome(
             phase=Phase.CLASSIFY,
             status=PhaseStatus.SUCCEEDED,
@@ -539,13 +919,28 @@ class ModeCRunController:
         return {"ok": True, "detail": "classified", **data}
 
     def _phase_research(self) -> dict[str, Any]:
-        """Research agent via the same Orca Run; compact locally for handoff."""
+        """Research agent via the same Orca Run; compact locally for handoff.
+
+        Prefer local/opencode only when local.enabled AND capable AND allowed;
+        otherwise cloud lead agent via Orca. Never hard-code agent=opencode when
+        local is disabled.
+        """
         bindings = self.bindings
         query = bindings.research_query or bindings.task_prompt or "repository research"
+        research_agent = self._research_agent_kind()
+        if not research_agent:
+            return {
+                "ok": False,
+                "detail": (
+                    "Mode C research has no available agent "
+                    "(local disabled/unavailable and no cloud lead)"
+                ),
+                "failure": FailureClass.UNAVAILABLE.value,
+            }
         context: dict[str, Any] = {
             "query": query,
-            "agent": "opencode",
-            "prefer_local_worker": True,
+            "agent": research_agent,
+            "prefer_local_worker": research_agent == "opencode",
             "read_only": True,
         }
         orca_out = self._run_via_orca(
@@ -576,6 +971,7 @@ class ModeCRunController:
             "ok": orca_out.get("ok"),
             "detail": orca_out.get("detail"),
             "run_id": orca_out.get("run_id"),
+            "agent": research_agent,
         }
         provider = orca_out.get("provider")
         if isinstance(provider, dict) and isinstance(provider.get("output"), str):
@@ -644,6 +1040,15 @@ class ModeCRunController:
         # Worktrees/concurrency belong to Orca under the Mode C Run — Aichestra
         # does not take a local .aichestra/edit.lock lease for Mode C writes.
         lead_kind = self._lead_agent_kind()
+        if not lead_kind:
+            return {
+                "ok": False,
+                "detail": (
+                    "Mode C has no available/enabled lead provider; "
+                    "refusing disabled/unavailable agent dispatch"
+                ),
+                "failure": FailureClass.UNAVAILABLE.value,
+            }
         context["agent"] = lead_kind
         # First write placement: isolated Orca child worktree.
         context["worktree"] = "new-child"
@@ -725,8 +1130,15 @@ class ModeCRunController:
 
     def _phase_verification(self) -> dict[str, Any]:
         bindings = self.bindings
-        commands = bindings.verification_commands
+        commands = list(bindings.verification_commands or [])
         root = self._effective_project_root()
+        detected = False
+        if not commands:
+            commands = detect_verification_commands(root or bindings.project_root)
+            detected = bool(commands)
+            if commands:
+                self.state.metadata["verification_commands_detected"] = True
+                self.state.metadata["verification_commands"] = commands
         if not commands:
             report = VerificationReport(results=[])
             self.state.metadata["verification"] = report.to_dict()
@@ -734,7 +1146,7 @@ class ModeCRunController:
                 "ok": False,
                 "detail": (
                     "verification not configured: no verify commands in "
-                    "project config"
+                    "project config and no safe auto-detect match"
                 ),
                 "verification": report.to_dict(),
                 "missing_verification": True,
@@ -742,9 +1154,12 @@ class ModeCRunController:
         report = run_verification(commands, cwd=root)
         self.state.metadata["verification"] = report.to_dict()
         self.state.metadata["verification_cwd"] = root
+        detail = "verification ok" if report.ok else "verification failed"
+        if detected:
+            detail = f"{detail} (auto-detected commands)"
         return {
             "ok": report.ok,
-            "detail": "verification ok" if report.ok else "verification failed",
+            "detail": detail,
             "verification": report.to_dict(),
         }
 
@@ -964,52 +1379,170 @@ class ModeCRunController:
             return adopted.strip()
         return self.bindings.project_root
 
+    def _materialize_speckit_artifacts(self) -> dict[str, Any]:
+        """Write real Spec Kit artifacts under project ``.aichestra/speckit/``.
+
+        MEDIUM/LARGE artifacts are marked ready only after files exist.
+        Production MUST NOT rely on ``brief_satisfied`` / ``plan_satisfied``
+        test metadata overrides.
+        """
+        meta = self.state.metadata
+        scale = (meta.get("speckit_path") or {}).get("scale")
+        if scale in {None, SpecKitScale.SMALL.value}:
+            return {"ok": True, "detail": "small path — no Spec Kit artifacts"}
+
+        root = self.bindings.project_root
+        if not root:
+            return {
+                "ok": False,
+                "detail": "Spec Kit artifacts require project_root",
+                "failure": FailureClass.ERROR.value,
+            }
+        spec_dir = Path(root) / ".aichestra" / "speckit"
+        try:
+            spec_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return {
+                "ok": False,
+                "detail": f"cannot create Spec Kit dir: {exc}",
+                "failure": FailureClass.ERROR.value,
+            }
+
+        prompt = self.bindings.task_prompt or meta.get("task_prompt") or "Mode C task"
+        path_info = meta.get("speckit_path") or {}
+        written: list[str] = []
+
+        def _write(name: str, body: str) -> Path:
+            path = spec_dir / name
+            path.write_text(body, encoding="utf-8")
+            written.append(str(path))
+            return path
+
+        if meta.get("brief_required") or scale in {
+            SpecKitScale.MEDIUM.value,
+            SpecKitScale.LARGE_HIGH_RISK.value,
+        }:
+            brief_path = _write(
+                "brief.md",
+                f"# Brief\n\n{prompt}\n\n## Scale\n\n{scale}\n",
+            )
+            meta["brief"] = {
+                "required": True,
+                "status": "ready",
+                "path": str(brief_path),
+                "summary": prompt[:500],
+            }
+            meta["brief_required"] = True
+
+        if meta.get("plan_required") or scale in {
+            SpecKitScale.MEDIUM.value,
+            SpecKitScale.LARGE_HIGH_RISK.value,
+        }:
+            plan_path = _write(
+                "plan.md",
+                (
+                    f"# Plan\n\nObjective: {prompt}\n\n"
+                    f"Steps: {', '.join(path_info.get('steps') or [])}\n"
+                ),
+            )
+            meta["plan"] = {
+                "required": True,
+                "status": "ready",
+                "path": str(plan_path),
+                "summary": prompt[:500],
+            }
+            meta["plan_required"] = True
+
+        if scale == SpecKitScale.LARGE_HIGH_RISK.value or meta.get("clarify_required"):
+            clarify_path = _write(
+                "clarify.md",
+                "# Clarify\n\nNo open clarifications recorded for this run.\n",
+            )
+            meta["clarify"] = {
+                "required": True,
+                "status": "ready",
+                "path": str(clarify_path),
+            }
+            meta["clarify_required"] = True
+
+        if scale == SpecKitScale.LARGE_HIGH_RISK.value or meta.get("tasks_required"):
+            tasks_path = _write(
+                "tasks.md",
+                (
+                    "# Tasks\n\n"
+                    "- [ ] Implement objective\n"
+                    "- [ ] Maintenance review\n"
+                    "- [ ] Verification\n"
+                ),
+            )
+            meta["tasks"] = {
+                "required": True,
+                "status": "ready",
+                "path": str(tasks_path),
+            }
+            meta["tasks_required"] = True
+
+        meta["speckit_artifacts"] = {
+            "dir": str(spec_dir),
+            "written": written,
+            "lifecycle": "production_files",
+        }
+        meta["speckit_execution"] = "artifacts_ready"
+        # Explicitly ignore any legacy test-only overrides.
+        for key in (
+            "brief_satisfied",
+            "plan_satisfied",
+            "clarify_satisfied",
+            "tasks_satisfied",
+        ):
+            meta.pop(key, None)
+        return {
+            "ok": True,
+            "detail": f"Spec Kit artifacts ready ({len(written)} files)",
+            "written": written,
+        }
+
     def _speckit_implement_gate(self) -> dict[str, Any] | None:
-        """Block implement when MEDIUM/LARGE Spec Kit artifacts are still pending."""
+        """Block implement when MEDIUM/LARGE Spec Kit artifacts are still pending.
+
+        Readiness is determined by real artifact status/path existence — never by
+        ``*_satisfied`` test metadata.
+        """
         meta = self.state.metadata
         scale = (meta.get("speckit_path") or {}).get("scale")
         if scale == SpecKitScale.SMALL.value:
             return None
 
+        def _ready(key: str, required_flag: str) -> bool:
+            if not meta.get(required_flag):
+                return True
+            blob = meta.get(key) if isinstance(meta.get(key), dict) else {}
+            status = str(blob.get("status") or "pending")
+            if status in {"ready", "approved", "complete"}:
+                path = blob.get("path")
+                if isinstance(path, str) and path.strip():
+                    return Path(path).is_file()
+                # Status ready without path only after materialize wrote files.
+                artifacts = meta.get("speckit_artifacts") or {}
+                return bool(artifacts.get("written"))
+            return False
+
         pending: list[str] = []
-        if meta.get("brief_required"):
-            brief = meta.get("brief") if isinstance(meta.get("brief"), dict) else {}
-            status = str(brief.get("status") or "pending")
-            if status not in {"ready", "approved", "complete", "satisfied"}:
-                # Allow explicit override via bindings metadata injection.
-                if not meta.get("brief_satisfied"):
-                    pending.append("brief")
-        if meta.get("plan_required"):
-            plan = meta.get("plan") if isinstance(meta.get("plan"), dict) else {}
-            status = str(plan.get("status") or "pending")
-            if status not in {"ready", "approved", "complete", "satisfied"}:
-                if not meta.get("plan_satisfied"):
-                    pending.append("plan")
-        if meta.get("clarify_required") and not meta.get("clarify_satisfied"):
-            clarify = meta.get("clarify") if isinstance(meta.get("clarify"), dict) else {}
-            if str(clarify.get("status") or "pending") not in {
-                "ready",
-                "approved",
-                "complete",
-                "satisfied",
-            }:
-                pending.append("clarify")
-        if meta.get("tasks_required") and not meta.get("tasks_satisfied"):
-            tasks = meta.get("tasks") if isinstance(meta.get("tasks"), dict) else {}
-            if str(tasks.get("status") or "pending") not in {
-                "ready",
-                "approved",
-                "complete",
-                "satisfied",
-            }:
-                pending.append("tasks")
+        if not _ready("brief", "brief_required"):
+            pending.append("brief")
+        if not _ready("plan", "plan_required"):
+            pending.append("plan")
+        if not _ready("clarify", "clarify_required"):
+            pending.append("clarify")
+        if not _ready("tasks", "tasks_required"):
+            pending.append("tasks")
 
         if not pending:
             return None
         detail = (
             f"Spec Kit {scale} gate blocked implement; pending artifacts: "
             + ", ".join(pending)
-            + ". Mark metadata statuses ready/approved or set *_satisfied before implement."
+            + ". Produce real files under .aichestra/speckit/ (no metadata overrides)."
         )
         self.state.metadata["speckit_gate_blocked"] = pending
         return {
@@ -1052,14 +1585,19 @@ class ModeCRunController:
         run_id = (result.metadata or {}).get("run_id")
         if result.ok and isinstance(run_id, str) and run_id.strip():
             self.state.metadata["orca_run_id"] = run_id.strip()
+            self.state.metadata.pop("orca_run_id_synthesized", None)
             return None
         if result.ok and not run_id:
-            # Fakes / degraded receipts: synthesize a stable workflow-local id only
-            # when the adapter explicitly marked reuse/success without an id.
-            synthesized = f"aichestra-run-{id(self)}"
-            self.state.metadata["orca_run_id"] = synthesized
-            self.state.metadata["orca_run_id_synthesized"] = True
-            return None
+            # FAIL CLOSED — never synthesize aichestra-run-{id(self)}.
+            return {
+                "ok": False,
+                "detail": (
+                    "Mode C FAIL CLOSED: Orca ensure_run succeeded but returned "
+                    "no run_id; refusing synthetic run ids"
+                ),
+                "failure": FailureClass.ERROR.value,
+                "provider": result.to_dict(),
+            }
         return {
             "ok": False,
             "detail": result.detail or "failed to create Orca Run",
@@ -1107,8 +1645,18 @@ class ModeCRunController:
         run_id = str(self.state.metadata["orca_run_id"])
         ctx = sanitize_mapping(dict(context or {}))
         ctx["run_id"] = run_id
-        if "agent" not in ctx:
-            ctx["agent"] = self._lead_agent_kind()
+        if "agent" not in ctx or not ctx.get("agent"):
+            agent = self._lead_agent_kind()
+            if not agent:
+                return {
+                    "ok": False,
+                    "detail": (
+                        "Mode C refuse: no available/enabled lead agent for "
+                        f"role={role}"
+                    ),
+                    "failure": FailureClass.UNAVAILABLE.value,
+                }
+            ctx["agent"] = agent
         if "research" in self.state.metadata and "research" not in ctx:
             research = self.state.metadata["research"]
             ctx["research"] = (
@@ -1230,9 +1778,11 @@ class ModeCRunController:
             local_enabled=bool(self.bindings.local_enabled),
             prefer_orca_attachments=True,
         )
-        delivery = stage_attachments(paths, self._effective_project_root())
+        # Never stage into the parent project root — temp dir outside checkout
+        # (or absolute paths for Orca --attach).
+        stage_root = tempfile.mkdtemp(prefix="aichestra-attach-")
+        delivery = stage_attachments(paths, stage_root)
         bytes_ok = bool(delivery.bytes_delivered)
-        # Prefer staged paths for subsequent provider dispatch.
         if delivery.staged:
             self.bindings.attachments = tuple(delivery.staged)
         elif delivery.resolved:
@@ -1246,6 +1796,8 @@ class ModeCRunController:
             "paths": list(self.bindings.attachments),
             "bytes_delivered": bytes_ok,
             "attachment_delivery": delivery.to_dict(),
+            "staged_outside_parent": True,
+            "stage_root": stage_root,
         }
 
     def _apply_scale_phases(self, scale: SpecKitScale) -> None:
@@ -1306,10 +1858,16 @@ class ModeCRunController:
                 phase=phase, status=PhaseStatus.PENDING
             )
 
-    def _lead_agent_kind(self) -> str:
+    def _lead_agent_kind(self) -> str | None:
+        """Return available/enabled lead agent kind, or None (never invent disabled)."""
         lead = self.bindings.lead
         if lead is not None:
-            return lead.kind.value
+            try:
+                status = lead.probe()
+            except Exception:  # noqa: BLE001
+                status = None
+            if status is not None and status.available:
+                return lead.kind.value
         if self.bindings.providers:
             selection = select_lead(
                 self.bindings.providers,
@@ -1318,8 +1876,26 @@ class ModeCRunController:
             )
             if selection.lead is not None:
                 return selection.lead.value
-        preferred = (self.bindings.preferred_lead or "codex").strip().lower()
-        return preferred or ProviderKind.CODEX.value
+        return None
+
+    def _research_agent_kind(self) -> str | None:
+        """Prefer local/opencode only when enabled+capable; else cloud lead via Orca."""
+        if self.bindings.local_enabled:
+            worker = self.bindings.local_worker
+            if worker is not None:
+                try:
+                    st = worker.probe()
+                except Exception:  # noqa: BLE001
+                    st = None
+                if st is not None and st.available:
+                    return "opencode"
+            for status in self.bindings.providers:
+                if (
+                    status.kind is ProviderKind.LOCAL_WORKER
+                    and status.available
+                ):
+                    return "opencode"
+        return self._lead_agent_kind()
 
     def _speckit_from_classify_data(
         self, data: Mapping[str, Any], *, prompt: str
@@ -1455,61 +2031,26 @@ def bound_writer_from_lead(
     project_root: str | None = None,
     attachments: tuple[str, ...] = (),
 ) -> Callable[[WorkflowState, Phase], ProviderTaskResult]:
-    """Default writer executor: run required test/doc writes through the lead."""
+    """DEPRECATED Mode C seam — direct lead writers are forbidden in Mode C.
+
+    Kept for Mode A / emergency tooling experiments. Mode C ``run_all`` ignores
+    ``writer_fn`` and dispatches writers only via Orca under the Mode C Run.
+    """
 
     def _writer(state: WorkflowState, phase: Phase) -> ProviderTaskResult:
-        decision = state.decision
-        plan_hint = ""
-        decision_payload: dict[str, Any] | None = None
-        if decision is not None:
-            to_dict = getattr(decision, "to_dict", None)
-            if callable(to_dict):
-                decision_payload = to_dict()
-            else:
-                decision_payload = {
-                    "TEST_DECISION": getattr(decision, "TEST_DECISION", None),
-                    "TEST_SCOPE": list(getattr(decision, "TEST_SCOPE", []) or []),
-                    "DOC_DECISION": getattr(decision, "DOC_DECISION", None),
-                    "DOC_TARGETS": list(getattr(decision, "DOC_TARGETS", []) or []),
-                }
-            if phase is Phase.TEST_WRITER:
-                plan_hint = (
-                    f"TEST_DECISION={decision.TEST_DECISION}; "
-                    f"TEST_SCOPE={list(decision.TEST_SCOPE)}"
-                )
-            elif phase is Phase.DOC_WRITER:
-                plan_hint = (
-                    f"DOC_DECISION={decision.DOC_DECISION}; "
-                    f"DOC_TARGETS={list(decision.DOC_TARGETS)}"
-                )
-        task_prompt = str(
-            (getattr(state, "metadata", None) or {}).get("task_prompt")
-            or ((getattr(state, "metadata", None) or {}).get("classify") or {}).get(
-                "prompt"
-            )
-            or ""
-        )
-        prompt = (
-            f"Mode C {phase.value}: implement the required writer work. {plan_hint}"
-        ).strip()
-        context = sanitize_mapping(
-            {
-                "phase": phase.value,
-                "plan_hint": plan_hint,
-                "task_prompt": task_prompt,
-                "decision": decision_payload,
-            }
-        )
-        return lead.execute_task(
-            ProviderTaskRequest(
-                prompt=prompt,
-                role=phase.value,
-                context=context,
-                cwd=project_root,
-                timeout_seconds=300.0,
-                read_only=False,
-                attachments=attachments,
-            )
+        return ProviderTaskResult(
+            ok=False,
+            failure=FailureClass.ERROR,
+            detail=(
+                f"bound_writer_from_lead refused for {phase.value}: Mode C "
+                "writers must execute via Orca under the Mode C run_id"
+            ),
+            metadata={
+                "deprecated": True,
+                "project_root": project_root,
+                "attachments": list(attachments),
+                "lead_kind": getattr(getattr(lead, "kind", None), "value", None),
+            },
         )
 
     return _writer
@@ -1519,16 +2060,18 @@ def run_phase_hooks(
     workflow: ModeCRunController,
     hooks: dict[Phase, Callable[[WorkflowState], None]] | None = None,
 ) -> WorkflowState:
-    """Run all phases; optional hooks fire only after a phase succeeds/skips."""
+    """Compatibility helper — prefer ``workflow.run_all()`` (thin coordinator).
+
+    When hooks are empty, delegates to ``run_all``. With hooks, runs the thin
+    coordinator then invokes hooks for succeeded/skipped phases.
+    """
     hooks = hooks or {}
-    while workflow.state.current_phase is not None and not workflow.state.stopped:
-        outcome = workflow.run_phase()
-        if outcome is None:
-            break
-        if outcome.status in {PhaseStatus.SUCCEEDED, PhaseStatus.SKIPPED}:
-            hook = hooks.get(outcome.phase)
-            if hook:
-                hook(workflow.state)
-        if outcome.status is PhaseStatus.FAILED:
-            break
-    return workflow.state
+    state = workflow.run_all()
+    if hooks:
+        for phase_name, outcome in list(state.phase_outcomes.items()):
+            if outcome.status in {PhaseStatus.SUCCEEDED, PhaseStatus.SKIPPED}:
+                hook = hooks.get(outcome.phase)
+                if hook:
+                    hook(state)
+            del phase_name  # unused — iterate outcomes only
+    return state

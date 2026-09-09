@@ -162,6 +162,24 @@ def _cpu_info() -> CpuInfo:
         cores = re.search(r"NumberOfCores=(\d+)", out)
         if cores:
             physical = int(cores.group(1))
+        if not name or physical is None:
+            # PowerShell / CIM fallback when wmic is missing or empty.
+            ps = _run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    "(Get-CimInstance Win32_Processor | Select-Object -First 1 "
+                    "| ForEach-Object { $_.Name + '|' + $_.NumberOfCores })",
+                ],
+                timeout=12.0,
+            ).strip()
+            if "|" in ps:
+                ps_name, ps_cores = ps.split("|", 1)
+                if not name and ps_name.strip():
+                    name = ps_name.strip()
+                if physical is None and ps_cores.strip().isdigit():
+                    physical = int(ps_cores.strip())
     return CpuInfo(name=name, cores_logical=logical, cores_physical=physical)
 
 
@@ -223,6 +241,18 @@ def _memory_info() -> MemoryInfo:
         match = re.search(r"TotalPhysicalMemory=(\d+)", out)
         if match:
             total = int(match.group(1))
+        if total <= 0:
+            ps = _run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory",
+                ],
+                timeout=12.0,
+            ).strip()
+            if ps.isdigit():
+                total = int(ps)
     if total <= 0:
         # Last-resort: report 0 rather than inventing values.
         total = 0
@@ -265,8 +295,14 @@ def _gpu_info() -> tuple[GpuInfo, ...]:
         out = _run(["system_profiler", "SPDisplaysDataType", "-detailLevel", "mini"])
         for chip in re.findall(r"Chipset Model:\s*(.+)", out):
             name = chip.strip()
-            kind = "apple_silicon" if "Apple" in name or "M" in name else "gpu"
-            gpus.append(GpuInfo(name=name, vendor="Apple", accelerator_kind=kind))
+            # Require Apple branding or an Mx SoC token — not any broad "M".
+            apple = bool(
+                re.search(r"\bApple\b", name, re.I)
+                or re.search(r"\bM\d+\b", name)
+            )
+            kind = "apple_silicon" if apple else "gpu"
+            vendor = "Apple" if apple else None
+            gpus.append(GpuInfo(name=name, vendor=vendor, accelerator_kind=kind))
         if not gpus and platform.machine().lower() in {"arm64", "aarch64"}:
             gpus.append(
                 GpuInfo(
@@ -323,6 +359,21 @@ def _gpu_info() -> tuple[GpuInfo, ...]:
             name = match.strip()
             if name:
                 gpus.append(GpuInfo(name=name, accelerator_kind="gpu"))
+        if not gpus:
+            ps = _run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    "Get-CimInstance Win32_VideoController | "
+                    "ForEach-Object { $_.Name }",
+                ],
+                timeout=12.0,
+            )
+            for line in ps.splitlines():
+                name = line.strip()
+                if name:
+                    gpus.append(GpuInfo(name=name, accelerator_kind="gpu"))
     # Deduplicate by name
     unique: dict[str, GpuInfo] = {g.name: g for g in gpus}
     return tuple(unique.values())

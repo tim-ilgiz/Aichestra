@@ -112,7 +112,11 @@ def build_parser() -> argparse.ArgumentParser:
     handoff_p.add_argument(
         "--run-id",
         default="",
-        help="Existing Orca run_id so handoff stays inside the Mode C Run",
+        help=(
+            "Existing Orca run_id so handoff stays inside the Mode C Run "
+            "(required for --execute unless a recent Mode C run can be "
+            "auto-resolved from --repo /.aichestra/last_mode_c_run.json)"
+        ),
     )
     handoff_p.add_argument(
         "--prepare-only",
@@ -255,11 +259,26 @@ def _cmd_handoff(args: argparse.Namespace) -> int:
     from aichestra.orchestration.handoff import (
         build_handoff_packet,
         prepare_manual_handoff,
+        resolve_recent_mode_c_run_id,
     )
+
+    run_id = str(getattr(args, "run_id", "") or "").strip()
+    repo = Path(args.repo).resolve() if args.repo else None
+    if not run_id and repo is not None:
+        run_id = resolve_recent_mode_c_run_id(project_root=repo) or ""
+
+    execute = not bool(getattr(args, "prepare_only", False))
+    if execute and not run_id:
+        sys.stderr.write(
+            "handoff execute requires --run-id or a recent Mode C run under "
+            "--repo/.aichestra/last_mode_c_run.json (use --prepare-only for "
+            "packet-only)\n"
+        )
+        return 2
 
     packet = build_handoff_packet(
         original_request=args.prompt,
-        repo_path=str(args.repo.resolve()) if args.repo else "",
+        repo_path=str(repo) if repo else "",
         worktree_path=str(args.worktree.resolve()) if args.worktree else "",
         workflow_phase=args.phase or "",
         next_action=args.next_action or "",
@@ -269,12 +288,12 @@ def _cmd_handoff(args: argparse.Namespace) -> int:
         known_failures=list(args.failure or []),
         git_status=args.git_status or "",
         git_diff=args.git_diff or "",
-        orca_run_id=str(getattr(args, "run_id", "") or ""),
+        orca_run_id=run_id,
     )
     payload = prepare_manual_handoff(
         packet,
-        execute=not bool(getattr(args, "prepare_only", False)),
-        run_id=str(getattr(args, "run_id", "") or "") or None,
+        execute=execute,
+        run_id=run_id or None,
     )
     sys.stdout.write(json.dumps(payload, indent=2, default=str) + "\n")
     if payload.get("executed"):

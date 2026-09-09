@@ -16,10 +16,12 @@ from aichestra.providers.base import FailureClass
 from tests.fakes.providers import fake_codex, fake_local_worker, fake_orca
 
 
-def test_phase_succeeded_only_after_operation_ok() -> None:
-    """Orca error on implement must fail the phase — no lead bypass."""
+def test_phase_succeeded_only_after_operation_ok(tmp_path: Path) -> None:
+    """Orca error on mode_c_agents must fail — no lead bypass."""
     orca = fake_orca("success")
     lead = fake_codex("success")
+    proj = tmp_path / "proj"
+    proj.mkdir()
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         research_useful=False,
@@ -27,7 +29,7 @@ def test_phase_succeeded_only_after_operation_ok() -> None:
             orca=orca,
             lead=lead,
             task_prompt="implement feature",
-            project_root="/tmp/mode-c-proj",
+            project_root=str(proj),
             maintenance_kwargs={"change_summary": "feature"},
         ),
     )
@@ -35,30 +37,28 @@ def test_phase_succeeded_only_after_operation_ok() -> None:
     assert outcome is not None
     assert outcome.status is PhaseStatus.SUCCEEDED
     assert Phase.CLASSIFY.value in wf.state.completed
-    assert wf.state.current_phase is Phase.LEAD_IMPLEMENT
     assert wf.state.metadata.get("orca_run_id")
     assert wf.state.metadata.get("canonical_orchestration") == "orca_run"
 
-    # Fail Orca implement — must not mark completed and must not call lead.
+    # Fail Orca agents — must not mark completed and must not call lead.
     orca._execute_scenario = "error"
     lead_sent_before = len(lead.sent)
-    failed = wf.run_phase()
-    assert failed is not None
-    assert failed.status is PhaseStatus.FAILED
-    assert Phase.LEAD_IMPLEMENT.value not in wf.state.completed
-    assert Phase.LEAD_IMPLEMENT.value in wf.state.failed
-    assert wf.state.stopped is True
+    state = wf.run_all()
+    assert state.failed
+    assert Phase.LEAD_IMPLEMENT.value not in state.completed
     assert len(lead.sent) == lead_sent_before
 
 
-def test_mode_c_without_orca_fails_at_classify() -> None:
+def test_mode_c_without_orca_fails_at_classify(tmp_path: Path) -> None:
+    proj = tmp_path / "proj"
+    proj.mkdir()
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(
             lead=fake_codex("success"),
             task_prompt="implement feature",
-            project_root="/tmp/mode-c-proj",
+            project_root=str(proj),
         ),
     )
     outcome = wf.run_phase()
@@ -68,8 +68,10 @@ def test_mode_c_without_orca_fails_at_classify() -> None:
     assert outcome.result.get("failure") == FailureClass.UNAVAILABLE.value
 
 
-def test_mode_c_orca_unavailable_does_not_fallback_to_lead() -> None:
+def test_mode_c_orca_unavailable_does_not_fallback_to_lead(tmp_path: Path) -> None:
     lead = fake_codex("success")
+    proj = tmp_path / "proj"
+    proj.mkdir()
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         research_useful=False,
@@ -77,7 +79,7 @@ def test_mode_c_orca_unavailable_does_not_fallback_to_lead() -> None:
             orca=fake_orca("unavailable"),
             lead=lead,
             task_prompt="implement feature",
-            project_root="/tmp/mode-c-proj",
+            project_root=str(proj),
         ),
     )
     outcome = wf.run_phase()
@@ -86,8 +88,10 @@ def test_mode_c_orca_unavailable_does_not_fallback_to_lead() -> None:
     assert lead.sent == []
 
 
-def test_mode_c_resume_run_id() -> None:
+def test_mode_c_resume_run_id(tmp_path: Path) -> None:
     orca = fake_orca("success")
+    proj = tmp_path / "proj"
+    proj.mkdir()
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         research_useful=False,
@@ -95,7 +99,7 @@ def test_mode_c_resume_run_id() -> None:
             orca=orca,
             lead=fake_codex("success"),
             task_prompt="resume me",
-            project_root="/tmp/mode-c-proj",
+            project_root=str(proj),
             resume_run_id="existing-orca-run-42",
             maintenance_kwargs={"change_summary": "x"},
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
@@ -112,7 +116,9 @@ def test_mode_c_resume_run_id() -> None:
     assert ensure_roles == []
 
 
-def test_maintenance_reviewer_gates_writers() -> None:
+def test_maintenance_reviewer_gates_writers(tmp_path: Path) -> None:
+    proj = tmp_path / "proj"
+    proj.mkdir()
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         research_useful=False,
@@ -120,7 +126,7 @@ def test_maintenance_reviewer_gates_writers() -> None:
             orca=fake_orca("success"),
             lead=fake_codex("success"),
             task_prompt="api change",
-            project_root="/tmp/mode-c-proj",
+            project_root=str(proj),
         ),
     )
     # Manually jump to TEST_WRITER without maintenance-reviewer success.
@@ -154,14 +160,9 @@ def test_mode_c_wires_orca_only_end_to_end(fixture_project_a: Path) -> None:
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
-    # MEDIUM Spec Kit: satisfy brief/plan gate for this contract path.
-    outcome = wf.run_phase()  # classify
-    assert outcome is not None and outcome.status is PhaseStatus.SUCCEEDED
-    wf.state.metadata["brief_satisfied"] = True
-    if wf.state.metadata.get("plan_required"):
-        wf.state.metadata["plan_satisfied"] = True
     state = wf.run_all()
     assert not state.failed, state.failed
+    assert state.metadata.get("thin_coordinator") is True
     assert Phase.RESEARCH.value in state.completed
     assert state.metadata["research"]["via"] == "orca"
     assert state.metadata["research"]["QUERY"] == "README"
@@ -176,8 +177,8 @@ def test_mode_c_wires_orca_only_end_to_end(fixture_project_a: Path) -> None:
         if (req.role or "")
         not in {"ensure_run", "control_plane", "classify", "phase_report"}
     }
-    assert "research" in agent_roles
-    assert "lead_implement" in agent_roles
+    assert "mode_c_agents" in agent_roles
+    assert "lead_review" in agent_roles
     run_ids = {
         (req.context or {}).get("run_id")
         for req in orca.sent
@@ -186,3 +187,7 @@ def test_mode_c_wires_orca_only_end_to_end(fixture_project_a: Path) -> None:
         and (req.context or {}).get("run_id")
     }
     assert run_ids == {state.metadata["orca_run_id"]}
+    # Spec Kit MEDIUM artifacts must be real files (no metadata hacks).
+    spec_dir = Path(fixture_project_a) / ".aichestra" / "speckit"
+    assert (spec_dir / "brief.md").is_file()
+    assert (spec_dir / "plan.md").is_file()

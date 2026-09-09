@@ -4,9 +4,10 @@
 
 **Created**: 2026-09-09
 
-**Status**: Architecture contract realigned; Mode C production path is
-single-Orca-Run (`ModeCRunController` / `mode_c.py`). Ready for maintainer
-review before merge.
+**Status**: Architecture contract realigned; Mode C production path is a thin
+coordinator (`ModeCRunController.run_all` → one `mode_c_agents` Orca handoff +
+local Spec Kit / maintenance / verification gates). Ready for maintainer
+review once GitHub CI matrix is green.
 
 **Input**: User description: "A developer can clone this repository onto macOS, Windows or Linux, execute the platform bootstrap, authenticate required providers, and receive an equivalent Orca-based AI development environment."
 
@@ -449,6 +450,30 @@ These are the non-negotiable Mode C contract. Contract tests MUST cover them.
   Missing Orca MUST NEVER authorize Aichestra to become the orchestrator.
 - **FR-066**: Providers Codex, Cursor, and local-worker MUST support independent
   `enabled` configuration without breaking the platform (MODE-C-009).
+- **FR-067**: Mode C MUST NOT synthesize Orca `run_id` values (including
+  `aichestra-run-*`). If Orca is reachable but returns no `run_id`, Mode C
+  FAIL CLOSED.
+- **FR-068**: Same-run task binding is fail-closed: `run-use` failure MUST
+  prevent `task-create`; never retry `task-create` without `--run` after a
+  failed `--run` attempt. Handoff execute MUST bind `--run` to the Mode C
+  `run_id`.
+- **FR-069**: Provider disable/`available=False` is authoritative — Mode C MUST
+  NOT dispatch disabled or unavailable Codex/Cursor/local-worker agents, and
+  MUST NOT invent a preferred lead when none is available.
+- **FR-070**: Spec Kit MEDIUM/LARGE artifacts MUST be produced by the production
+  lifecycle under the target project's `.aichestra/speckit/` (or Spec Kit
+  tooling). Readiness is file-backed; test-only `*_satisfied` metadata MUST NOT
+  unlock implement.
+- **FR-071**: Mode C attachments MUST NOT be staged into the parent project
+  checkout (no parent `.aichestra/attachments/`). Stage outside the repo or
+  pass absolute paths to Orca `--attach`.
+- **FR-072**: When verify commands are empty, verification-runner MUST use safe
+  auto-detect (`.aichestra/project.json` verify first; else .NET / Python /
+  Node heuristics). Bootstrap MAY set `bootstrap_complete=True` when doctor is
+  ok and no blocking remaining steps remain (no forever-pending advisories).
+- **FR-073**: Handoff CLI MUST require `--run-id` or reliably auto-resolve a
+  recent Mode C run; README MUST match executable UX. Wait-event success
+  requires dispatch-id correlation when an expected dispatch id exists.
 
 ### Key Entities
 
@@ -544,6 +569,7 @@ These are the non-negotiable Mode C contract. Contract tests MUST cover them.
   matrix confidence.
 - "Equivalent environment" means equivalent orchestration capabilities and
   policies across OSes, not identical binary install paths.
-- Current production code may still contain a conflicting dual-orchestrator
-  workflow; that code is technical debt relative to this spec, not a reason to
+- Current production Mode C uses a thin coordinator (`run_all` → one
+  `mode_c_agents` Orca handoff + local gates). Reintroducing an Aichestra-owned
+  agent phase scheduler is a regression against this spec — not a reason to
   soften requirements.

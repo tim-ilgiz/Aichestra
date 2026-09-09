@@ -148,24 +148,12 @@ def test_maintenance_uses_change_signals_not_defaults(tmp_path: Path) -> None:
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
-    # Jump after lead implement.
-    while wf.state.current_phase not in {Phase.MAINTENANCE_REVIEW, None}:
-        if wf.state.current_phase is Phase.LEAD_IMPLEMENT:
-            wf.state.metadata["brief_satisfied"] = True
-            wf.state.metadata["plan_satisfied"] = True
-            wf.state.metadata["clarify_satisfied"] = True
-            wf.state.metadata["tasks_satisfied"] = True
-        outcome = wf.run_phase()
-        assert outcome is not None
-        assert outcome.status is not PhaseStatus.FAILED
-
-    outcome = wf.run_phase()
-    assert outcome is not None
-    assert outcome.status is PhaseStatus.SUCCEEDED
-    decision = wf.state.decision
+    state = wf.run_all()
+    assert not state.failed, state.failed
+    decision = state.decision
     assert decision is not None
     assert decision.TEST_DECISION != "none"
-    assert wf.state.metadata["change_signals"]["effective"]["touches_behavior"] is True
+    assert state.metadata["change_signals"]["effective"]["touches_behavior"] is True
 
 
 def test_required_writer_dispatches_via_orca(tmp_path: Path) -> None:

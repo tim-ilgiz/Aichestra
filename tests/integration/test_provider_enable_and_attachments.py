@@ -79,16 +79,16 @@ def test_vision_attachment_delivered_and_wired(tmp_path: Path) -> None:
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
-    classify = wf.run_phase()
-    assert classify is not None and classify.status.value == "succeeded"
-    routing = wf.state.metadata["media_routing"]
+    state = wf.run_all()
+    assert not state.failed, state.failed
+    routing = state.metadata["media_routing"]
     assert routing["vision_required"] is True
     assert routing["bytes_delivered"] is True
-    implement = wf.run_phase()
-    assert implement is not None and implement.status.value == "succeeded"
-    impl_req = next(r for r in orca.sent if (r.role or "") == "lead_implement")
-    assert impl_req.attachments
-    assert Path(impl_req.attachments[0]).is_file()
+    assert routing.get("staged_outside_parent") is True
+    assert not (tmp_path / ".aichestra" / "attachments").exists()
+    agents_req = next(r for r in orca.sent if (r.role or "") == "mode_c_agents")
+    assert agents_req.attachments
+    assert Path(agents_req.attachments[0]).is_file()
 
 
 def test_orchestrate_honors_preferred_lead_and_no_codex(

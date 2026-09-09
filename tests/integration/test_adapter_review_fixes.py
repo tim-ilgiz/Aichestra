@@ -203,11 +203,10 @@ def test_mode_c_does_not_use_edit_lock(tmp_path: Path) -> None:
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
-    assert wf.run_phase() is not None  # classify
-    outcome = wf.run_phase()  # lead_implement via Orca despite advisory lock
-    assert outcome is not None
-    assert outcome.status is PhaseStatus.SUCCEEDED
-    assert "edit_lease" not in wf.state.metadata
+    state = wf.run_all()  # thin coordinator; Orca worktrees — ignore advisory lock
+    assert not state.failed, state.failed
+    assert Phase.LEAD_IMPLEMENT.value in state.completed
+    assert "edit_lease" not in state.metadata
     release_edit_lease(root, "other-agent")
 
 
@@ -264,7 +263,8 @@ def test_cli_binds_writer_for_login_feature(
     assert code == 0
 
 
-def test_bound_writer_from_lead_invokes_lead() -> None:
+def test_bound_writer_from_lead_refuses_mode_c_direct_dispatch() -> None:
+    """Mode C seam: bound_writer_from_lead must refuse direct lead execution."""
     lead = fake_codex("success")
     writer = bound_writer_from_lead(lead, project_root=None)
     state = SimpleNamespace(
@@ -276,6 +276,6 @@ def test_bound_writer_from_lead_invokes_lead() -> None:
         )
     )
     result = writer(state, Phase.TEST_WRITER)  # type: ignore[arg-type]
-    assert result.ok
-    assert lead.sent
-    assert lead.sent[-1].role == Phase.TEST_WRITER.value
+    assert result.ok is False
+    assert "Orca" in result.detail or "refused" in result.detail.lower()
+    assert lead.sent == []

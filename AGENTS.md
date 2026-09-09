@@ -63,6 +63,35 @@ The platform must support:
 - No direct Codex/Cursor/local-worker execution from Aichestra for Mode C
   implement/research/writers/review
 - Attachments forwarded through real Orca/provider mechanisms when claimed
+- Same-run task binding is fail-closed (`run-use` / run association MUST succeed)
+- Disabled providers MUST never be dispatched
+- Spec Kit MEDIUM/LARGE artifacts MUST be produced by production lifecycle
+  (never by test-only `*_satisfied` metadata)
+
+### Anti-regression (DO NOT)
+
+```text
+DO NOT implement a general-purpose Mode C phase scheduler in Aichestra.
+DO NOT solve Orca orchestration by wrapping every agent phase in a Python loop.
+DO NOT call Codex/Cursor/local-worker directly from Mode C agent lifecycle.
+DO NOT synthesize run_id (fail closed if Orca omits run_id).
+DO NOT dispatch a provider disabled by config.
+DO NOT hard-code opencode research when local is disabled.
+DO NOT mark Spec Kit artifacts satisfied from test-only metadata.
+DO NOT stage runtime attachments into the user's parent checkout.
+DO NOT treat CI fake providers as proof of live Orca integration.
+DO NOT soft-fail run-use and then create ambient tasks outside the Mode C Run.
+DO NOT default lead selection to "codex" when Codex/Cursor are disabled.
+```
+
+### Positive rules
+
+```text
+Orca owns agent/task/worker/worktree lifecycle.
+Aichestra owns policy and deterministic gates.
+Mode A stays independent (native Codex/Cursor unintercepted).
+Canonical Mode C lifecycle identity is Orca run_id.
+```
 
 ## Native mode
 

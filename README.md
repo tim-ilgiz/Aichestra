@@ -55,9 +55,12 @@ python -m aichestra update          # after git pull; preserves machine-local
    (and `--no-orca`, which fails Mode C closed).
    Attachments: `--attach screenshot.png` delivers native file bytes
    (Orca `--attach` / staged inbox; Codex `--image` in Mode A).
-4. **Codex→Cursor handoff** — one-action: `python -m aichestra handoff --prompt "…"`
-   creates an Orca Cursor worktree with a bounded brief (`--prepare-only` for
-   packet-only).
+4. **Codex→Cursor handoff** — one-action inside the same Orca Run:
+   `python -m aichestra handoff --prompt "…" --run-id <run_id>`
+   (or `--repo /path/to/project` to auto-resolve a recent Mode C run from
+   `.aichestra/last_mode_c_run.json`). Execute binds `task-create --run <id>`
+   after successful `run-use`. Use `--prepare-only` for packet-only output.
+   Without `--run-id` / resolvable recent run, execute fails closed.
 5. **Disable local inference** — keep `local.enabled: false` in
    `.local/machine.local.json` (default).
 6. **Local repository research** —
