@@ -14,8 +14,9 @@ from aichestra.orchestration.maintenance_reviewer import review_change
 from aichestra.orchestration.modes import Mode
 from aichestra.orchestration.speckit_policy import SpecKitScale, classify_speckit_scale
 from aichestra.orchestration.workflow import (
+    MODE_C_HANDOFF_ROLE,
+    GateKind,
     ModeCRunController,
-    Phase,
     WorkflowBindings,
 )
 from aichestra.orchestration.worktrees import _pid_alive
@@ -95,11 +96,12 @@ def test_workflow_classify_uses_speckit_and_binds_orca_run(tmp_path: Path) -> No
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
-    outcome = wf.run_phase()  # classify
-    assert outcome is not None and outcome.status.value == "succeeded"
-    assert wf.state.metadata["classify"]["classification"] == "small"
-    assert wf.state.metadata.get("orca_run_id")
+    state = wf.run_all()
+    assert not state.failed, state.failed
+    assert state.metadata["classify"]["classification"] == "small"
+    assert state.metadata.get("orca_run_id")
     assert any((req.role or "") == "ensure_run" for req in orca.sent)
+    assert any((req.role or "") == MODE_C_HANDOFF_ROLE for req in orca.sent)
 
 
 def test_mode_c_without_project_root_fails_before_orca() -> None:
@@ -121,7 +123,8 @@ def test_mode_c_without_project_root_fails_before_orca() -> None:
     assert orca.sent == []
 
 
-def test_lead_review_includes_task_and_sanitized_verification(tmp_path: Path) -> None:
+def test_mode_c_handoff_includes_task_without_lead_review_role(tmp_path: Path) -> None:
+    """Handoff carries the objective; Aichestra does not schedule lead_review."""
     orca = fake_orca("success")
     lead = fake_codex("success")
     proj = tmp_path / "proj"
@@ -150,13 +153,15 @@ def test_lead_review_includes_task_and_sanitized_verification(tmp_path: Path) ->
         ),
     )
     state = wf.run_all()
-    assert Phase.LEAD_REVIEW.value in state.completed, state.failed
+    assert GateKind.ORCA_HANDOFF.value in state.completed, state.failed
+    assert GateKind.VERIFICATION.value in state.completed
     assert lead.sent == []
-    review_req = next(req for req in orca.sent if (req.role or "") == "lead_review")
-    bounded = review_req.bounded_prompt()
+    assert not any((req.role or "") == "lead_review" for req in orca.sent)
+    handoff = next(req for req in orca.sent if (req.role or "") == MODE_C_HANDOFF_ROLE)
+    bounded = handoff.bounded_prompt()
     assert "ACCEPTANCE" in bounded or "SSO" in bounded or "log in" in bounded.lower()
-    assert "DEMO_FAKE_TOKEN" not in bounded
-    assert "DEMO_FAKE_TOKEN" not in str(review_req.context)
+    # Verification stdout is local gate data; handoff context must not invent lead_review.
+    assert "lead_review" not in str(handoff.context)
 
 
 def test_quota_failure_prepares_manual_handoff(tmp_path: Path) -> None:
@@ -165,9 +170,9 @@ def test_quota_failure_prepares_manual_handoff(tmp_path: Path) -> None:
     proj.mkdir()
     original = orca.send
 
-    def send_quota_on_agents(session, request):
+    def send_quota_on_handoff(session, request):
         result = original(session, request)
-        if (request.role or "") == "mode_c_agents":
+        if (request.role or "") == MODE_C_HANDOFF_ROLE:
             from aichestra.providers.base import FailureClass, ProviderTaskResult
 
             return ProviderTaskResult(
@@ -180,7 +185,7 @@ def test_quota_failure_prepares_manual_handoff(tmp_path: Path) -> None:
             )
         return result
 
-    orca.send = send_quota_on_agents  # type: ignore[method-assign]
+    orca.send = send_quota_on_handoff  # type: ignore[method-assign]
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         research_useful=False,

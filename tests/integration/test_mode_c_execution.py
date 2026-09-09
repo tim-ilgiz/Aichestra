@@ -1,4 +1,4 @@
-"""Mode C thin run controller: one Orca Run, no direct provider fan-out."""
+"""Mode C thin run controller: one Orca Run handoff, no direct provider fan-out."""
 
 from __future__ import annotations
 
@@ -7,8 +7,10 @@ from pathlib import Path
 
 from aichestra.orchestration.modes import Mode
 from aichestra.orchestration.workflow import (
+    MODE_C_HANDOFF_ROLE,
+    GateKind,
+    GateStatus,
     ModeCRunController,
-    Phase,
     PhaseStatus,
     WorkflowBindings,
 )
@@ -16,45 +18,42 @@ from aichestra.providers.base import FailureClass
 from tests.fakes.providers import fake_codex, fake_local_worker, fake_orca
 
 
-def test_phase_succeeded_only_after_operation_ok(tmp_path: Path) -> None:
-    """Orca error on mode_c_agents must fail — no lead bypass."""
+def test_handoff_failed_does_not_complete_or_bypass_lead(tmp_path: Path) -> None:
+    """Orca error on mode_c_handoff must fail — no lead bypass."""
     orca = fake_orca("success")
     lead = fake_codex("success")
     proj = tmp_path / "proj"
     proj.mkdir()
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
-        research_useful=False,
         bindings=WorkflowBindings(
             orca=orca,
             lead=lead,
             task_prompt="implement feature",
             project_root=str(proj),
             maintenance_kwargs={"change_summary": "feature"},
+            verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
-    outcome = wf.run_phase()  # classify
+    outcome = wf.run_phase()
     assert outcome is not None
     assert outcome.status is PhaseStatus.SUCCEEDED
-    assert Phase.CLASSIFY.value in wf.state.completed
     assert wf.state.metadata.get("orca_run_id")
     assert wf.state.metadata.get("canonical_orchestration") == "orca_run"
 
-    # Fail Orca agents — must not mark completed and must not call lead.
     orca._execute_scenario = "error"
     lead_sent_before = len(lead.sent)
     state = wf.run_all()
     assert state.failed
-    assert Phase.LEAD_IMPLEMENT.value not in state.completed
+    assert GateKind.ORCA_HANDOFF.value not in state.completed
     assert len(lead.sent) == lead_sent_before
 
 
-def test_mode_c_without_orca_fails_at_classify(tmp_path: Path) -> None:
+def test_mode_c_without_orca_fails_at_validate(tmp_path: Path) -> None:
     proj = tmp_path / "proj"
     proj.mkdir()
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
-        research_useful=False,
         bindings=WorkflowBindings(
             lead=fake_codex("success"),
             task_prompt="implement feature",
@@ -74,7 +73,6 @@ def test_mode_c_orca_unavailable_does_not_fallback_to_lead(tmp_path: Path) -> No
     proj.mkdir()
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
-        research_useful=False,
         bindings=WorkflowBindings(
             orca=fake_orca("unavailable"),
             lead=lead,
@@ -94,7 +92,6 @@ def test_mode_c_resume_run_id(tmp_path: Path) -> None:
     proj.mkdir()
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
-        research_useful=False,
         bindings=WorkflowBindings(
             orca=orca,
             lead=fake_codex("success"),
@@ -111,41 +108,49 @@ def test_mode_c_resume_run_id(tmp_path: Path) -> None:
     assert outcome is not None
     assert outcome.status is PhaseStatus.SUCCEEDED
     assert wf.state.metadata["orca_run_id"] == "existing-orca-run-42"
-    # ensure_run should reuse — no second identity.
     ensure_roles = [r.role for r in orca.sent if (r.role or "") == "ensure_run"]
     assert ensure_roles == []
 
 
-def test_maintenance_reviewer_gates_writers(tmp_path: Path) -> None:
+def test_maintenance_is_gate_not_writer_scheduler(tmp_path: Path) -> None:
+    """Maintenance decision is recorded; Aichestra does not schedule writers."""
     proj = tmp_path / "proj"
     proj.mkdir()
+    orca = fake_orca("success")
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
-        research_useful=False,
         bindings=WorkflowBindings(
-            orca=fake_orca("success"),
+            orca=orca,
             lead=fake_codex("success"),
             task_prompt="api change",
             project_root=str(proj),
+            maintenance_kwargs={
+                "change_summary": "api",
+                "touches_behavior": True,
+                "touches_public_api": True,
+            },
+            verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
-    # Manually jump to TEST_WRITER without maintenance-reviewer success.
-    wf.state.current_index = wf.state.phases.index(Phase.TEST_WRITER)
-    outcome = wf.run_phase()
-    assert outcome is not None
-    assert outcome.status is PhaseStatus.FAILED
-    assert "maintenance-reviewer gate" in outcome.detail
+    state = wf.run_all()
+    assert not state.failed, state.failed
+    assert GateKind.MAINTENANCE.value in state.completed
+    assert state.decision is not None
+    roles = {(r.role or "") for r in orca.sent}
+    assert "mode_c_writers" not in roles
+    assert "test_writer" not in roles
+    assert "doc_writer" not in roles
+    assert "maintenance_gate_for_orca" in state.metadata
 
 
 def test_mode_c_wires_orca_only_end_to_end(fixture_project_a: Path) -> None:
-    """Mode C agents go through Orca; lead/local_worker are not direct executors."""
+    """Mode C handoff goes through Orca; lead/local_worker are not direct executors."""
     orca = fake_orca("success")
     lead = fake_codex("success")
     worker = fake_local_worker("success")
 
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
-        research_useful=True,
         bindings=WorkflowBindings(
             orca=orca,
             lead=lead,
@@ -162,12 +167,9 @@ def test_mode_c_wires_orca_only_end_to_end(fixture_project_a: Path) -> None:
     )
     state = wf.run_all()
     assert not state.failed, state.failed
-    assert state.metadata.get("thin_coordinator") is True
-    assert Phase.RESEARCH.value in state.completed
-    assert state.metadata["research"]["via"] == "orca"
-    assert state.metadata["research"]["query"] == "README"
+    assert state.metadata.get("orchestration_shape_agnostic") is True
+    assert state.metadata.get("workflow_owner") == "orca"
     assert orca.sent
-    # Mode C must not call lead or local_worker adapters directly.
     assert lead.sent == []
     assert worker.sent == []
     assert state.metadata.get("orca_run_id")
@@ -177,9 +179,10 @@ def test_mode_c_wires_orca_only_end_to_end(fixture_project_a: Path) -> None:
         if (req.role or "")
         not in {"ensure_run", "control_plane", "classify", "phase_report"}
     }
-    assert "research" in agent_roles
-    assert "mode_c_agents" in agent_roles
-    assert "lead_review" in agent_roles
+    assert MODE_C_HANDOFF_ROLE in agent_roles
+    assert "research" not in agent_roles
+    assert "mode_c_agents" not in agent_roles
+    assert "lead_review" not in agent_roles
     run_ids = {
         (req.context or {}).get("run_id")
         for req in orca.sent
@@ -188,7 +191,8 @@ def test_mode_c_wires_orca_only_end_to_end(fixture_project_a: Path) -> None:
         and (req.context or {}).get("run_id")
     }
     assert run_ids == {state.metadata["orca_run_id"]}
-    # Spec Kit MEDIUM artifacts must be real files (no metadata hacks).
-    spec_dir = Path(fixture_project_a) / ".aichestra" / "speckit"
-    assert (spec_dir / "brief.md").is_file()
-    assert (spec_dir / "plan.md").is_file()
+    # Aichestra must not create competing Spec Kit artifacts for this run.
+    assert "speckit_artifacts" not in agent_roles
+    assert state.metadata.get("speckit_policy_only") is True
+    assert GateKind.PROJECT_CONTEXT.value in state.completed
+    assert GateStatus.SUCCEEDED is state.gate_outcomes[GateKind.ORCA_HANDOFF.value].status

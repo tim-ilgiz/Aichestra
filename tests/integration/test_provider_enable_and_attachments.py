@@ -16,7 +16,11 @@ from aichestra.config.layering import (
     resolve_config,
 )
 from aichestra.orchestration.modes import Mode
-from aichestra.orchestration.workflow import ModeCRunController, WorkflowBindings
+from aichestra.orchestration.workflow import (
+    MODE_C_HANDOFF_ROLE,
+    ModeCRunController,
+    WorkflowBindings,
+)
 from aichestra.providers.base import ProviderKind
 from aichestra.providers.discovery import discover_providers
 from tests.fakes.providers import fake_codex, fake_orca
@@ -86,9 +90,13 @@ def test_vision_attachment_delivered_and_wired(tmp_path: Path) -> None:
     assert routing["bytes_delivered"] is True
     assert routing.get("staged_outside_parent") is True
     assert not (tmp_path / ".aichestra" / "attachments").exists()
-    agents_req = next(r for r in orca.sent if (r.role or "") == "mode_c_agents")
-    assert agents_req.attachments
-    assert Path(agents_req.attachments[0]).is_file()
+    handoff = next(r for r in orca.sent if (r.role or "") == MODE_C_HANDOFF_ROLE)
+    assert handoff.attachments
+    assert Path(handoff.attachments[0]).name.endswith(".png") or "screen" in Path(
+        handoff.attachments[0]
+    ).name
+    # Staging cleaned after run_all; request still recorded the staged paths.
+    assert len(handoff.attachments) >= 1
 
 
 def test_orchestrate_honors_preferred_lead_and_no_codex(

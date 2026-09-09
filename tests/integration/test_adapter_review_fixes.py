@@ -11,9 +11,9 @@ import pytest
 from aichestra.cli import main
 from aichestra.orchestration.modes import Mode
 from aichestra.orchestration.workflow import (
+    GateKind,
+    GateStatus,
     ModeCRunController,
-    Phase,
-    PhaseStatus,
     WorkflowBindings,
 )
 from aichestra.orchestration.worktrees import release_edit_lease, request_edit_lease
@@ -176,10 +176,10 @@ def test_missing_verification_commands_fail_workflow(tmp_path: Path) -> None:
         ),
     )
     state = wf.run_all()
-    assert Phase.VERIFICATION.value in state.failed
-    assert state.phase_outcomes[Phase.VERIFICATION.value].status is PhaseStatus.FAILED
+    assert GateKind.VERIFICATION.value in state.failed
+    assert state.phase_outcomes[GateKind.VERIFICATION.value].status is GateStatus.FAILED
     assert state.metadata["verification"]["ok"] is False
-    assert "not configured" in state.phase_outcomes[Phase.VERIFICATION.value].detail
+    assert "not configured" in state.phase_outcomes[GateKind.VERIFICATION.value].detail
 
 
 def test_mode_c_does_not_use_edit_lock(tmp_path: Path) -> None:
@@ -203,7 +203,7 @@ def test_mode_c_does_not_use_edit_lock(tmp_path: Path) -> None:
     )
     state = wf.run_all()  # thin coordinator; Orca worktrees — ignore advisory lock
     assert not state.failed, state.failed
-    assert Phase.LEAD_IMPLEMENT.value in state.completed
+    assert GateKind.ORCA_HANDOFF.value in state.completed
     assert "edit_lease" not in state.metadata
     release_edit_lease(root, "other-agent")
 
@@ -256,7 +256,9 @@ def test_cli_binds_writer_for_login_feature(
     )
     out = capsys.readouterr().out
     payload = json.loads(out)
-    assert Phase.TEST_WRITER.value not in payload.get("failed", [])
+    assert GateKind.ORCA_HANDOFF.value in payload.get("completed", [])
+    assert "test_writer" not in payload.get("failed", [])
+    assert "mode_c_writers" not in json.dumps(payload)
     assert "no writer executor" not in json.dumps(payload)
     assert code == 0
 

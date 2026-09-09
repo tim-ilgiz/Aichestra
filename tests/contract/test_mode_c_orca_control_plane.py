@@ -7,13 +7,15 @@ from pathlib import Path
 
 from aichestra.orchestration.modes import Mode
 from aichestra.orchestration.workflow import (
+    MODE_C_HANDOFF_ROLE,
+    GateKind,
     ModeCRunController,
-    Phase,
     PhaseStatus,
     WorkflowBindings,
 )
+from aichestra.providers.base import ProviderTaskResult
 from aichestra.providers.orca import build_orca_argv, extract_worktree_locator
-from aichestra.providers.base import ProviderTaskRequest, ProviderTaskResult
+from aichestra.providers.base import ProviderTaskRequest
 from tests.fakes.providers import fake_codex, fake_orca
 
 
@@ -51,11 +53,10 @@ def test_extract_worktree_locator_from_receipt() -> None:
     assert locator["worktree_id"] == "repo::/tmp/child"
 
 
-def test_one_run_id_reused_across_agent_phases(tmp_path: Path) -> None:
+def test_one_run_id_reused_across_handoff(tmp_path: Path) -> None:
     orca = fake_orca("success")
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
-        research_useful=False,
         bindings=WorkflowBindings(
             orca=orca,
             lead=fake_codex("success"),
@@ -71,29 +72,18 @@ def test_one_run_id_reused_across_agent_phases(tmp_path: Path) -> None:
     supervised = [
         req
         for req in orca.sent
-        if (req.role or "")
-        in {
-            "mode_c_agents",
-            "lead_review",
-            "mode_c_writers",
-            "speckit_artifacts",
-        }
+        if (req.role or "") == MODE_C_HANDOFF_ROLE
     ]
-    assert supervised
+    assert len(supervised) == 1
     assert all(req.context.get("run_id") == run_id for req in supervised)
     assert orca.run_creates == 1
-    # phase_report must not look like ensure_run / run-create
-    reports = [req for req in orca.sent if (req.role or "") == "phase_report"]
-    assert reports
-    assert all(req.context.get("run_id") == run_id for req in reports)
 
 
-def test_medium_speckit_writes_real_artifacts(tmp_path: Path) -> None:
-    """MEDIUM Spec Kit artifacts come from Orca under the Mode C Run."""
+def test_speckit_policy_without_competing_tree(tmp_path: Path) -> None:
+    """MEDIUM scale is policy for Orca; Aichestra does not write .aichestra/speckit/."""
     orca = fake_orca("success")
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
-        research_useful=False,
         bindings=WorkflowBindings(
             orca=orca,
             lead=fake_codex("success"),
@@ -105,46 +95,32 @@ def test_medium_speckit_writes_real_artifacts(tmp_path: Path) -> None:
     )
     state = wf.run_all()
     assert not state.failed, state.failed
-    assert any((r.role or "") == "speckit_artifacts" for r in orca.sent)
-    brief = tmp_path / ".aichestra" / "speckit" / "brief.md"
-    plan = tmp_path / ".aichestra" / "speckit" / "plan.md"
-    assert brief.is_file()
-    assert plan.is_file()
-    assert wf.state.metadata["brief"]["status"] == "ready"
-    assert wf.state.metadata["plan"]["status"] == "ready"
-    assert wf.state.metadata.get("speckit_artifacts", {}).get("lifecycle") == "orca_run"
-    # Metadata hacks must not be required / honored as production path.
-    assert "brief_satisfied" not in wf.state.metadata
+    assert (state.metadata.get("speckit_path") or {}).get("scale") == "medium"
+    assert state.metadata.get("speckit_policy_only") is True
+    assert not (tmp_path / ".aichestra" / "speckit").exists()
+    assert "speckit_artifacts" not in {(r.role or "") for r in orca.sent}
+    handoff = next(r for r in orca.sent if (r.role or "") == MODE_C_HANDOFF_ROLE)
+    assert (handoff.context or {}).get("speckit_scale") == "medium"
 
 
-def test_speckit_gate_blocks_when_artifacts_missing(tmp_path: Path) -> None:
+def test_run_phase_is_early_validate_only(tmp_path: Path) -> None:
+    """run_phase validates root/Orca; does not schedule agent workers."""
+    orca = fake_orca("success")
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
-        research_useful=False,
         bindings=WorkflowBindings(
-            orca=fake_orca("success"),
+            orca=orca,
             lead=fake_codex("success"),
             project_root=str(tmp_path),
-            task_prompt="refactor across 12 files in multi-package monorepo",
-            maintenance_kwargs={"touches_behavior": False},
-            verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
+            task_prompt="small fix",
         ),
     )
-    assert wf.run_phase().status is PhaseStatus.SUCCEEDED  # classify only
-    # Classify leaves Spec Kit pending until Orca produces files.
-    assert wf.state.metadata.get("brief_required") is True
-    assert str(wf.state.metadata.get("brief", {}).get("status") or "pending") == "pending"
-    blocked = wf._speckit_implement_gate()
-    assert blocked is not None
-    assert blocked.get("ok") is False
-    assert "Spec Kit" in str(blocked.get("detail") or "")
-    assert "brief" in (blocked.get("pending_artifacts") or [])
-    # run_phase must refuse agent scheduling (no dual-orchestrator loop).
-    wf.state.current_index = wf.state.phases.index(Phase.LEAD_IMPLEMENT)
-    refused = wf.run_phase()
-    assert refused is not None
-    assert refused.status is PhaseStatus.FAILED
-    assert "refuses per-phase" in refused.detail.lower() or "run_all" in refused.detail
+    outcome = wf.run_phase()
+    assert outcome is not None
+    assert outcome.status is PhaseStatus.SUCCEEDED
+    assert wf.state.metadata.get("orca_run_id")
+    # No agent handoff from run_phase alone.
+    assert not any((r.role or "") == MODE_C_HANDOFF_ROLE for r in orca.sent)
 
 
 def test_worktree_adoption_switches_effective_root(tmp_path: Path) -> None:
@@ -158,10 +134,11 @@ def test_worktree_adoption_switches_effective_root(tmp_path: Path) -> None:
 
     def send_with_child(session, request):
         result = original_send(session, request)
-        if (request.role or "") in {"lead_implement", "mode_c_agents"} and result.ok:
+        if (request.role or "") == MODE_C_HANDOFF_ROLE and result.ok:
             meta = dict(result.metadata)
             meta["worktree_path"] = str(child)
             meta["worktree_id"] = f"fake-repo::{child}"
+            meta["integration_policy"] = "adopt_child_worktree"
             return ProviderTaskResult(
                 ok=True,
                 output=result.output,
@@ -176,19 +153,20 @@ def test_worktree_adoption_switches_effective_root(tmp_path: Path) -> None:
 
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
-        research_useful=False,
         bindings=WorkflowBindings(
             orca=orca,
             lead=fake_codex("success"),
             project_root=str(parent),
             task_prompt="implement",
             maintenance_kwargs={"touches_behavior": False},
-            verification_commands=[["true"]],
+            verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
     state = wf.run_all()
     assert not state.failed, state.failed
-    assert wf.state.metadata.get("orca_worktree_path") == str(child)
-    assert wf._effective_project_root() == str(child)
+    assert wf.state.metadata.get("orca_worktree_path") == str(child.resolve())
+    assert wf._effective_project_root() == str(child.resolve())
     assert wf.state.metadata["orca_integration"]["policy"] == "adopt_child_worktree"
     assert wf.state.metadata["orca_integration"]["parent_project_root"] == str(parent)
+    assert GateKind.VERIFICATION.value in state.completed
+    assert state.metadata.get("verification_cwd") == str(child.resolve())

@@ -88,6 +88,7 @@ def profile_machine(*, root: Path | None = None) -> MachineProfile:
     local_ai = _local_ai_stub()
     has_gpu = bool(gpus)
     suggestion = suggest_profile(memory.total_gb, has_gpu=has_gpu)
+    local_models = _local_models_snapshot()
     return MachineProfile(
         os=info.os.value,
         system=info.system,
@@ -105,8 +106,80 @@ def profile_machine(*, root: Path | None = None) -> MachineProfile:
         extras={
             "hostname": platform.node(),
             "processor": platform.processor() or "",
+            "installed_models": local_models.get("installed_models", []),
+            "selected_model": local_models.get("selected_model"),
+            "local_capabilities": local_models.get("capabilities", []),
+            "local_endpoint": local_models.get("endpoint"),
         },
     )
+
+
+def _local_models_snapshot() -> dict[str, Any]:
+    """Best-effort installed models + selected model for machine profile."""
+    try:
+        from aichestra.local_runtime.base import LocalModel, ModelCapability
+        from aichestra.local_runtime.discovery import discover_local_runtime_report
+        from aichestra.local_runtime.model_selector import select_model
+    except Exception:  # noqa: BLE001
+        return {}
+    try:
+        report = discover_local_runtime_report(local_enabled=True)
+    except Exception:  # noqa: BLE001
+        return {}
+    installed: list[dict[str, Any]] = []
+    models: list[LocalModel] = []
+    endpoint: str | None = None
+    caps: set[str] = set()
+    for runtime in report.get("runtimes") or []:
+        if not isinstance(runtime, dict):
+            continue
+        if runtime.get("endpoint"):
+            endpoint = str(runtime["endpoint"])
+        for raw in runtime.get("models") or []:
+            if not isinstance(raw, dict):
+                continue
+            installed.append(dict(raw))
+            for c in raw.get("capabilities") or ():
+                caps.add(str(c))
+            try:
+                cap_set = frozenset(
+                    ModelCapability(c)
+                    if c in ModelCapability._value2member_map_
+                    else ModelCapability.TEXT
+                    for c in (raw.get("capabilities") or ("text",))
+                )
+                models.append(
+                    LocalModel(
+                        id=str(raw.get("id") or raw.get("name") or ""),
+                        name=str(raw.get("name") or raw.get("id") or ""),
+                        runtime=str(raw.get("runtime") or "ollama"),
+                        installed=bool(raw.get("installed", True)),
+                        capabilities=cap_set,
+                        parameter_size=raw.get("parameter_size"),
+                        metadata=dict(raw.get("metadata") or {}),
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                continue
+    selected = None
+    if models:
+        selection = select_model(models, local_enabled=True)
+        if selection.model is not None:
+            m = selection.model
+            selected = {
+                "id": m.id,
+                "name": m.name,
+                "runtime": m.runtime,
+                "capabilities": sorted(c.value for c in m.capabilities),
+                "parameter_size": m.parameter_size,
+                "installed": m.installed,
+            }
+    return {
+        "installed_models": installed,
+        "selected_model": selected,
+        "capabilities": sorted(caps),
+        "endpoint": endpoint,
+    }
 
 
 def _which(name: str) -> str | None:

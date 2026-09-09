@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from aichestra.orchestration.maintenance_reviewer import review_change
 from aichestra.orchestration.modes import Mode
-from aichestra.orchestration.workflow import ModeCRunController, Phase
+from aichestra.orchestration.workflow import ModeCRunController
 from aichestra.orchestration.writers import plan_doc_writes, plan_test_writes
 
 
@@ -74,14 +74,20 @@ def test_writers_skip_on_none() -> None:
 def test_workflow_skips_writers_when_none(tmp_path) -> None:
     import sys
 
-    from aichestra.orchestration.workflow import PhaseStatus, WorkflowBindings
+    from aichestra.orchestration.workflow import (
+        MODE_C_HANDOFF_ROLE,
+        GateKind,
+        GateStatus,
+        WorkflowBindings,
+    )
     from tests.fakes.providers import fake_codex, fake_orca
 
+    orca = fake_orca("success")
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(
-            orca=fake_orca("success"),
+            orca=orca,
             lead=fake_codex("success"),
             project_root=str(tmp_path),
             task_prompt="noop typo",
@@ -90,11 +96,13 @@ def test_workflow_skips_writers_when_none(tmp_path) -> None:
         ),
     )
     state = wf.run_all()
-    # SMALL/none path skips writer phases entirely (or marks them skipped if present).
-    assert Phase.TEST_WRITER.value not in state.completed
-    assert Phase.DOC_WRITER.value not in state.completed
-    assert Phase.TEST_WRITER.value not in state.failed
-    assert Phase.DOC_WRITER.value not in state.failed
-    assert Phase.VERIFICATION.value in state.completed
-    assert state.phase_outcomes[Phase.MAINTENANCE_REVIEW.value].status is PhaseStatus.SUCCEEDED
-    assert Phase.LEAD_IMPLEMENT.value in state.completed
+    # Maintenance is a gate; Aichestra does not schedule writer roles.
+    assert GateKind.MAINTENANCE.value in state.completed
+    assert GateKind.VERIFICATION.value in state.completed
+    assert GateKind.ORCA_HANDOFF.value in state.completed
+    assert state.phase_outcomes[GateKind.MAINTENANCE.value].status is GateStatus.SUCCEEDED
+    roles = {(r.role or "") for r in orca.sent}
+    assert MODE_C_HANDOFF_ROLE in roles
+    assert "mode_c_writers" not in roles
+    assert "test_writer" not in roles
+    assert "doc_writer" not in roles

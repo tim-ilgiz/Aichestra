@@ -162,6 +162,17 @@ class FakeModeCProvider(ProviderAdapter):
             )
             if role == "speckit_artifacts":
                 meta["speckit_written"] = _write_speckit_artifacts(request)
+            if role == "mode_c_handoff":
+                ctx = request.context if isinstance(request.context, dict) else {}
+                project_ctx = ctx.get("project_context") or {}
+                agents = project_ctx.get("agents_files") or []
+                shape = "default_implement"
+                if agents:
+                    shape = "project_instruction_driven"
+                if ctx.get("speckit_scale") in {"medium", "large_high_risk"}:
+                    shape = f"speckit_{ctx.get('speckit_scale')}"
+                meta["simulated_workflow_shape"] = shape
+                meta["orchestration_owner"] = "orca"
             if role == "mode_c_agents":
                 meta["simulated_roles"] = ["research", "lead_implement"]
             if role == "mode_c_writers":

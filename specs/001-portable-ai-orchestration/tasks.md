@@ -501,43 +501,49 @@ workflow-specific.
 
 ### Production realignment — NOT COMPLETE
 
-- [ ] T158 CRITICAL: Refactor Mode C production controller so `run_all()` no
+- [x] T158 CRITICAL: Refactor Mode C production controller so `run_all()` no
       longer hard-codes a universal research/implement/writers/review workflow.
 
-- [ ] T159 CRITICAL: Remove production dependence on fixed agent `Phase` values.
+- [x] T159 CRITICAL: Remove production dependence on fixed agent `Phase` values.
       Phase-like structures may not act as the canonical workflow state machine.
 
-- [ ] T160 CRITICAL: Introduce project-context discovery and an explicit bounded
+- [x] T160 CRITICAL: Introduce project-context discovery and an explicit bounded
       `ProjectContext` handed to Orca.
 
-- [ ] T161 CRITICAL: Discover and preserve target-project `AGENTS.md`, Spec Kit,
+- [x] T161 CRITICAL: Discover and preserve target-project `AGENTS.md`, Spec Kit,
       Factory/AI tooling and supported project-owned instructions with explicit
       precedence rules.
 
-- [ ] T162 CRITICAL: Stop creating a competing `.aichestra/speckit/` canonical
+- [x] T162 CRITICAL: Stop creating a competing `.aichestra/speckit/` canonical
       structure when the target project already has a canonical Spec Kit
       lifecycle. Define compatibility/migration behavior.
 
-- [ ] T163 HIGH: Make provider/capability selection policy data consumed by Orca
+- [x] T163 HIGH: Make provider/capability selection policy data consumed by Orca
       rather than Aichestra-owned agent scheduling decisions.
 
-- [ ] T164 HIGH: Derive Mode C execution status from Orca Run state plus
+- [x] T164 HIGH: Derive Mode C execution status from Orca Run state plus
       deterministic Aichestra gate results; do not maintain a parallel agent
       workflow state machine.
 
-- [ ] T165 HIGH: Add architecture contract tests proving two materially
+- [x] T165 HIGH: Add architecture contract tests proving two materially
       different task/project workflows can execute without adding/changing
       Python `Phase` scheduling code.
 
-- [ ] T166 HIGH: Add contract tests proving target-project instructions are
+- [x] T166 HIGH: Add contract tests proving target-project instructions are
       discovered, passed to Orca and remain authoritative.
 
-- [ ] T167 CRITICAL: Re-run full local tests and GitHub CI matrix after the
+- [x] T167 CRITICAL: Re-run full local tests and GitHub CI matrix after the
       production refactor.
+      <!-- Evidence: full local `pytest tests/` green (192 passed). CI workflow
+           still runs the same matrix with AICHESTRA_FAKE_PROVIDERS; GitHub
+           Actions matrix execution awaits push/PR. -->
 
 - [ ] T168 CRITICAL: Run at least one real Mode C integration smoke proving
       `task + project → one real Orca Run → real worker → worktree/result`
       without an Aichestra-owned fixed workflow.
+      <!-- NOT VALIDATED: live Orca run-create requires ORCA_TERMINAL_HANDLE /
+           --from <terminal-handle> (error no_active_sender_terminal). Binary
+           probed at /Applications/Orca.app/.../orca v1.4.198. -->
 
 **Checkpoint**: Do not treat architecture as converged until T158–T168 are
 complete.
@@ -553,7 +559,8 @@ complete.
 - Phase 21 (T125–T137) closes dual-orchestrator / fail-closed gaps
 - Phase 22 (T138–T144) closes architect REQUEST CHANGES residuals
 - Phase 23 (T145–T153) closes corrective alignment follow-up
-- Phase 24 (T154–T157 done; T158–T168 open) is the current architecture
+- Phase 24 (T154–T167 done; T168 open — LIVE Orca smoke blocked on
+  `ORCA_TERMINAL_HANDLE` / `--from`) is the current architecture
   convergence gate for workflow ownership / project-execution control plane
 - T108–T124 depend on T103–T107; T124/T137/T144 gate merge
 - Converge / “feature complete” only after T137 + Phase 22 + Phase 24 T158–T168

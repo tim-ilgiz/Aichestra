@@ -14,9 +14,9 @@ from aichestra.orchestration.change_signals import infer_change_signals
 from aichestra.orchestration.modes import Mode
 from aichestra.orchestration.verification import verification_commands_from_config
 from aichestra.orchestration.workflow import (
+    MODE_C_HANDOFF_ROLE,
+    GateKind,
     ModeCRunController,
-    Phase,
-    PhaseStatus,
     WorkflowBindings,
 )
 from aichestra.providers.base import (
@@ -54,7 +54,7 @@ def test_verification_failure_fails_workflow(tmp_path: Path) -> None:
         ),
     )
     state = wf.run_all()
-    assert Phase.VERIFICATION.value in state.failed
+    assert GateKind.VERIFICATION.value in state.failed
     assert state.stopped is True
     assert state.metadata["verification"]["ok"] is False
     assert state.metadata["verification"]["exit_code"] == 23
@@ -154,7 +154,10 @@ def test_maintenance_uses_change_signals_not_defaults(tmp_path: Path) -> None:
     assert state.metadata["change_signals"]["effective"]["touches_behavior"] is True
 
 
-def test_required_writer_dispatches_via_orca(tmp_path: Path) -> None:
+def test_maintenance_gate_records_required_tests_without_writer_roles(
+    tmp_path: Path,
+) -> None:
+    """Maintenance may require tests; Aichestra does not schedule mode_c_writers."""
     orca = fake_orca("success")
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
@@ -174,9 +177,12 @@ def test_required_writer_dispatches_via_orca(tmp_path: Path) -> None:
         ),
     )
     state = wf.run_all()
-    assert Phase.TEST_WRITER.value in state.completed
-    assert any((req.role or "") == "mode_c_writers" for req in orca.sent)
+    assert GateKind.MAINTENANCE.value in state.completed
+    assert state.decision is not None
+    assert state.decision.needs_tests is True
+    assert not any((req.role or "") == "mode_c_writers" for req in orca.sent)
     assert not any((req.role or "") in {"test_writer", "doc_writer"} for req in orca.sent)
+    assert any((req.role or "") == MODE_C_HANDOFF_ROLE for req in orca.sent)
 
 
 def test_orchestrate_separates_repo_and_project_roots(
@@ -224,7 +230,7 @@ def test_orchestrate_separates_repo_and_project_roots(
     assert payload["config_roots"]["fake_providers"] is True
     # noop → writers skipped; verify exit 0 → success
     assert code == 0
-    assert Phase.VERIFICATION.value in payload["completed"]
+    assert GateKind.VERIFICATION.value in payload["completed"]
 
 
 def test_orchestrate_without_verify_does_not_claim_success(
@@ -255,5 +261,5 @@ def test_orchestrate_without_verify_does_not_claim_success(
     )
     payload = json.loads(capsys.readouterr().out)
     assert code == 1
-    assert Phase.VERIFICATION.value in payload["failed"]
+    assert GateKind.VERIFICATION.value in payload["failed"]
     assert payload["metadata"]["verification"]["ok"] is False

@@ -397,7 +397,64 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         lead = None
 
     # Mode C: Orca is the control plane. lead/local_worker are optional discovery
-    # probes only — never Mode C execute_task targets.
+    # probes only — never Mode C execute_task targets. Model/endpoint/capabilities
+    # are policy data for Orca, not Aichestra worker scheduling.
+    local_model_ref = None
+    local_capabilities: tuple[str, ...] = ()
+    installed_models: tuple[dict, ...] = ()
+    if enabled_local and local is not None:
+        try:
+            from aichestra.local_runtime.discovery import discover_local_runtime_report
+            from aichestra.local_runtime.model_selector import select_model
+            from aichestra.local_runtime.base import LocalModel, ModelCapability
+
+            report = discover_local_runtime_report(
+                ollama_host=str(ollama_host) if ollama_host else None,
+                local_enabled=True,
+            )
+            models: list = []
+            installed_list: list[dict] = []
+            for runtime in report.get("runtimes") or []:
+                if not isinstance(runtime, dict):
+                    continue
+                for raw in runtime.get("models") or []:
+                    if not isinstance(raw, dict):
+                        continue
+                    installed_list.append(dict(raw))
+                    try:
+                        cap_set = frozenset(
+                            ModelCapability(c)
+                            if c in ModelCapability._value2member_map_
+                            else ModelCapability.TEXT
+                            for c in (raw.get("capabilities") or ("text",))
+                        )
+                        models.append(
+                            LocalModel(
+                                id=str(raw.get("id") or ""),
+                                name=str(raw.get("name") or raw.get("id") or ""),
+                                runtime=str(raw.get("runtime") or "ollama"),
+                                installed=bool(raw.get("installed", True)),
+                                capabilities=cap_set,
+                                parameter_size=raw.get("parameter_size"),
+                            )
+                        )
+                    except Exception:  # noqa: BLE001
+                        continue
+            installed_models = tuple(installed_list)
+            model_selection = select_model(
+                models,
+                local_enabled=True,
+                preferred_ids=preferred_ids,
+                allowed_ids=allowed_ids,
+            )
+            if model_selection.model is not None:
+                local_model_ref = model_selection.model.id
+                local_capabilities = tuple(
+                    c.value for c in model_selection.model.capabilities
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
     bindings = WorkflowBindings(
         orca=orca,  # type: ignore[arg-type]
         lead=lead,  # type: ignore[arg-type]
@@ -412,6 +469,10 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         preferred_lead=preferred,
         fallback_lead=fallback,
         local_enabled=enabled_local,
+        local_endpoint=str(ollama_host) if ollama_host else None,
+        local_model_ref=local_model_ref,
+        local_capabilities=local_capabilities,
+        installed_models=installed_models,
     )
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
