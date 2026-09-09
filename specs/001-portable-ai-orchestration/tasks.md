@@ -584,7 +584,7 @@ security, deterministic gates and verification.
       not an architectural or mandatory local path.
       (MODE-C-017–020; FR-005/047/050/051/065/066/069)
 
-- [ ] T169 CRITICAL: Introduce canonical domain models for:
+- [x] T169 CRITICAL: Introduce canonical domain models for:
 
       - AgentRuntime
       - ModelProvider
@@ -609,7 +609,7 @@ security, deterministic gates and verification.
       model, but must not remain the Mode C canonical abstraction.
       (MODE-C-017–020; FR-005/047/050/051/065/066/069)
 
-- [ ] T170 CRITICAL: Separate discovery of:
+- [x] T170 CRITICAL: Separate discovery of:
 
       - installed/configured Agent Runtimes
       - Model Providers / inference backends
@@ -624,7 +624,7 @@ security, deterministic gates and verification.
       `model installed = true`) must still require compatibility + launch proof.
       (MODE-C-017–020; FR-005/047/050/051/065/066/069)
 
-- [ ] T171 CRITICAL: Implement ExecutionTarget compatibility/resolution.
+- [x] T171 CRITICAL: Implement ExecutionTarget compatibility/resolution.
 
       Resolver must combine runtime/provider/model/machine/project facts and
       produce only valid target candidates.

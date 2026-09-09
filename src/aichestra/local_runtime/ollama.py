@@ -42,6 +42,10 @@ class OllamaRuntime(LocalRuntime):
             return True
         return self._probe_api()
 
+    def is_reachable(self) -> bool:
+        """Endpoint fact independent of whether the CLI is installed."""
+        return self._probe_api()
+
     def capabilities(self) -> RuntimeCapabilities:
         return RuntimeCapabilities(
             can_list_models=True,
