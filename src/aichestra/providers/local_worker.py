@@ -1,10 +1,17 @@
-"""Optional local-worker = OpenCode + local runtime (initially Ollama)."""
+"""Optional local-worker = OpenCode + local runtime (initially Ollama).
+
+Launches are always pinned to an installed local model and local endpoint so a
+cloud OpenCode default cannot be labeled as local-worker output.
+"""
 
 from __future__ import annotations
 
+import json
 from typing import Any
-
+from aichestra.local_runtime.base import ModelCapability
 from aichestra.local_runtime.discovery import discover_local_runtimes
+from aichestra.local_runtime.model_selector import select_model
+from aichestra.local_runtime.ollama import DEFAULT_OLLAMA_HOST, OllamaRuntime
 from aichestra.local_runtime.resources import (
     ResourceAssessment,
     ResourcePressure,
@@ -25,6 +32,49 @@ from aichestra.providers.base import (
 from aichestra.providers.execution import run_cli_task
 
 _OPENCODE_BINARIES = ("opencode",)
+_LOCAL_PROVIDER_ID = "ollama"
+
+
+def _openai_compatible_base(host: str) -> str:
+    base = host.rstrip("/")
+    if base.endswith("/v1"):
+        return base
+    return f"{base}/v1"
+
+
+def build_local_opencode_argv(
+    binary: str,
+    *,
+    model_ref: str,
+    prompt: str,
+    cwd: str | None = None,
+) -> list[str]:
+    """Build OpenCode argv pinned to an explicit local model id."""
+    argv = [binary, "run", "--model", model_ref, prompt]
+    if cwd:
+        argv.extend(["--dir", cwd])
+    return argv
+
+
+def build_local_opencode_config(
+    *,
+    model_id: str,
+    ollama_host: str,
+) -> dict[str, Any]:
+    """Inline OpenCode config that forces the Ollama-compatible local endpoint."""
+    base_url = _openai_compatible_base(ollama_host)
+    return {
+        "$schema": "https://opencode.ai/config.json",
+        "model": f"{_LOCAL_PROVIDER_ID}/{model_id}",
+        "provider": {
+            _LOCAL_PROVIDER_ID: {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Ollama (Aichestra local-worker)",
+                "options": {"baseURL": base_url},
+                "models": {model_id: {"name": model_id}},
+            }
+        },
+    }
 
 
 class LocalWorkerProvider(ProviderAdapter):
@@ -39,7 +89,7 @@ class LocalWorkerProvider(ProviderAdapter):
         memory_available_gb: float | None = None,
     ) -> None:
         self.local_enabled = local_enabled
-        self.ollama_host = ollama_host
+        self.ollama_host = ollama_host or DEFAULT_OLLAMA_HOST
         self.memory_total_gb = memory_total_gb
         self.memory_available_gb = memory_available_gb
 
@@ -88,7 +138,9 @@ class LocalWorkerProvider(ProviderAdapter):
                 metadata={"local_enabled": True},
             )
 
-        available = bool(opencode) and runtime_ok
+        selection = self._select_local_model()
+        model_ok = selection is not None and selection.ok and selection.model is not None
+        available = bool(opencode) and runtime_ok and model_ok
         detail_parts = []
         if opencode:
             detail_parts.append("OpenCode present")
@@ -98,11 +150,21 @@ class LocalWorkerProvider(ProviderAdapter):
             detail_parts.append("local runtime present")
         else:
             detail_parts.append("local runtime missing")
+        if model_ok and selection and selection.model:
+            detail_parts.append(f"model={selection.model.id}")
+        else:
+            detail_parts.append(
+                selection.reason if selection else "no local model selected"
+            )
 
         meta: dict[str, Any] = {
             "local_enabled": True,
             "runtimes": [r.name for r in runtimes if r.is_available()],
+            "ollama_host": self.ollama_host,
         }
+        if selection and selection.model:
+            meta["selected_model"] = selection.model.id
+            meta["model_ref"] = f"{_LOCAL_PROVIDER_ID}/{selection.model.id}"
         if assessment:
             meta["resources"] = assessment.to_dict()
 
@@ -137,12 +199,21 @@ class LocalWorkerProvider(ProviderAdapter):
             memory_available_gb=self.memory_available_gb,
         )
 
+    def _select_local_model(self):
+        runtime = OllamaRuntime(host=self.ollama_host)
+        models = runtime.list_models() if runtime.is_available() else []
+        return select_model(
+            models,
+            required_capability=ModelCapability.TEXT,
+            local_enabled=True,
+        )
+
     def send(
         self,
         session: ProviderSession,
         request: ProviderTaskRequest,
     ) -> ProviderTaskResult:
-        """Run a bounded OpenCode task (research/worker) when local-worker is up."""
+        """Run a bounded OpenCode task pinned to a local Ollama model/endpoint."""
         status = self.probe()
         if not status.available or not status.binary_path:
             return ProviderTaskResult(
@@ -151,16 +222,60 @@ class LocalWorkerProvider(ProviderAdapter):
                 detail=status.detail or "local-worker unavailable",
                 session_id=session.session_id,
             )
+
+        selection = self._select_local_model()
+        if selection is None or not selection.ok or selection.model is None:
+            return ProviderTaskResult(
+                ok=False,
+                failure=FailureClass.UNAVAILABLE,
+                detail=(
+                    selection.reason
+                    if selection
+                    else "no installed local model for local-worker"
+                ),
+                session_id=session.session_id,
+            )
+
+        model_id = selection.model.id
+        model_ref = f"{_LOCAL_PROVIDER_ID}/{model_id}"
         prompt = request.bounded_prompt()
-        argv = [status.binary_path, "run", prompt]
-        if request.cwd:
-            argv.extend(["--dir", request.cwd])
-        return run_cli_task(
+        argv = build_local_opencode_argv(
+            status.binary_path,
+            model_ref=model_ref,
+            prompt=prompt,
+            cwd=request.cwd,
+        )
+        config = build_local_opencode_config(
+            model_id=model_id,
+            ollama_host=self.ollama_host,
+        )
+        env = {
+            "OPENCODE_CONFIG_CONTENT": json.dumps(config),
+        }
+        result = run_cli_task(
             binary=status.binary_path,
             argv=argv,
             session=session,
             request=request,
             unavailable_detail="OpenCode binary unavailable",
+            env=env,
+        )
+        meta = dict(result.metadata)
+        meta.update(
+            {
+                "local_worker": True,
+                "model_ref": model_ref,
+                "ollama_host": self.ollama_host,
+                "base_url": _openai_compatible_base(self.ollama_host),
+            }
+        )
+        return ProviderTaskResult(
+            ok=result.ok,
+            output=result.output,
+            failure=result.failure,
+            detail=result.detail,
+            session_id=result.session_id,
+            metadata=meta,
         )
 
     def _unload_under_pressure(self, assessment: ResourceAssessment) -> None:

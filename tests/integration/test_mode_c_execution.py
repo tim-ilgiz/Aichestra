@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from aichestra.orchestration.modes import Mode
@@ -90,6 +91,7 @@ def test_mode_c_wires_providers_end_to_end(fixture_project_a: Path) -> None:
                 "change_summary": "bootstrap",
                 "touches_behavior": False,
             },
+            verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
     state = wf.run_all()

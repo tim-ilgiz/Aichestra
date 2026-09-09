@@ -6,8 +6,24 @@ import re
 
 _REDACTED = "[REDACTED]"
 
-# Authorization / Bearer / password / cookie / token / private keys
+# Sensitive key names used in JSON / structured logs (with or without quotes).
+_SENSITIVE_KEY_ALT = (
+    r"authorization|passwd|password|access[_-]?token|refresh[_-]?token|"
+    r"api[_-]?key|apikey|x-api-key|set-cookie|cookie|secret|private[_-]?key|token"
+)
+
+# Authorization / Bearer / password / cookie / token / private keys / JSON fields
 _PATTERNS: tuple[re.Pattern[str], ...] = (
+    # JSON / structured: "password":"…" or "password": "…"
+    re.compile(
+        rf'(?i)("(?:{_SENSITIVE_KEY_ALT})"\s*:\s*")([^"]*)(")'
+    ),
+    # JSON single-quoted / bare key variants: password: "…" / 'password':'…'
+    re.compile(
+        rf"(?i)(['\"]?(?:{_SENSITIVE_KEY_ALT})['\"]?\s*[:=]\s*['\"])"
+        r"([^'\"\r\n,}\]]+)(['\"])"
+    ),
+    # Unquoted assignment forms: password=… / token: …
     re.compile(r"(?i)(authorization\s*[:=]\s*)([^\r\n]+)"),
     re.compile(r"(?i)(\bbearer\s+)([A-Za-z0-9\-._~+/]+=*)"),
     re.compile(r"(?i)(password\s*[:=]\s*)(\S+)"),
@@ -33,7 +49,11 @@ def sanitize_text(text: str) -> str:
         return text
     out = text
     for pattern in _PATTERNS:
-        if pattern.groups >= 2:
+        if pattern.groups >= 3:
+            out = pattern.sub(
+                lambda m: f"{m.group(1)}{_REDACTED}{m.group(3)}", out
+            )
+        elif pattern.groups >= 2:
             out = pattern.sub(lambda m: f"{m.group(1)}{_REDACTED}", out)
         else:
             out = pattern.sub(_REDACTED, out)
@@ -87,9 +107,17 @@ def sanitize_mapping(data: dict) -> dict:
         elif isinstance(value, dict):
             result[key] = sanitize_mapping(value)
         elif isinstance(value, list):
-            result[key] = [
-                sanitize_text(v) if isinstance(v, str) else v for v in value
-            ]
+            result[key] = [_sanitize_list_item(v) for v in value]
         else:
             result[key] = value
     return result
+
+
+def _sanitize_list_item(value: object) -> object:
+    if isinstance(value, str):
+        return sanitize_text(value)
+    if isinstance(value, dict):
+        return sanitize_mapping(value)
+    if isinstance(value, list):
+        return [_sanitize_list_item(v) for v in value]
+    return value

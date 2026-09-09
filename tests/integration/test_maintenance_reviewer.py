@@ -51,6 +51,8 @@ def test_writers_skip_on_none() -> None:
 
 
 def test_workflow_skips_writers_when_none() -> None:
+    import sys
+
     from aichestra.orchestration.workflow import PhaseStatus, WorkflowBindings
     from tests.fakes.providers import fake_codex, fake_orca
 
@@ -62,6 +64,7 @@ def test_workflow_skips_writers_when_none() -> None:
             lead=fake_codex("success"),
             task_prompt="noop typo",
             maintenance_kwargs={"change_summary": "noop"},
+            verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
     state = wf.run_all()

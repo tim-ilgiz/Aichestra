@@ -64,7 +64,16 @@ class CodexProvider(ProviderAdapter):
             )
         prompt = request.bounded_prompt()
         # Non-interactive exec path — does not shadow or wrap the user's `codex`.
-        argv = [status.binary_path, "exec", "--skip-git-repo-check", prompt]
+        # Default sandbox is read-only; edits require an explicit workspace-write.
+        sandbox = "read-only" if request.read_only else "workspace-write"
+        argv = [
+            status.binary_path,
+            "exec",
+            "--skip-git-repo-check",
+            "--sandbox",
+            sandbox,
+            prompt,
+        ]
         return run_cli_task(
             binary=status.binary_path,
             argv=argv,

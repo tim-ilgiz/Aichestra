@@ -230,3 +230,35 @@ def test_orchestrate_separates_repo_and_project_roots(
     # noop → writers skipped; verify exit 0 → success
     assert code == 0
     assert Phase.VERIFICATION.value in payload["completed"]
+
+
+def test_orchestrate_without_verify_does_not_claim_success(
+    fake_aichestra_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("AICHESTRA_FAKE_PROVIDERS", "1")
+    project = tmp_path / "bare-app"
+    project.mkdir()
+    (project / ".aichestra").mkdir()
+    (project / ".aichestra" / "project.json").write_text(
+        json.dumps({"project_id": "bare", "local": {"enabled": False}}) + "\n",
+        encoding="utf-8",
+    )
+    code = main(
+        [
+            "orchestrate",
+            "--repo-root",
+            str(fake_aichestra_root),
+            "--project-root",
+            str(project),
+            "--prompt",
+            "noop typo",
+            "--no-research",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 1
+    assert Phase.VERIFICATION.value in payload["failed"]
+    assert payload["metadata"]["verification"]["ok"] is False

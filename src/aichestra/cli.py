@@ -179,7 +179,11 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
     from aichestra.orchestration.modes import Mode
     from aichestra.orchestration.roles import select_lead
     from aichestra.orchestration.verification import verification_commands_from_config
-    from aichestra.orchestration.workflow import OrchestratedWorkflow, WorkflowBindings
+    from aichestra.orchestration.workflow import (
+        OrchestratedWorkflow,
+        WorkflowBindings,
+        bound_writer_from_lead,
+    )
     from aichestra.providers.codex import CodexProvider
     from aichestra.providers.cursor import CursorProvider
     from aichestra.providers.discovery import discover_providers
@@ -228,6 +232,14 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         task_prompt=args.prompt,
         research_query=args.query,
         verification_commands=verification_commands_from_config(cfg),
+        writer_fn=(
+            bound_writer_from_lead(
+                lead,  # type: ignore[arg-type]
+                project_root=str(project_root) if project_root else None,
+            )
+            if lead is not None
+            else None
+        ),
     )
     wf = OrchestratedWorkflow(
         mode=Mode.ORCHESTRATED,

@@ -15,6 +15,7 @@ from aichestra.orchestration.modes import Mode, starts_full_orchestration
 from aichestra.orchestration.research_compact import ResearchSummary, research_paths
 from aichestra.orchestration.roles import select_lead
 from aichestra.orchestration.verification import VerificationReport, run_verification
+from aichestra.orchestration.worktrees import release_edit_lease, request_edit_lease
 from aichestra.orchestration.writers import plan_doc_writes, plan_test_writes
 from aichestra.providers.base import (
     FailureClass,
@@ -398,13 +399,17 @@ class OrchestratedWorkflow:
         if phase is Phase.VERIFICATION:
             commands = bindings.verification_commands
             if not commands:
-                # No commands configured: succeed with explicit empty verification.
+                # Missing verify config is not a successful verification (FR-056).
                 report = VerificationReport(results=[])
                 self.state.metadata["verification"] = report.to_dict()
                 return {
-                    "ok": True,
-                    "detail": "no verification commands configured",
+                    "ok": False,
+                    "detail": (
+                        "verification not configured: no verify commands in "
+                        "project config"
+                    ),
                     "verification": report.to_dict(),
+                    "missing_verification": True,
                 }
             report = run_verification(commands, cwd=bindings.project_root)
             self.state.metadata["verification"] = report.to_dict()
@@ -433,23 +438,50 @@ class OrchestratedWorkflow:
                 "detail": f"{phase.value} skipped by plan",
                 "plan": plan,
             }
-        if self.bindings.writer_fn:
-            result = self.bindings.writer_fn(self.state, phase)
+        if self.bindings.writer_fn is None:
+            # Required writer work without an executor is a hard block, not success.
             return {
-                "ok": result.ok,
-                "detail": result.detail,
+                "ok": False,
+                "detail": (
+                    f"{phase.value} required (action={action or 'unknown'}) but no "
+                    "writer executor bound; inject WorkflowBindings.writer_fn"
+                ),
                 "plan": plan,
-                "provider": result.to_dict(),
+                "failure": FailureClass.UNAVAILABLE.value,
             }
-        # Required writer work without an executor is a hard block, not success.
+
+        writer_fn = self.bindings.writer_fn
+        root = self.bindings.project_root
+        agent_id = f"writer-{phase.value}-{id(self)}"
+        if root:
+            lease = request_edit_lease(root, agent_id)
+            self.state.metadata["edit_lease"] = {
+                "role": phase.value,
+                "agent_id": agent_id,
+                "allowed": lease.allowed,
+                "policy": lease.policy.value,
+                "path": lease.path,
+                "reason": lease.reason,
+            }
+            if not lease.allowed:
+                return {
+                    "ok": False,
+                    "detail": lease.reason,
+                    "plan": plan,
+                    "failure": FailureClass.ERROR.value,
+                    "edit_lease": self.state.metadata["edit_lease"],
+                }
+            try:
+                result = writer_fn(self.state, phase)
+            finally:
+                release_edit_lease(root, agent_id)
+        else:
+            result = writer_fn(self.state, phase)
         return {
-            "ok": False,
-            "detail": (
-                f"{phase.value} required (action={action or 'unknown'}) but no "
-                "writer executor bound; inject WorkflowBindings.writer_fn"
-            ),
+            "ok": result.ok,
+            "detail": result.detail,
             "plan": plan,
-            "failure": FailureClass.UNAVAILABLE.value,
+            "provider": result.to_dict(),
         }
 
     def _run_lead(
@@ -489,15 +521,33 @@ class OrchestratedWorkflow:
         ctx = dict(context or {})
         if "research" in self.state.metadata:
             ctx.setdefault("research", self.state.metadata["research"])
-        result = lead.execute_task(
-            ProviderTaskRequest(
-                prompt=prompt,
-                role=role,
-                context=ctx,
-                cwd=self.bindings.project_root,
-                timeout_seconds=300.0,
+
+        needs_edit = role == "lead_implement"
+
+        def _execute(cwd: str | None) -> ProviderTaskResult:
+            return lead.execute_task(
+                ProviderTaskRequest(
+                    prompt=prompt,
+                    role=role,
+                    context=ctx,
+                    cwd=cwd,
+                    timeout_seconds=300.0,
+                    read_only=not needs_edit,
+                )
             )
-        )
+
+        if needs_edit and self.bindings.project_root:
+            raw = self._with_edit_lease(
+                agent_id=f"lead-{role}-{id(self)}",
+                role=role,
+                run=_execute,
+            )
+            if isinstance(raw, dict):
+                return raw
+            result = raw
+        else:
+            result = _execute(self.bindings.project_root)
+
         key = f"lead_{role}"
         self.state.metadata[key] = result.to_dict()
         return {
@@ -506,6 +556,75 @@ class OrchestratedWorkflow:
             "provider": result.to_dict(),
             "kind": lead.kind.value,
         }
+
+    def _with_edit_lease(
+        self,
+        *,
+        agent_id: str,
+        role: str,
+        run: Callable[[str | None], ProviderTaskResult],
+    ) -> ProviderTaskResult | dict[str, Any]:
+        root = self.bindings.project_root
+        if not root:
+            return run(None)
+        lease = request_edit_lease(root, agent_id)
+        self.state.metadata["edit_lease"] = {
+            "role": role,
+            "agent_id": agent_id,
+            "allowed": lease.allowed,
+            "policy": lease.policy.value,
+            "path": lease.path,
+            "reason": lease.reason,
+        }
+        if not lease.allowed:
+            return {
+                "ok": False,
+                "detail": lease.reason,
+                "failure": FailureClass.ERROR.value,
+                "edit_lease": self.state.metadata["edit_lease"],
+            }
+        try:
+            return run(lease.path)
+        finally:
+            release_edit_lease(root, agent_id)
+
+
+def bound_writer_from_lead(
+    lead: ProviderAdapter,
+    *,
+    project_root: str | None = None,
+) -> Callable[[WorkflowState, Phase], ProviderTaskResult]:
+    """Default writer executor: run required test/doc writes through the lead."""
+
+    def _writer(state: WorkflowState, phase: Phase) -> ProviderTaskResult:
+        decision = state.decision
+        plan_hint = ""
+        if decision is not None:
+            if phase is Phase.TEST_WRITER:
+                plan_hint = (
+                    f"TEST_DECISION={decision.TEST_DECISION}; "
+                    f"TEST_SCOPE={list(decision.TEST_SCOPE)}"
+                )
+            elif phase is Phase.DOC_WRITER:
+                plan_hint = (
+                    f"DOC_DECISION={decision.DOC_DECISION}; "
+                    f"DOC_TARGETS={list(decision.DOC_TARGETS)}"
+                )
+        prompt = (
+            f"Mode C {phase.value}: implement the required writer work. {plan_hint}"
+        ).strip()
+        return lead.execute_task(
+            ProviderTaskRequest(
+                prompt=prompt,
+                role=phase.value,
+                context={"phase": phase.value, "plan_hint": plan_hint},
+                cwd=project_root,
+                timeout_seconds=300.0,
+                read_only=False,
+            )
+        )
+
+    return _writer
 
 
 def run_phase_hooks(

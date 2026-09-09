@@ -25,6 +25,7 @@ def run_cli_task(
     session: ProviderSession,
     request: ProviderTaskRequest,
     unavailable_detail: str = "provider binary unavailable",
+    env: dict[str, str] | None = None,
 ) -> ProviderTaskResult:
     """Run a one-shot provider CLI argv and map exit/timeout to FailureClass."""
     if real_provider_execution_blocked():
@@ -56,6 +57,12 @@ def run_cli_task(
             session_id=session.session_id,
         )
 
+    run_env = None
+    if env is not None:
+        import os
+
+        run_env = {**os.environ, **env}
+
     try:
         completed = subprocess.run(
             list(argv),
@@ -64,6 +71,7 @@ def run_cli_task(
             text=True,
             timeout=max(1.0, float(request.timeout_seconds)),
             cwd=cwd,
+            env=run_env,
         )
     except FileNotFoundError:
         return ProviderTaskResult(
