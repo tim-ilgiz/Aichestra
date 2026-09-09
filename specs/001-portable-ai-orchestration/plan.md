@@ -5,8 +5,9 @@
 **Input**: Feature specification from `/specs/001-portable-ai-orchestration/spec.md`
 
 **Status**: Architecture source of truth strengthened (Orca owns workflow graph /
-execution state machine). Production Mode C realignment against Phase 24
-(T158–T168) is **not** complete — docs lead; code must follow.
+execution state machine; provider/runtime/model agnostic via ExecutionTargets).
+Production Mode C realignment against Phase 24 (T158–T168) is **not** complete
+— docs lead; code must follow.
 
 ## Summary
 
@@ -14,33 +15,60 @@ Deliver a portable, project-agnostic AI development environment where:
 
 - **Mode A** — native Codex / Cursor (unintercepted)
 - **Mode B** — Orca interactive (manual; no automatic full Mode C)
-- **Mode C** — Aichestra accepts `task + project`, discovers context/policy,
-  creates/resumes **exactly one Orca Run**; Orca owns the workflow graph,
-  execution state machine, workers/tasks/worktrees/handoffs; Aichestra owns
-  discovery, policy, config, and deterministic gates/verification
+- **Mode C** — Aichestra accepts `task + project`, discovers Agent Runtimes,
+  Model Providers / models, resolves proven ExecutionTargets, builds
+  policy/context, creates/resumes **exactly one Orca Run**; launches one
+  generic coordinator (bootstrap ExecutionTarget exception only); the
+  coordinator under Orca owns the concrete DAG; Orca owns canonical
+  Task/Dispatch/worker/worktree lifecycle; Aichestra owns discovery, policy,
+  config, and deterministic gates/verification
 
 Cross-platform Python owns portable helpers. OS bootstrap entrypoints wrap the
 shared core. CI and fixtures prove portability without real provider quota.
 
+Source-of-truth formula:
+
+```text
+Aichestra discovers:
+Agent Runtimes
++
+Model Providers / Models
++
+machine/project constraints
+        ↓
+resolves
+ExecutionTargets
+        ↓
+passes targets/policy into ONE Orca Run
+        ↓
+Coordinator chooses/schedules workers
+        ↓
+Orca owns canonical Task/Dispatch/worker/worktree lifecycle
+```
+
 ### Aichestra IS
 
 - bootstrap / update
-- discovery (Orca + providers + project-owned instructions/tooling)
+- discovery (Orca + Agent Runtimes + Model Providers/models + project-owned
+  instructions/tooling + machine capabilities)
+- ExecutionTarget resolution (compatibility + proven launch strategies)
 - project-context / portable policy construction
 - policy and configuration layering
 - deterministic gates (classify / Spec Kit path, maintenance-reviewer,
   verification-runner, security allowlists, context compaction)
 - Orca adapter (create/resume one Run; hand task/policy/context/attachments;
-  read Run state; feed gate results back)
+  bootstrap one coordinator; read Run state; feed gate results back)
 
 ### Aichestra is NOT
 
 - a general-purpose workflow engine
 - owner of the Mode C workflow graph / execution state machine
-- a worker scheduler
+- a worker scheduler (beyond the narrow coordinator bootstrap placement)
 - a session manager
 - a worktree manager (beyond thin policy checks)
 - a replacement for Orca
+- a generic LLM gateway
+- an owner of an Aichestra agent loop
 - authorized to fall back to direct Codex/Cursor when Orca is missing (Mode C)
 
 ### Forbidden Mode C shapes
@@ -56,20 +84,34 @@ review → another run-create
 Aichestra → CodexProvider.execute_task()     # Mode C implement/review/writers
 Aichestra → CursorProvider.execute_task()
 Aichestra → LocalWorkerProvider.execute_task()  # Mode C research/writers
+Aichestra → any Agent Runtime execute_task()    # Mode C agent work
 ```
 
 ```text
 Orca unavailable → fallback directly to Codex
 project_root=None → Orca skipped → workflow continues
+if research → OpenCode / if implementation → Codex / if docs → local
+Ollama endpoint alone → advertised as coding worker
 ```
+
+This revision MUST NOT:
+
+- make Ollama a standalone Orca coding worker without an agent runtime;
+- make OpenCode or Ollama mandatory;
+- forbid OpenCode or cloud models through OpenCode;
+- turn Aichestra into a generic LLM gateway or agent loop;
+- move worker scheduling from the coordinator into Python;
+- change the exactly-one Orca Run rule;
+- weaken fail-closed semantics.
 
 ## Technical Context
 
 **Language/Version**: Python 3.11+
 
 **Primary Dependencies**: Orca (runtime UI/control plane; not vendored),
-provider CLIs discovered at runtime (Codex, Cursor, OpenCode, Ollama), standard
-library-first helpers, pytest for tests
+Agent Runtime / Model Provider CLIs and endpoints discovered at runtime
+(examples: Codex, Cursor, OpenCode, Ollama — none mandatory as architectural
+roles), standard library-first helpers, pytest for tests
 
 **Storage**: Filesystem config layering — tracked orchestration policies +
 OS defaults + untracked machine-local + target-project + runtime overrides; no
@@ -77,7 +119,7 @@ application database
 
 **Testing**: pytest unit/integration/contract/security tests; fake providers;
 fixture repositories; GitHub Actions OS matrix; **architecture contract tests**
-for MODE-C-001–010 before further production realignment
+for MODE-C-001–010 and MODE-C-017–020 before further production realignment
 
 **Target Platform**: macOS, Windows, and Linux (native; WSL optional never
 required; Docker/VM not required for Aichestra)
@@ -134,19 +176,25 @@ src/aichestra/
 ├── platform_detect.py
 ├── machine_profiler.py     # capability facts (no Mac identity dependency)
 ├── config/
-│   ├── layering.py         # includes per-provider enabled flags
+│   ├── layering.py         # runtime/provider enabled flags; legacy aliases
 │   └── hardware_profiles.py  # capability tiers; fixture-only named examples
-├── local_runtime/
+├── local_runtime/          # local inference discovery helpers (not workers)
 ├── providers/
-│   ├── discovery.py
+│   ├── discovery.py        # Agent Runtime / Model Provider discovery
 │   ├── orca.py             # Mode C control-plane adapter (one Run)
 │   ├── codex.py            # discovery + Mode A direct use (not Mode C exec)
 │   ├── cursor.py
-│   └── local_worker.py
+│   └── ...                 # future runtime adapters as needed
+├── execution/
+│   ├── runtimes.py         # AgentRuntime facts
+│   ├── model_providers.py  # ModelProvider / inference backend facts
+│   ├── targets.py          # ExecutionTarget construction
+│   ├── compatibility.py    # runtime↔provider↔model compatibility
+│   └── launch_strategies.py  # proven Orca launch paths
 ├── orchestration/
 │   ├── modes.py            # A / B / C
-│   ├── mode_c.py           # thin: resolve project → policy → one Run → gates
-│   ├── roles.py            # preferred/fallback policy for Orca
+│   ├── mode_c.py           # thin: resolve project → targets/policy → one Run → gates
+│   ├── roles.py            # preferred/fallback policy for coordinator under Orca
 │   ├── research_compact.py # compaction helpers (dispatch via Orca)
 │   ├── maintenance_reviewer.py
 │   ├── writers.py          # preference helpers (dispatch via Orca)
@@ -161,18 +209,24 @@ src/aichestra/
 └── bootstrap/
 ```
 
+Legacy `providers/local_worker.py` (if present) is a compatibility seam during
+migration — target architecture does NOT treat `local-worker` as a canonical
+domain type. Map legacy config into ExecutionTargets instead.
+
 **Remove or radically shrink** (current conflicting components):
 
 | Component | Why obsolete / conflicting |
 |-----------|----------------------------|
 | `orchestration/workflow.py` `OrchestratedWorkflow` / `ModeCRunController` as a multi-phase agent scheduler | Second general-purpose orchestration engine; owns phase machine, agent switching, writers, research, edit lease, provider fallback |
-| Direct Mode C paths calling Codex/Cursor/local-worker `execute_task` | Violates MODE-C-003/004 |
+| Direct Mode C paths calling Codex/Cursor/`local_worker` `execute_task` | Violates MODE-C-003/004 |
+| Treating OpenCode+Ollama or `local-worker` as universal workflow roles | Violates MODE-C-017 / FR-005 |
+| Advertising a Model Provider as a coding worker without Agent Runtime + launch proof | Violates MODE-C-018/020 |
 | Custom worktree/session manager + `.aichestra/edit.lock` if it duplicates Orca | Violates FR-057 / “worktrees belong to Orca” |
 | Production `M4_PRO_24GB` / host-identity special cases | Violates capability-based profiling |
 | Tests asserting “Orca unavailable → lead adapter” or “project_root=None → classify succeeds” | Lock wrong architecture |
 
 Allowed to remain as **small deterministic helpers**: classify, maintenance
-decision, verification runner, provider/security policy, compaction.
+decision, verification runner, ExecutionTarget/security policy, compaction.
 
 ## Mode C control flow — project-execution control plane
 
@@ -182,31 +236,43 @@ Canonical flow:
 
 ```text
 User
-  │
-  │ task + project root + attachments
-  ▼
+ ↓
 Aichestra
-  │
-  ├─ resolve project root
-  ├─ discover project-owned instructions/tooling
-  ├─ discover providers + machine capabilities
-  ├─ resolve portable policy/security constraints
-  ├─ create/resume exactly ONE Orca Run
-  │
-  ▼
-Orca Run
-  │
-  ├─ owns workflow graph
-  ├─ owns task lifecycle
-  ├─ owns worker selection/dispatch
-  ├─ owns worker ordering/dependencies
-  ├─ owns handoffs
-  └─ owns worktrees
+ ├─ ProjectContext discovery
+ ├─ Agent Runtime discovery
+ ├─ Model Provider/model discovery
+ ├─ ExecutionTarget resolution
+ ├─ policy/security
+ └─ deterministic gates
+       ↓
+   ONE Orca Run
+       ↓
+Generic Coordinator
        │
-       ├─ Codex
-       ├─ Cursor
-       ├─ OpenCode/local-worker
-       └─ future supported workers
+       ├─ dynamic Task/Dispatch DAG
+       ├─ target selection from allowed ExecutionTargets
+       ├─ dependencies / retries
+       └─ convergence
+              ↓
+        Orca lifecycle
+              ↓
+   ┌──────────┼──────────┐
+   ↓          ↓          ↓
+Target A    Target B    Target C
+
+Examples only:
+Codex       Cursor      OpenCode
+OpenAI                  ↓
+                        Ollama / LM Studio /
+                        OpenRouter / vLLM / ...
+```
+
+Examples are non-normative.
+The architecture must not depend on any particular runtime/provider pair.
+
+Aichestra MAY resolve one runnable bootstrap ExecutionTarget solely to start
+the single generic Mode C coordinator. That is bootstrap placement only — not
+ownership of research/implement/review/writer scheduling.
 
 Aichestra deterministic services may participate at explicit boundaries:
 
@@ -217,7 +283,6 @@ Aichestra deterministic services may participate at explicit boundaries:
 - verification commands / authoritative exit codes
 
 Their results are fed back to the same Orca Run.
-```
 
 Aichestra MUST NOT translate this into a fixed internal sequence such as:
 
@@ -277,17 +342,29 @@ parallel Aichestra-owned workflow.
 | Concern | Owner |
 |---------|-------|
 | Workflow graph / state machine | Orca |
-| Agent/task dependencies and ordering | Orca |
+| Concrete inner worker DAG / dependencies / ordering | coordinator under Orca |
+| Task/Dispatch lifecycle | Orca |
+| Agent terminal/worktree lifecycle | Orca |
 | Worker lifecycle / dispatch | Orca |
-| Worktree lifecycle | Orca |
 | Handoffs inside Mode C | Orca |
 | User task + project entrypoint | Aichestra |
 | Project-context discovery | Aichestra |
-| Portable provider/capability policy | Aichestra |
+| Agent Runtime discovery | Aichestra |
+| Model Provider/model discovery | Aichestra |
+| Compatibility resolution | Aichestra |
+| Construction of runnable ExecutionTargets | Aichestra |
+| Policy describing preferred/allowed targets | Aichestra |
+| Concrete inner worker selection | coordinator under Orca |
 | Security policy | Aichestra |
 | Deterministic verification | Aichestra |
 | Project-owned AGENTS/Spec Kit/Factory rules | Target project |
 | Canonical Mode C lifecycle identity | Orca `run_id` |
+
+Critical boundary:
+
+Aichestra MAY determine that a combination is or is not technically runnable.
+
+Aichestra MUST NOT use that responsibility to become the inner worker scheduler.
 
 ### Forbidden production seams (Mode C)
 
@@ -296,7 +373,8 @@ parallel Aichestra-owned workflow.
 - `bound_writer_from_lead` / `writer_fn` direct lead execution
 - `OrchestratedWorkflow` alias and unreachable `_phase_*` agent handlers
 - `WorkflowBindings.lead` / `local_worker` used for Mode C `execute_task`
-- Hard-coded `agent=opencode` when `local.enabled=false`
+- Hard-coded `agent=opencode` or product-name phase routing as architecture
+- Treating discovery (endpoint/model present) as proven ExecutionTarget
 - Parent-checkout `.aichestra/attachments/` staging
 - `brief_satisfied` / `plan_satisfied` metadata unlocks
 - fixed `Phase` graph used as the production Mode C workflow
@@ -306,6 +384,7 @@ parallel Aichestra-owned workflow.
 - treating project-context detection as informational metadata only
 - creating `.aichestra/speckit/` as a competing canonical Spec Kit when the
   target project already owns a canonical Spec Kit structure
+- expanding coordinator bootstrap into Aichestra-owned phase→runtime mapping
 
 ## Architecture Notes
 
@@ -314,7 +393,8 @@ parallel Aichestra-owned workflow.
 1. Tracked common defaults/policies
 2. OS-specific tracked defaults
 3. Untracked machine-local overrides (models/providers/local.enabled /
-   providers.codex|cursor|local-worker.enabled)
+   Agent Runtime and Model Provider enabled flags; legacy
+   `providers.codex|cursor|local-worker.enabled` as compatibility input)
 4. Target-project configuration
 5. Runtime/task override
 
@@ -328,11 +408,15 @@ parallel Aichestra-owned workflow.
 
 | Condition | Behavior |
 |-----------|----------|
-| Codex missing | Orca may use Cursor |
-| Cursor missing | Orca may use Codex |
-| local-worker missing | cloud-oriented Mode C |
-| both Codex and Cursor unavailable | fail or degraded Orca flow per remaining workers |
-| **Orca missing** | **Mode C FAIL**; Mode A remains |
+| One Agent Runtime unavailable | remove only ExecutionTargets requiring that runtime |
+| One Model Provider unavailable | remove only targets requiring that provider |
+| One model unavailable | remove only targets requiring that model |
+| No local ExecutionTarget | continue with allowed cloud/remote targets |
+| No cloud ExecutionTarget | local-only Mode C is allowed when a proven local target exists |
+| Codex and Cursor unavailable | continue if any other allowed/capable ExecutionTarget exists |
+| Model provider exists but no compatible runtime exists | provider is discovered but not runnable as a worker |
+| No runnable coordinator ExecutionTarget | Mode C FAIL |
+| **Orca unavailable** | **Mode C FAIL**; Mode A remains independent |
 
 ### Orca integration
 
@@ -353,9 +437,36 @@ fake success. Vision tasks MUST NOT go to text-only local models.
 
 ### Machine profiler
 
-Capability-based: OS, CPU, RAM, disk, GPU/accelerator, installed runtimes and
-models. Order stronger tiers before weaker ones (`powerful` before `capable`).
-Local inference always optional.
+Capability-based discovery forms independent facts:
+
+```text
+machine capabilities
+installed Agent Runtimes
+configured Model Providers
+available models
+provider endpoints
+runtime/provider compatibility
+model capabilities
+proven launch strategies
+```
+
+The resolver then constructs only real `ExecutionTargets[]`.
+
+Example of non-equivalence:
+
+```text
+OpenCode installed       = true
+Ollama reachable         = true
+qwen model installed     = true
+
+does NOT automatically mean:
+
+ExecutionTarget runnable = true
+```
+
+Launch/binding must still be proven. Order stronger hardware tiers before
+weaker ones (`powerful` before `capable`). Local inference/execution always
+optional.
 
 ### Quota handoff
 
@@ -373,6 +484,33 @@ keep a Python phase engine that schedules agents.
 Unchanged in intent from prior plan: structural staging allowlists; fake
 providers in CI; analysis-only maintenance audit classes.
 
+### Execution target launch contract
+
+Aichestra MUST distinguish discovery from proven execution.
+
+A discovered runtime/provider/model combination is runnable only when there is a
+verified launch strategy that binds the intended configuration to the actual
+agent process supervised by Orca.
+
+Prefer native Orca worker launch when the installed Orca version supports the
+required runtime/model configuration.
+
+If native worker launch cannot express a required runtime/provider/model binding,
+a bounded Orca-owned terminal bridge MAY be used when supported:
+
+1. create/start the configured Agent Runtime in an Orca-managed terminal;
+2. prove that the actual process uses the intended provider/model/endpoint;
+3. attach that terminal to an Orca Task/Dispatch using supported Orca primitives;
+4. retain Orca Task/Dispatch/lifecycle authority.
+
+The bridge MUST NOT create an Aichestra-owned agent loop or workflow scheduler.
+
+If neither native launch nor a proven terminal bridge exists, that combination is
+reported as `unsupported` and MUST NOT be selected.
+
+No specific Agent Runtime or Model Provider is mandatory. OpenCode + Ollama is
+one possible execution target, not the canonical local architecture.
+
 ## Complexity Tracking
 
 > No constitution violations requiring justification.
@@ -383,13 +521,14 @@ providers in CI; analysis-only maintenance audit classes.
 
 ## Implementation sequencing (after this contract update)
 
-1. Land architecture contract tests (MODE-C-001–010) — this pass.
+1. Land architecture contract tests (MODE-C-001–010, MODE-C-017–020) — this pass.
 2. Refactor/remove dual-orchestrator `workflow.py` into thin Mode C controller.
 3. Ensure all agent dispatch is Orca-only under one `run_id`.
-4. Rework/remove duplicate worktree edit-lock if Orca owns worktrees.
-5. Complete real attachment forwarding; provider enable flags; handoff-in-run.
-6. Delete obsolete tests; keep minimal regression net.
-7. Only then mark feature tasks complete / converge.
+4. Introduce ExecutionTarget discovery/resolution (migrate legacy `local-worker`).
+5. Rework/remove duplicate worktree edit-lock if Orca owns worktrees.
+6. Complete real attachment forwarding; runtime/provider enable flags; handoff-in-run.
+7. Delete obsolete tests; keep minimal regression net.
+8. Only then mark feature tasks complete / converge.
 
 ### Gate boundary decision
 
@@ -400,8 +539,3 @@ handshake fails closed. Run identity plus settled canonical Tasks and passing
 Aichestra gates determine success; a Run is a namespace and need not have its
 own terminal status field. A reported failure or an unverifiable receipt blocks
 success. Coordinator terminal cleanup uses Orca worker-release and worker-list.
-
-OpenCode cannot use worker-start's provider model flags. Until a portable launch
-contract carries model and endpoint into the Orca-owned process, Mode C rejects
-OpenCode launches. Passing environment to the RPC client or model text in the
-prompt does not establish worker configuration.
