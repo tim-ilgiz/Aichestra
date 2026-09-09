@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -96,6 +97,9 @@ def test_safe_op_runs_and_sanitizes():
     assert result.ok is True
     assert "SECRETTOKEN" not in result.sanitized_for_cloud
     assert "Bearer" in result.sanitized_for_cloud or "REDACTED" in result.sanitized_for_cloud
+    public = result.to_dict()
+    assert "SECRETTOKEN" not in json.dumps(public)
+    assert "SECRETTOKEN" in result.stdout
     assert result.ssh_argv[0] in {"ssh", result.ssh_argv[0]}
     assert "stg.example" in " ".join(result.ssh_argv)
     # Remote command is a single POSIX-quoted string (OpenSSH shell semantics).

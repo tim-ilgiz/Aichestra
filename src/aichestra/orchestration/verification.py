@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
+import shlex
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 
 @dataclass(frozen=True)
@@ -119,3 +121,34 @@ def run_verification(
         if stop_on_failure and not result.ok:
             break
     return report
+
+
+def verification_commands_from_config(config: Mapping[str, Any] | None) -> list[list[str]]:
+    """Normalize project ``verify`` config into argv lists for the runner.
+
+    Accepted shapes:
+    - ``["python", "-m", "pytest"]`` — one command
+    - ``[["npm", "test"], ["npm", "run", "lint"]]`` — multiple commands
+    - ``"pytest -q"`` — split with shlex (POSIX-friendly; Windows paths quoted)
+    """
+    if not config:
+        return []
+    raw = config.get("verify")
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        parts = shlex.split(raw, posix=os.name != "nt")
+        return [parts] if parts else []
+    if not isinstance(raw, list) or not raw:
+        return []
+    if all(isinstance(item, str) for item in raw):
+        return [[str(item) for item in raw]]
+    commands: list[list[str]] = []
+    for item in raw:
+        if isinstance(item, str):
+            parts = shlex.split(item, posix=os.name != "nt")
+            if parts:
+                commands.append(parts)
+        elif isinstance(item, (list, tuple)) and item:
+            commands.append([str(part) for part in item])
+    return commands

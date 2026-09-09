@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from aichestra.providers.base import ProviderStatus
@@ -10,15 +9,12 @@ from aichestra.providers.codex import CodexProvider
 from aichestra.providers.cursor import CursorProvider
 from aichestra.providers.local_worker import LocalWorkerProvider
 from aichestra.providers.orca import OrcaProvider
+from aichestra.providers.quota_guard import real_provider_execution_blocked
 
 
 def _fake_providers_forced() -> bool:
     """CI / tests inject fake providers so real Codex/Cursor quota is never used."""
-    for key in ("AICHESTRA_FAKE_PROVIDERS", "AICHESTRA_NO_REAL_QUOTA"):
-        value = os.environ.get(key, "").strip().lower()
-        if value in {"1", "true", "yes", "on"}:
-            return True
-    return False
+    return real_provider_execution_blocked()
 
 
 def discover_providers(

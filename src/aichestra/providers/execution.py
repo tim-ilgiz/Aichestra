@@ -12,6 +12,10 @@ from aichestra.providers.base import (
     ProviderTaskRequest,
     ProviderTaskResult,
 )
+from aichestra.providers.quota_guard import (
+    blocked_execution_detail,
+    real_provider_execution_blocked,
+)
 
 
 def run_cli_task(
@@ -23,6 +27,18 @@ def run_cli_task(
     unavailable_detail: str = "provider binary unavailable",
 ) -> ProviderTaskResult:
     """Run a one-shot provider CLI argv and map exit/timeout to FailureClass."""
+    if real_provider_execution_blocked():
+        return ProviderTaskResult(
+            ok=False,
+            failure=FailureClass.QUOTA,
+            detail=blocked_execution_detail(),
+            session_id=session.session_id,
+            metadata={
+                "blocked_by_quota_guard": True,
+                "argv0": argv[0] if argv else binary,
+            },
+        )
+
     if not binary:
         return ProviderTaskResult(
             ok=False,

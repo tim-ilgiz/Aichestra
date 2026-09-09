@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Mapping
 
+from aichestra.orchestration.change_signals import infer_change_signals
 from aichestra.orchestration.maintenance_reviewer import (
     MaintenanceReviewDecision,
     review_change,
@@ -350,18 +351,42 @@ class OrchestratedWorkflow:
             )
 
         if phase is Phase.MAINTENANCE_REVIEW:
-            kwargs = dict(bindings.maintenance_kwargs)
-            kwargs.setdefault(
-                "change_summary",
-                bindings.task_prompt or self.state.metadata.get("classify", {}).get(
-                    "prompt", "change"
-                ),
+            summary = (
+                bindings.task_prompt
+                or self.state.metadata.get("classify", {}).get("prompt", "change")
             )
+            inferred = infer_change_signals(
+                project_root=bindings.project_root,
+                change_summary=summary,
+            )
+            # Explicit bindings override inference; unused diagnostic keys stay out.
+            kwargs = {
+                key: value
+                for key, value in inferred.items()
+                if key
+                in {
+                    "change_summary",
+                    "touches_behavior",
+                    "touches_public_api",
+                    "existing_tests_cover",
+                    "docs_stale",
+                    "canonical_doc",
+                    "risk",
+                    "rationale",
+                }
+            }
+            kwargs.update(bindings.maintenance_kwargs)
+            kwargs.setdefault("change_summary", summary)
+            self.state.metadata["change_signals"] = {
+                "inferred": inferred,
+                "effective": dict(kwargs),
+            }
             decision = self.apply_maintenance_review(**kwargs)
             return {
                 "ok": True,
                 "detail": "maintenance-reviewer complete",
                 "decision": decision.to_dict(),
+                "change_signals": inferred,
             }
 
         if phase is Phase.TEST_WRITER:
@@ -401,6 +426,13 @@ class OrchestratedWorkflow:
     def _run_writer(self, phase: Phase, *, plan_key: str) -> dict[str, Any]:
         plans = self.writer_plans()
         plan = plans.get(plan_key, {})
+        action = plan.get("action") if isinstance(plan, dict) else None
+        if action == "skip":
+            return {
+                "ok": True,
+                "detail": f"{phase.value} skipped by plan",
+                "plan": plan,
+            }
         if self.bindings.writer_fn:
             result = self.bindings.writer_fn(self.state, phase)
             return {
@@ -409,8 +441,16 @@ class OrchestratedWorkflow:
                 "plan": plan,
                 "provider": result.to_dict(),
             }
-        # Default: structured plan only (writers are optional agents).
-        return {"ok": True, "detail": f"{phase.value} plan ready", "plan": plan}
+        # Required writer work without an executor is a hard block, not success.
+        return {
+            "ok": False,
+            "detail": (
+                f"{phase.value} required (action={action or 'unknown'}) but no "
+                "writer executor bound; inject WorkflowBindings.writer_fn"
+            ),
+            "plan": plan,
+            "failure": FailureClass.UNAVAILABLE.value,
+        }
 
     def _run_lead(
         self,

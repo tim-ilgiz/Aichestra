@@ -58,15 +58,24 @@ class StagingRunResult:
     error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        """Public/JSON serialization — never emit unsanitized remote output.
+
+        Raw ``stdout``/``stderr`` remain on the in-memory object for local
+        debugging; any handoff (CLI JSON, cloud agents) must use this dict.
+        """
+        safe_out = sanitize_text(self.stdout)
+        safe_err = sanitize_text(self.stderr)
         return {
             "ok": self.ok,
             "alias": self.alias,
             "decision": self.decision.to_dict(),
             "argv_remote": list(self.argv_remote),
             "ssh_argv": list(self.ssh_argv),
-            "stdout": self.stdout,
-            "stderr": self.stderr,
-            "sanitized_for_cloud": self.sanitized_for_cloud,
+            "stdout": safe_out,
+            "stderr": safe_err,
+            "sanitized_for_cloud": self.sanitized_for_cloud or sanitize_text(
+                safe_out + ("\n" + safe_err if safe_err else "")
+            ),
             "exit_code": self.exit_code,
             "error": self.error,
             "production_ssh_supported": PRODUCTION_SSH_SUPPORTED,

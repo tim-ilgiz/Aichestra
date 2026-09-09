@@ -80,7 +80,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     orch_p.add_argument("--prompt", default="Mode C task", help="Task prompt for leads")
     orch_p.add_argument("--query", default="", help="Optional research query")
-    orch_p.add_argument("--project-root", type=Path, default=None)
+    orch_p.add_argument(
+        "--repo-root",
+        type=Path,
+        default=None,
+        help="Aichestra repository root (machine-local + tracked policies)",
+    )
+    orch_p.add_argument(
+        "--project-root",
+        type=Path,
+        default=None,
+        help="Target project root (.aichestra/project.json + verify commands)",
+    )
     orch_p.add_argument("--no-research", action="store_true")
     orch_p.add_argument("--json", action="store_true", default=True)
 
@@ -157,44 +168,83 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.command == "orchestrate":
-        from aichestra.orchestration.modes import Mode
-        from aichestra.orchestration.workflow import OrchestratedWorkflow, WorkflowBindings
-        from aichestra.providers.codex import CodexProvider
-        from aichestra.providers.cursor import CursorProvider
-        from aichestra.providers.discovery import discover_providers
-        from aichestra.providers.local_worker import LocalWorkerProvider
-        from aichestra.providers.orca import OrcaProvider
-        from aichestra.config.layering import local_enabled, resolve_config
-        from aichestra.orchestration.roles import select_lead
+        return _cmd_orchestrate(args)
 
-        cfg = resolve_config(repo_root=args.project_root)
-        providers = discover_providers(local_enabled=local_enabled(cfg))
-        selection = select_lead(providers)
+    parser.error(f"unknown command: {args.command}")
+    return 2
+
+
+def _cmd_orchestrate(args: argparse.Namespace) -> int:
+    from aichestra.config.layering import local_enabled, resolve_config
+    from aichestra.orchestration.modes import Mode
+    from aichestra.orchestration.roles import select_lead
+    from aichestra.orchestration.verification import verification_commands_from_config
+    from aichestra.orchestration.workflow import OrchestratedWorkflow, WorkflowBindings
+    from aichestra.providers.codex import CodexProvider
+    from aichestra.providers.cursor import CursorProvider
+    from aichestra.providers.discovery import discover_providers
+    from aichestra.providers.fakes import (
+        fake_codex_lead,
+        fake_cursor_lead,
+        fake_local_worker,
+        fake_orca,
+    )
+    from aichestra.providers.local_worker import LocalWorkerProvider
+    from aichestra.providers.orca import OrcaProvider
+    from aichestra.providers.quota_guard import real_provider_execution_blocked
+
+    repo_root = Path(args.repo_root).resolve() if args.repo_root else find_repo_root()
+    project_root = Path(args.project_root).resolve() if args.project_root else None
+    cfg = resolve_config(repo_root=repo_root, project_root=project_root)
+    use_fakes = real_provider_execution_blocked()
+    providers = discover_providers(local_enabled=local_enabled(cfg))
+    selection = select_lead(providers)
+
+    if use_fakes:
+        orca = fake_orca()
+        local = fake_local_worker(enabled=local_enabled(cfg))
         lead: object | None = None
+        if selection.lead and selection.lead.value == "codex":
+            lead = fake_codex_lead()
+        elif selection.lead and selection.lead.value == "cursor":
+            lead = fake_cursor_lead()
+        else:
+            lead = fake_codex_lead()
+    else:
+        orca = OrcaProvider()
+        local = LocalWorkerProvider(local_enabled=local_enabled(cfg))
+        lead = None
         if selection.lead and selection.lead.value == "codex":
             lead = CodexProvider()
         elif selection.lead and selection.lead.value == "cursor":
             lead = CursorProvider()
-        bindings = WorkflowBindings(
-            orca=OrcaProvider(),
-            lead=lead,  # type: ignore[arg-type]
-            local_worker=LocalWorkerProvider(local_enabled=local_enabled(cfg)),
-            providers=providers,
-            project_root=str(args.project_root) if args.project_root else None,
-            task_prompt=args.prompt,
-            research_query=args.query,
-        )
-        wf = OrchestratedWorkflow(
-            mode=Mode.ORCHESTRATED,
-            research_useful=not args.no_research,
-            bindings=bindings,
-        )
-        state = wf.run_all()
-        sys.stdout.write(json.dumps(state.to_dict(), indent=2, default=str) + "\n")
-        return 0 if not state.failed and not state.stopped else 1
 
-    parser.error(f"unknown command: {args.command}")
-    return 2
+    bindings = WorkflowBindings(
+        orca=orca,  # type: ignore[arg-type]
+        lead=lead,  # type: ignore[arg-type]
+        local_worker=local,  # type: ignore[arg-type]
+        providers=providers,
+        project_root=str(project_root) if project_root else None,
+        task_prompt=args.prompt,
+        research_query=args.query,
+        verification_commands=verification_commands_from_config(cfg),
+    )
+    wf = OrchestratedWorkflow(
+        mode=Mode.ORCHESTRATED,
+        research_useful=not args.no_research,
+        bindings=bindings,
+    )
+    state = wf.run_all()
+    payload = state.to_dict()
+    payload["config_roots"] = {
+        "repo_root": str(repo_root),
+        "project_root": str(project_root) if project_root else None,
+        "local_enabled": local_enabled(cfg),
+        "fake_providers": use_fakes,
+        "verification_commands": bindings.verification_commands,
+    }
+    sys.stdout.write(json.dumps(payload, indent=2, default=str) + "\n")
+    return 0 if not state.failed and not state.stopped else 1
 
 
 def _print_result(data: dict, *, as_json: bool) -> None:
