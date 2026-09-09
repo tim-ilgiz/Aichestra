@@ -4,8 +4,9 @@
 
 **Input**: Feature specification from `/specs/001-portable-ai-orchestration/spec.md`
 
-**Status**: Architecture source of truth strengthened (Orca owns workflow graph /
-execution state machine; provider/runtime/model agnostic via ExecutionTargets).
+**Status**: Architecture source of truth strengthened (coordinator under Orca
+owns the concrete workflow/DAG; Orca owns canonical orchestration
+lifecycle/state; provider/runtime/model agnostic via ExecutionTargets).
 Production Mode C realignment against Phase 24 (T158–T168) is **not** complete
 — docs lead; code must follow.
 
@@ -19,14 +20,28 @@ Deliver a portable, project-agnostic AI development environment where:
   Model Providers / models, resolves proven ExecutionTargets, builds
   policy/context, creates/resumes **exactly one Orca Run**; launches one
   generic coordinator (bootstrap ExecutionTarget exception only); the
-  coordinator under Orca owns the concrete DAG; Orca owns canonical
-  Task/Dispatch/worker/worktree lifecycle; Aichestra owns discovery, policy,
-  config, and deterministic gates/verification
+  coordinator under Orca owns the concrete workflow/DAG; Orca owns canonical
+  orchestration lifecycle/state (Runs, Tasks, Dispatches, workers,
+  terminals/worktrees, messages and handoffs); Aichestra owns discovery,
+  policy, config, and deterministic gates/verification
 
 Cross-platform Python owns portable helpers. OS bootstrap entrypoints wrap the
 shared core. CI and fixtures prove portability without real provider quota.
 
 Source-of-truth formula:
+
+```text
+The coordinator running under Orca owns the concrete workflow/DAG.
+
+Orca owns the canonical orchestration lifecycle/state:
+Runs, Tasks, Dispatches, worker lifecycle, terminal/worktree lifecycle,
+messages and handoffs.
+
+Aichestra owns neither the concrete DAG nor a parallel orchestration
+state machine.
+```
+
+Capability/discovery formula:
 
 ```text
 Aichestra discovers:
@@ -41,7 +56,7 @@ ExecutionTargets
         ↓
 passes targets/policy into ONE Orca Run
         ↓
-Coordinator chooses/schedules workers
+Coordinator chooses/schedules workers (owns concrete DAG)
         ↓
 Orca owns canonical Task/Dispatch/worker/worktree lifecycle
 ```
@@ -62,7 +77,8 @@ Orca owns canonical Task/Dispatch/worker/worktree lifecycle
 ### Aichestra is NOT
 
 - a general-purpose workflow engine
-- owner of the Mode C workflow graph / execution state machine
+- owner of the concrete Mode C workflow/DAG
+- owner of a parallel agent-phase / orchestration state machine
 - a worker scheduler (beyond the narrow coordinator bootstrap placement)
 - a session manager
 - a worktree manager (beyond thin policy checks)
@@ -305,7 +321,7 @@ Canonical lifecycle identity: Orca `run_id`.
 Aichestra may expose neutral execution/gate status for observability.
 
 It MUST NOT maintain a second agent-phase state machine that mirrors or predicts
-the Orca workflow graph.
+the coordinator's workflow/DAG or Orca Run state.
 
 Canonical orchestration state belongs to the Orca Run.
 
@@ -341,11 +357,11 @@ parallel Aichestra-owned workflow.
 
 | Concern | Owner |
 |---------|-------|
-| Workflow graph / state machine | Orca |
-| Concrete inner worker DAG / dependencies / ordering | coordinator under Orca |
-| Task/Dispatch lifecycle | Orca |
-| Agent terminal/worktree lifecycle | Orca |
-| Worker lifecycle / dispatch | Orca |
+| Concrete workflow/DAG | coordinator under Orca |
+| Task dependencies/order | coordinator under Orca |
+| Run/Task/Dispatch lifecycle state | Orca |
+| Worker lifecycle/accounting | Orca |
+| Terminal/worktree lifecycle | Orca |
 | Handoffs inside Mode C | Orca |
 | User task + project entrypoint | Aichestra |
 | Project-context discovery | Aichestra |
@@ -382,8 +398,9 @@ Aichestra MUST NOT use that responsibility to become the inner worker scheduler.
 - Aichestra deciding universal worker/task ordering
 - requiring a Python code change to introduce a different orchestration shape
 - treating project-context detection as informational metadata only
-- creating `.aichestra/speckit/` as a competing canonical Spec Kit when the
-  target project already owns a canonical Spec Kit structure
+- silently creating `.aichestra/speckit/` or another competing Spec Kit
+  hierarchy (discover/preserve project canonical location; only establish a
+  structure when none exists and configured Spec Kit policy allows it)
 - expanding coordinator bootstrap into Aichestra-owned phase→runtime mapping
 
 ## Architecture Notes

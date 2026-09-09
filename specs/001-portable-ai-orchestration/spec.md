@@ -4,8 +4,9 @@
 
 **Created**: 2026-09-09
 
-**Status**: Architecture source of truth strengthened (Orca owns the workflow
-graph/state machine; Aichestra is a project-execution control plane;
+**Status**: Architecture source of truth strengthened (coordinator under Orca
+owns the concrete workflow/DAG; Orca owns canonical orchestration
+lifecycle/state; Aichestra is a project-execution control plane;
 provider/runtime/model agnostic via ExecutionTargets). Production Mode C
 realignment against MODE-C-011–020 / Phase 24 is **not** complete —
 architecture docs lead; code must follow.
@@ -16,8 +17,18 @@ architecture docs lead; code must follow.
 
 This specification is the target architecture source of truth.
 
-Mode C MUST use Orca as the single owner of the orchestration workflow graph,
-agent/task/worker lifecycle, worktrees, and execution state.
+Source-of-truth ownership formula:
+
+```text
+The coordinator running under Orca owns the concrete workflow/DAG.
+
+Orca owns the canonical orchestration lifecycle/state:
+Runs, Tasks, Dispatches, worker lifecycle, terminal/worktree lifecycle,
+messages and handoffs.
+
+Aichestra owns neither the concrete DAG nor a parallel orchestration
+state machine.
+```
 
 Aichestra MUST NOT own or hard-code a fixed agent-phase pipeline such as:
 
@@ -43,10 +54,8 @@ For a Mode C invocation Aichestra is responsible for:
 7. executing deterministic policy/security/verification gates where appropriate;
 8. reporting the resulting Orca Run state.
 
-The coordinator under Orca owns the concrete inner DAG (which workers/tasks are
-needed, their ordering, handoffs and worktrees). Orca owns the canonical
-Task/Dispatch/worker/worktree lifecycle. Aichestra MUST NOT use discovery or
-bootstrap placement to become the inner worker scheduler.
+Aichestra MUST NOT use discovery or bootstrap placement to become the inner
+worker scheduler.
 
 When implementation disagrees with this architecture, fix the implementation.
 Do not weaken this specification to preserve an Aichestra-owned workflow engine.
@@ -279,8 +288,9 @@ compatible ExecutionTargets
 
 Aichestra supplies bootstrap, discovery, policy, configuration, deterministic
 gates, verification, and an Orca adapter. The coordinator under Orca owns the
-concrete DAG. Orca owns canonical Task/Dispatch/worker/worktree lifecycle
-inside that single Run.
+concrete workflow/DAG. Orca owns the canonical orchestration lifecycle/state
+for Runs, Tasks, Dispatches, workers, terminals/worktrees, messages and
+handoffs inside that single Run.
 
 **Why this priority**: Interaction style and provider availability vary by
 machine; Mode A must remain usable when Mode C cannot run.
@@ -330,8 +340,9 @@ Aichestra discovers the project's own instructions and tooling, resolves
 Agent Runtimes, Model Providers, and proven ExecutionTargets, builds
 orchestration policy/context, and starts or resumes exactly one Orca Run.
 
-The coordinator under Orca owns the concrete execution DAG inside that Run.
-Orca owns the canonical Task/Dispatch/worker/worktree lifecycle.
+The coordinator under Orca owns the concrete workflow/DAG inside that Run.
+Orca owns the canonical orchestration lifecycle/state for Runs, Tasks,
+Dispatches, workers, terminals/worktrees, messages and handoffs.
 
 Aichestra does not prescribe a universal research → implementation → writers →
 review sequence. Different projects and tasks may require different execution
@@ -368,12 +379,13 @@ Phase enum values.
    starts, **Then** Aichestra can still build a usable project context through
    discovery rather than requiring a hard-coded project type.
 
-3. **Given** a simple task, **When** Orca determines that research or writers are
-   unnecessary, **Then** Aichestra does not require those phases to exist.
+3. **Given** a simple task, **When** the coordinator under Orca determines that
+   research or writers are unnecessary, **Then** Aichestra does not require
+   those phases to exist.
 
-4. **Given** a complex task, **When** Orca decides multiple workers/tasks are
-   required, **Then** all of them belong to the same Orca Run and Orca owns their
-   ordering and lifecycle.
+4. **Given** a complex task, **When** the coordinator under Orca decides multiple
+   workers/tasks are required, **Then** all of them belong to the same Orca Run;
+   the coordinator owns their ordering/DAG, and Orca owns their lifecycle.
 
 5. **Given** project-owned Spec Kit or Factory conventions, **When**
    orchestration runs, **Then** Aichestra preserves and uses the project's
@@ -587,8 +599,14 @@ above), with child placement owned by Orca.
 
 ### Workflow ownership requirements
 
-- **MODE-C-011**: Orca MUST own the Mode C workflow graph and execution state
-  machine. Aichestra MUST NOT own a fixed multi-agent phase graph.
+- **MODE-C-011**: The coordinator running under Orca MUST own the concrete Mode C
+  workflow/DAG.
+
+  Orca MUST own the canonical orchestration lifecycle/state for Runs, Tasks,
+  Dispatches, workers, terminals/worktrees, messages and handoffs.
+
+  Aichestra MUST NOT own either the concrete DAG or a parallel agent-phase
+  state machine.
 
 - **MODE-C-012**: Aichestra MUST NOT require universal agent phases such as
   research, implementation, test-writer, doc-writer or lead-review. Such work
@@ -690,8 +708,9 @@ above), with child placement owned by Orca.
 
   The requirement MUST NOT prescribe OpenCode, Ollama, Codex, Cursor, or any
   other specific runtime/provider unless explicit project/user policy does so.
-- **FR-022**: Research output is compacted before being handed to cloud lead
-  agents.
+- **FR-022**: Research output MUST be compacted into bounded structured context
+  before being handed to another ExecutionTarget when compaction is required by
+  context, cost, locality or policy constraints.
 - **FR-023**: A maintenance-reviewer (deterministic Aichestra gate) runs after
   production implementation signals and before test or documentation writers.
 - **FR-024**: maintenance-reviewer can explicitly decide that NO new tests are
@@ -723,8 +742,11 @@ above), with child placement owned by Orca.
 - **FR-033**: Dangerous commands such as sudo, rm, restart, stop, docker
   rm/stop, kubectl apply/delete and remote writes are rejected.
 - **FR-034**: Diagnostic output is sanitized before cloud handoff.
-- **FR-035**: Codex-to-Cursor handoff preserves bounded useful task context and
-  SHOULD occur inside the existing Orca Run.
+- **FR-035**: ExecutionTarget-to-ExecutionTarget handoff MUST preserve bounded
+  useful task context and SHOULD occur inside the existing Orca Run.
+
+  The default portable policy MAY prefer Codex → Cursor when those targets are
+  available and allowed.
 - **FR-036**: Automatic quota fallback is implemented only if reliable with
   current Orca primitives; otherwise one-action **executable** manual handoff
   is provided (not a non-executable suggested-command placeholder).
@@ -822,11 +844,20 @@ above), with child placement owned by Orca.
   `launch_strategy=unsupported` is authoritative — Mode C MUST NOT dispatch
   disabled, unavailable, or unproven targets, and MUST NOT invent a preferred
   lead when none is available.
-- **FR-070**: Spec Kit MEDIUM/LARGE artifacts MUST be produced via Orca under
-  the Mode C Run (role `speckit_artifacts` or equivalent Spec Kit tooling
-  invoked through that Run) into the target project's `.aichestra/speckit/`.
-  Readiness is file-backed; Aichestra MUST NOT unlock implement via Python
-  stub writes or test-only `*_satisfied` metadata.
+- **FR-070**: For MEDIUM/LARGE tasks, required Spec Kit artifacts MUST be
+  produced through the same Orca Run using the target project's canonical Spec
+  Kit structure and tooling when such a structure exists.
+
+  Aichestra MUST discover and preserve the project's canonical Spec Kit location
+  and MUST NOT silently create `.aichestra/speckit/` or another competing
+  specification hierarchy.
+
+  If the target project has no existing Spec Kit structure, the configured
+  project/default Spec Kit policy MAY establish one.
+
+  Readiness MUST be backed by actual canonical artifacts; Aichestra MUST NOT
+  unlock implementation through Python stub writes or test-only
+  `*_satisfied` metadata.
 - **FR-071**: Mode C attachments MUST NOT be staged into the parent project
   checkout (no parent `.aichestra/attachments/`). Stage outside the repo or
   pass absolute paths to Orca `--attach`.
