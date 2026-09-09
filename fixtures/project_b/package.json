@@ -1,0 +1,9 @@
+{
+  "name": "fixture-project-b",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Minimal Node-ish fixture for Aichestra isolation tests",
+  "scripts": {
+    "test": "node test.js"
+  }
+}

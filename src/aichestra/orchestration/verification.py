@@ -1,0 +1,121 @@
+"""verification-runner — real subprocess commands; exit codes are authoritative."""
+
+from __future__ import annotations
+
+import subprocess
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Sequence
+
+
+@dataclass(frozen=True)
+class VerificationResult:
+    command: tuple[str, ...]
+    cwd: str
+    exit_code: int
+    stdout: str
+    stderr: str
+    timed_out: bool = False
+
+    @property
+    def ok(self) -> bool:
+        return self.exit_code == 0 and not self.timed_out
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "command": list(self.command),
+            "cwd": self.cwd,
+            "exit_code": self.exit_code,
+            "stdout": self.stdout,
+            "stderr": self.stderr,
+            "timed_out": self.timed_out,
+            "ok": self.ok,
+        }
+
+
+@dataclass
+class VerificationReport:
+    results: list[VerificationResult] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.results) and all(r.ok for r in self.results)
+
+    @property
+    def exit_code(self) -> int:
+        if not self.results:
+            return 1
+        for result in self.results:
+            if result.exit_code != 0:
+                return result.exit_code
+        return 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "exit_code": self.exit_code,
+            "results": [r.to_dict() for r in self.results],
+        }
+
+
+def run_command(
+    command: Sequence[str],
+    *,
+    cwd: Path | str | None = None,
+    timeout: float | None = 600.0,
+    env: dict[str, str] | None = None,
+) -> VerificationResult:
+    """Execute a real command; LLM opinion is never used for pass/fail."""
+    workdir = str(Path(cwd).resolve()) if cwd else str(Path.cwd())
+    cmd = tuple(str(c) for c in command)
+    try:
+        completed = subprocess.run(
+            list(cmd),
+            cwd=workdir,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return VerificationResult(
+            command=cmd,
+            cwd=workdir,
+            exit_code=124,
+            stdout=(exc.stdout or "") if isinstance(exc.stdout, str) else "",
+            stderr=(exc.stderr or "") if isinstance(exc.stderr, str) else "timed out",
+            timed_out=True,
+        )
+    except OSError as exc:
+        return VerificationResult(
+            command=cmd,
+            cwd=workdir,
+            exit_code=127,
+            stdout="",
+            stderr=str(exc),
+        )
+    return VerificationResult(
+        command=cmd,
+        cwd=workdir,
+        exit_code=int(completed.returncode),
+        stdout=completed.stdout or "",
+        stderr=completed.stderr or "",
+    )
+
+
+def run_verification(
+    commands: Sequence[Sequence[str]],
+    *,
+    cwd: Path | str | None = None,
+    timeout: float | None = 600.0,
+    stop_on_failure: bool = True,
+) -> VerificationReport:
+    """Run target-repo build/test commands; aggregate by exit code (FR-056)."""
+    report = VerificationReport()
+    for command in commands:
+        result = run_command(command, cwd=cwd, timeout=timeout)
+        report.results.append(result)
+        if stop_on_failure and not result.ok:
+            break
+    return report

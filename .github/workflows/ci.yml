@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, "001-*"]
+  pull_request:
+
+jobs:
+  test:
+    name: pytest (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+        python-version: ["3.11"]
+
+    env:
+      AICHESTRA_FAKE_PROVIDERS: "1"
+      AICHESTRA_NO_REAL_QUOTA: "1"
+      # Never call real Codex/Cursor account APIs in CI
+      CODEX_API_KEY: ""
+      OPENAI_API_KEY: ""
+      CURSOR_API_KEY: ""
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package (editable + dev)
+        run: python -m pip install -U pip && pip install -e ".[dev]"
+
+      - name: Run pytest
+        run: pytest
+
+      - name: Note live validation status
+        if: always()
+        shell: bash
+        run: |
+          echo "CI validates core code on ${{ matrix.os }} with fake providers."
+          echo "Windows/Linux live smoke remains NOT VALIDATED until real-machine smoke runs."
+          echo "macOS live smoke is separate from this matrix job."

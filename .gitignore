@@ -7,8 +7,9 @@
 id_rsa
 id_ed25519
 
-# Machine-local / runtime (platform will formalize paths during implementation)
+# Machine-local / runtime
 *.local.json
+machine.local.json
 *.local.yml
 *.local.yaml
 .local/

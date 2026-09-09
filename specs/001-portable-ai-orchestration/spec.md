@@ -36,42 +36,60 @@ paths.
 
 ---
 
-### User Story 2 - Graceful multi-provider orchestration (Priority: P1)
+### User Story 2 - Three modes and graceful multi-provider orchestration (Priority: P1)
 
-A developer uses Orca as the interactive control plane with Codex preferred as
-lead, Cursor as fallback lead, and an optional OpenCode+Ollama local worker.
-Missing providers do not disable the whole platform.
+A developer can use three distinct modes: (A) native Codex/Cursor without
+Aichestra orchestration, (B) Orca interactive with one agent and no automatic
+full orchestration, and (C) explicitly started Aichestra orchestrated workflow.
+Orca is the opt-in control plane. Codex is preferred lead, Cursor is fallback,
+and OpenCode+local-runtime is an optional worker. Missing providers do not
+disable the whole platform. Aichestra does not require Docker or a VM to run,
+and does not add a second general-purpose orchestrator on top of Orca.
 
-**Why this priority**: Provider availability varies by machine and account.
+**Why this priority**: Provider availability and interaction style vary by
+machine and account.
 
 **Independent Test**: Fake/absent-provider fixtures prove useful operation with
-no local worker, no Codex, and no Cursor independently.
+no local worker, no Codex, and no Cursor independently; mode separation is
+asserted by contract tests.
 
 **Acceptance Scenarios**:
 
 1. **Given** Orca is available, **When** the developer starts orchestrated
-   work, **Then** Orca is the primary interactive UI/control plane.
-2. **Given** Codex is available, **When** a lead is selected, **Then** Codex is
+   work (Mode C), **Then** Orca is the primary interactive UI/control plane.
+2. **Given** the developer opens Orca and works with one agent (Mode B),
+   **When** no orchestrated workflow is started, **Then** full multi-role
+   orchestration is not automatically started.
+3. **Given** Codex is available, **When** a lead is selected, **Then** Codex is
    preferred.
-3. **Given** Codex is unavailable and Cursor is available, **When** a lead is
+4. **Given** Codex is unavailable and Cursor is available, **When** a lead is
    selected, **Then** Cursor is used as fallback.
-4. **Given** local inference is disabled or missing, **When** orchestrated
+5. **Given** local inference is disabled or missing, **When** orchestrated
    workflows run, **Then** the platform remains useful without the local worker.
-5. **Given** native Codex or Cursor CLI/IDE usage, **When** the developer works
-   outside Orca, **Then** native commands remain unchanged and unintercepted.
+6. **Given** native Codex or Cursor CLI/IDE usage (Mode A), **When** the
+   developer works outside Orca, **Then** native commands remain unchanged and
+   unintercepted.
+7. **Given** cloud-only configuration, **When** local runtime is absent,
+   **Then** research/maintenance utilities that require local inference degrade
+   without blocking lead workflows.
 
 ---
 
-### User Story 3 - Research, review, and anti-bloat gates (Priority: P2)
+### User Story 3 - Research, review, verification, and anti-bloat gates (Priority: P2)
 
-Orchestrated tasks can research a local repository, compact findings before
-cloud lead handoff, and run a maintenance-reviewer that may explicitly decide
-no new tests or docs are needed.
+Orchestrated development follows: classify → local research if useful → lead
+implementation → maintenance-reviewer gate → optional test/docs workers →
+deterministic verification → lead review. The repository-researcher prefers
+the local worker and produces a compact structured summary. The
+maintenance-reviewer emits structured TEST/DOC/ADR/SPEC decisions and may
+explicitly choose none. Tests and docs are never unconditional stages. A
+verification-runner executes real target-repo commands; LLM opinion is not
+authoritative for pass/fail.
 
 **Why this priority**: Controls quality and prevents documentation/test bloat.
 
 **Independent Test**: Fixture decisions prove "no tests needed", "tests needed",
-"no docs needed", and "docs update needed".
+"no docs needed", and "docs update needed"; verifier uses exit codes.
 
 **Acceptance Scenarios**:
 
@@ -79,10 +97,12 @@ no new tests or docs are needed.
    **Then** output is compacted before cloud lead handoff.
 2. **Given** production implementation is complete, **When** the workflow
    proceeds, **Then** maintenance-reviewer runs before test or documentation
-   generation.
+   generation and emits structured decisions.
 3. **Given** maintenance-reviewer decides no tests or no docs are needed,
-   **When** downstream writers run, **Then** they respect that decision and
-   prefer updating existing canonical artifacts when work is needed.
+   **When** downstream writers run, **Then** they are skipped and prefer
+   updating existing canonical artifacts when work is needed.
+4. **Given** verification is required, **When** the verification-runner runs,
+   **Then** it uses the target project's real commands and exit codes.
 
 ---
 
@@ -136,6 +156,37 @@ assertions.
 
 ---
 
+### User Story 6 - Machine profile and optional local inference (Priority: P1)
+
+A developer can inspect a deterministic machine profile and local-runtime
+discovery results. Local inference remains optional even on powerful hardware.
+Installed models are preferred over automatic downloads; large downloads require
+explicit approval. Model/worker selection is capability-based. Machine-local
+model choice is never committed.
+
+**Why this priority**: Hardware and local AI availability differ widely; wrong
+defaults create hard dependencies or unwanted downloads.
+
+**Independent Test**: Fake hardware/runtime fixtures cover capable/weak
+machines, missing runtimes, disabled local, capability mismatch, and
+multi-model selection.
+
+**Acceptance Scenarios**:
+
+1. **Given** any supported OS, **When** machine-profiler runs, **Then** it
+   reports structured OS/CPU/RAM/disk/GPU/local-AI facts without using an LLM
+   as the source of hardware facts.
+2. **Given** `local.enabled = false`, **When** orchestration runs, **Then**
+   cloud-only mode remains fully useful.
+3. **Given** a suitable installed local model, **When** a local worker is
+   needed, **Then** that model is preferred over downloading another.
+4. **Given** no suitable model, **When** bootstrap/local setup would download,
+   **Then** the user must explicitly approve before any large download.
+5. **Given** a vision task and a text-only local model, **When** routing
+   occurs, **Then** a vision-capable provider is selected instead.
+
+---
+
 ### Edge Cases
 
 - All optional providers missing: doctor and bootstrap still succeed with clear
@@ -148,6 +199,12 @@ assertions.
   Orca primitives, provide one-action manual handoff to Cursor and document it.
 - Target project already has Factory tooling: preserve it unless migration is
   explicitly approved.
+- Local runtime under resource pressure: degrade or disable that worker; do not
+  terminate unrelated user applications to free memory.
+- Independent editing agents: must not silently share one checkout; prefer Orca
+  worktrees or serial editing.
+- Custom local endpoints: only when explicitly configured; no network-wide LLM
+  scanning.
 
 ## Requirements *(mandatory)*
 
@@ -159,7 +216,8 @@ assertions.
   unchanged.
 - **FR-003**: Codex is the preferred lead provider.
 - **FR-004**: Cursor is a supported fallback lead.
-- **FR-005**: A local worker based on OpenCode + Ollama is optional.
+- **FR-005**: A local worker based on OpenCode + an optional local inference
+  runtime (initially Ollama) is optional and referred to as `local-worker`.
 - **FR-006**: The platform works when local inference is disabled/unavailable.
 - **FR-007**: The platform gracefully handles missing Codex.
 - **FR-008**: The platform gracefully handles missing Cursor.
@@ -198,8 +256,8 @@ assertions.
   migration is explicitly approved.
 - **FR-030**: Only STAGING SSH diagnostics are integrated.
 - **FR-031**: No production SSH integration exists.
-- **FR-032**: Stage diagnostics enforce a read-only command allowlist outside of
-  the LLM prompt.
+- **FR-032**: Stage diagnostics enforce typed/controlled read-only operations
+  and an allowlist outside of the LLM prompt.
 - **FR-033**: Dangerous commands such as sudo, rm, restart, stop, docker
   rm/stop, kubectl apply/delete and remote writes are rejected.
 - **FR-034**: Diagnostic output is sanitized before cloud handoff.
@@ -216,20 +274,76 @@ assertions.
   update/bootstrap operation without losing machine-local settings.
 - **FR-042**: The project includes a reusable later maintenance-audit workflow
   for reducing test/documentation/spec bloat in target projects.
+- **FR-043**: Three distinct modes are supported: Native (A), Orca Interactive
+  single-agent (B), and explicitly started Orchestrated workflow (C).
+- **FR-044**: Aichestra itself MUST NOT require Docker or a virtual machine to
+  run; WSL MUST NOT be required for Windows.
+- **FR-045**: Aichestra MUST NOT build a duplicate general-purpose orchestrator
+  or require CAO; adapters must be the smallest reliable wrappers over Orca.
+- **FR-046**: A deterministic machine-profiler obtains OS, architecture, CPU,
+  memory, disk, and GPU/accelerator facts via ordinary system APIs (not an LLM).
+- **FR-047**: Local-runtime-discovery supports Ollama initially and is
+  extensible to other local runtimes without rewriting orchestration logic.
+- **FR-048**: `local.enabled = false` remains valid on any hardware; local
+  inference is always optional.
+- **FR-049**: Before recommending/installing a local model, installed models are
+  inspected and reused when capable; large downloads require explicit approval.
+- **FR-050**: Model/worker selection evaluates AVAILABLE, CAPABLE, ALLOWED, and
+  PREFERRED; vision tasks must not be sent to text-only models merely because
+  they are local.
+- **FR-051**: Orchestration refers to `local-worker` rather than a hard-coded
+  global model id; machine-local selection stays untracked.
+- **FR-052**: Local inference is resource-aware (prefer one local worker; unload
+  idle models where supported); never terminate unrelated user apps to free
+  memory.
+- **FR-053**: A reusable `repository-researcher` role prefers local-worker,
+  is normally read-only for production code, and emits a compact structured
+  research summary.
+- **FR-054**: Default orchestrated flow is classify → research if useful → lead
+  implement → maintenance-reviewer → optional test/docs workers → deterministic
+  verification → lead review; tests/docs are not unconditional.
+- **FR-055**: maintenance-reviewer emits structured TEST_DECISION, TEST_SCOPE,
+  DOC_DECISION, DOC_TARGETS, ADR_REQUIRED, SPEC_UPDATE, and RATIONALE.
+- **FR-056**: A verification-runner executes real target-repository build/test
+  commands; process exit codes are authoritative.
+- **FR-057**: Editing agents prefer Orca worktrees or serial execution; never
+  `git reset --hard` the user's real working copy merely to revert agent work.
+- **FR-058**: Ordinary files/logs/PDFs/images participate via Orca/provider
+  capabilities; large text may be locally summarized; vision routes only to
+  vision-capable providers.
+- **FR-059**: Staging diagnostics expose typed/controlled read operations via
+  structured builders, not unrestricted remote shell strings.
+- **FR-060**: Config precedence is tracked defaults → OS defaults →
+  machine-local → target-project → runtime/task override.
+- **FR-061**: Doctor reports PASS/WARN/FAIL for Aichestra, machine, platform,
+  cloud providers, local AI, project, and staging without printing credentials.
+- **FR-062**: Automated tests use fake providers covering success, unavailable,
+  quota, auth failure, timeout, and generic error without consuming real quota.
+- **FR-063**: Spec Kit proportionality distinguishes SMALL / MEDIUM /
+  LARGE-HIGH-RISK paths; AI Factory is not added to Aichestra v1.
+- **FR-064**: Operator documentation describes actual daily commands for native
+  use, Orca interactive, orchestrated start, handoff, local disable, research,
+  machine profile, staging diagnostics, worktree diff, and Git update.
 
 ### Key Entities
 
 - **Provider Profile**: Discovered availability and role of Codex, Cursor,
-  OpenCode/Ollama, and Orca on the current machine.
-- **Hardware Profile**: Machine-local defaults for local model class and worker
-  count (untracked).
+  OpenCode/local-runtime, and Orca on the current machine.
+- **Hardware Profile / Machine Profile**: Deterministic machine facts and
+  machine-local defaults for local model class and worker count (untracked).
+- **Local Runtime Profile**: Discovered local inference runtimes, models, and
+  capabilities.
 - **Orchestration Policy**: Tracked, portable rules for roles, Spec Kit
   proportionality, and maintenance-reviewer gates.
-- **Staging Diagnostic Request**: Candidate remote command subject to allowlist
-  and sanitization.
+- **User Mode**: Native, Orca Interactive, or Orchestrated.
+- **Staging Diagnostic Request**: Candidate remote command subject to typed
+  builders, allowlist, and sanitization.
 - **Fixture Repository**: Isolated sample project used to prove non-leakage.
 - **Validation Report**: Truthful record of automated vs live smoke coverage by
   OS and component.
+- **Maintenance Review Decision**: Structured gate output controlling tests,
+  docs, ADR, and spec updates.
+- **Handoff Packet**: Bounded Codex→Cursor continuation context.
 
 ## Success Criteria *(mandatory)*
 
@@ -254,6 +368,14 @@ assertions.
   tests have actually run there.
 - **SC-010**: A developer can update orchestration policies through Git and
   preserve machine-local settings.
+- **SC-011**: Machine-profiler returns structured facts without LLM guessing.
+- **SC-012**: Capability routing refuses vision tasks for text-only local
+  models.
+- **SC-013**: With `local.enabled = false`, cloud-only workflows remain useful.
+- **SC-014**: Large local model download path requires explicit approval in
+  tests/fixtures.
+- **SC-015**: verification-runner uses real exit codes from fixture project
+  commands.
 
 ## Clarifications
 
