@@ -86,11 +86,14 @@ class FakeProvider(ProviderAdapter):
 
         if scenario in {"success", "ok", "available"}:
             meta: dict = {"fake": True, "run_id": run_id}
-            if role in {"ensure_run", "control_plane", "classify"}:
+            # Only ensure_run corresponds to `orca orchestration run-create`.
+            # Classify/control_plane/phase_report must NOT mint additional Runs.
+            if role == "ensure_run":
                 meta["orca_command"] = "orchestration run-create"
                 meta["reused"] = False
-            elif role in {"phase_report", "status_ping"}:
+            elif role in {"control_plane", "classify", "phase_report", "status_ping"}:
                 meta["orca_command"] = "noop-phase-report"
+                meta["reused"] = True
             else:
                 cwd = request.cwd
                 # Fakes keep the same checkout so verification can run; real Orca

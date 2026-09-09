@@ -1,10 +1,10 @@
 <!--
 Sync Impact Report
-- Version change: (none) → 1.0.0
-- Modified principles: template placeholders → I–VIII project principles
-- Added sections: Operating Constraints; Development Workflow
+- Version change: 1.0.0 → 1.1.0
+- Modified principles: II Graceful Degradation (Orca required for Mode C)
+- Modified sections: Operating Constraints (single Orca Run; no dual orchestrator)
 - Removed sections: none
-- Follow-up TODOs: none
+- Follow-up TODOs: production Mode C realignment (tasks Phase 20 T108+)
 -->
 
 # Aichestra Constitution
@@ -21,10 +21,14 @@ operation are first-class; WSL MUST NOT be required.
 
 ### II. GRACEFUL DEGRADATION
 
-No optional AI provider MAY become a hard dependency. Useful workflows MUST
-remain available when Codex, Cursor, or local inference is unavailable.
-Provider discovery and adapters MUST degrade gracefully rather than fail the
-platform bootstrap.
+Codex, Cursor, and local inference MUST remain optional. Useful Mode A native
+usage and degraded Mode C (when Orca still has workers) MUST remain available
+when those optional providers are missing. Provider discovery and adapters MUST
+degrade gracefully rather than fail platform bootstrap.
+
+Orca is required for Mode C. Missing Orca MUST fail Mode C closed and MUST NOT
+authorize Aichestra to become a second orchestrator or to invoke Codex/Cursor
+directly as a Mode C fallback. Mode A remains independently usable.
 
 ### III. MINIMUM MAINTENANCE COST
 
@@ -73,14 +77,21 @@ change through full SDD.
 
 ## Operating Constraints
 
-- Orca is the primary interactive UI and orchestration control plane.
-- Codex is the preferred lead provider; Cursor is the supported fallback lead.
-- OpenCode + Ollama is an optional local worker.
+- Orca is the primary interactive UI and the only Mode C orchestration control
+  plane. One Mode C invocation MUST use exactly one Orca Run.
+- Aichestra MUST NOT implement a general-purpose workflow engine that duplicates
+  Orca worker/task scheduling.
+- Codex is the preferred lead provider; Cursor is the supported fallback lead
+  (policy inputs to Orca).
+- OpenCode + Ollama is an optional local worker (Mode C dispatch via Orca).
+- Providers MUST be independently enable/disable-able.
 - Repository clone location is arbitrary; no fixed home-directory paths in
   tracked production configuration.
 - Bootstrap MUST be idempotent and preserve existing user configuration where
   practical.
 - Machine-local model and provider settings remain untracked.
+- Machine profiling is capability-based; production MUST NOT depend on a
+  specific Mac identity.
 - GitHub Actions MUST validate core code on macOS, Windows, and Linux without
   consuming real Codex/Cursor account quota.
 
@@ -104,4 +115,10 @@ those files would otherwise drift. Spec Kit feature specs define intended
 behavior; the codebase defines current implementation. Compliance is reviewed
 during Spec Kit analyze/converge and maintenance-reviewer gates.
 
-**Version**: 1.0.0 | **Ratified**: 2026-09-09 | **Last Amended**: 2026-09-09
+**Version**: 1.1.0 | **Ratified**: 2026-09-09 | **Last Amended**: 2026-09-09
+
+### Amendment 1.1.0
+
+Clarify graceful degradation: Orca required for Mode C; Mode A remains when
+Orca is absent. Forbid dual-orchestrator Mode C; one Orca Run; capability-based
+machine profiling; independent provider enable flags.

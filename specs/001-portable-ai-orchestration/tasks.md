@@ -8,16 +8,23 @@ description: "Task list for portable Aichestra platform implementation"
 
 **Prerequisites**: plan.md (required), spec.md (required)
 
-**Tests**: Included where required by success criteria (SC-001–SC-015) and
-security/isolation invariants. Prefer minimal high-value coverage.
+**Architecture contract status (2026-09-09)**: Spec/plan/AGENTS realigned to
+**single-Orca-Run Mode C**. Production code still contains a conflicting
+dual-orchestrator `OrchestratedWorkflow` / phase engine. **Feature is NOT
+converged / NOT complete** until Phase 20 is done.
 
-**Organization**: Phases follow foundation → user stories → CI/smoke/docs.
-Story labels map to spec user stories (US1–US6).
+**Tests**: Included where required by success criteria (SC-001–SC-016) and
+architecture contract tests (MODE-C-001–010). Prefer minimal high-value coverage.
+
+**Organization**: Phases follow foundation → user stories → CI/smoke/docs →
+architecture realignment.
 
 ## Format: `[ID] [P?] [Story?] Description`
 
 - **[P]**: Can run in parallel (different files, no dependencies)
 - **[Story]**: US1–US6 traceability to spec.md
+- **REOPENED**: previously marked done; invalid under new architecture contract
+- **SUPERSEDED**: historical task kept for audit; do not treat as acceptance
 
 ## Phase 1: Repository / Python foundation
 
@@ -45,9 +52,10 @@ runtime implementation.
 - [x] T007 [US1] Implement config layering (tracked → OS → machine-local →
       project → runtime) in `src/aichestra/config/layering.py`
       (FR-016/041/060; SC-010)
-- [x] T008 [P] [US1] Implement hardware profiles in
-      `src/aichestra/config/hardware_profiles.py` including M4 Pro 24 GB as an
-      example profile only (FR-017/018/051)
+- [ ] T008 [P] [US1] REOPENED: hardware profiles must be capability-based;
+      remove/quarantine production `M4_PRO_24GB` / `apple-m4-pro-24gb-example`
+      special cases to test fixtures only; ensure `powerful` tier is reachable
+      before `capable` (FR-017/018/051; Phase 20)
 - [x] T009 [US1] Unit tests for repo root, OS detect, and config layering in
       `tests/unit/test_repo_config.py` (SC-001/SC-003 path invariants)
 
@@ -92,8 +100,8 @@ defaults
       worker, no Codex, and no Cursor in
       `tests/integration/test_provider_degradation.py` (SC-004)
 
-**Checkpoint**: Discovery returns structured availability; missing providers do
-not hard-fail core workflows
+**Checkpoint**: Discovery returns structured availability; missing optional
+providers do not hard-fail bootstrap / Mode A. Missing Orca fails Mode C only.
 
 ---
 
@@ -103,54 +111,58 @@ not hard-fail core workflows
 
 - [x] T019 [US2] Implement mode helpers in
       `src/aichestra/orchestration/modes.py` (FR-043)
-- [x] T020 [US2] Implement Orca adapter/integration hooks in
-      `src/aichestra/providers/orca.py` after inspecting current Orca docs
-      (FR-001/045)
-- [x] T021 [US2] Implement Codex preferred / Cursor fallback lead selection and
-      native-unwrapped policy in `src/aichestra/orchestration/roles.py`
-      (FR-002/003/004)
-- [x] T022 [US2] Implement Codex→Cursor handoff with bounded context and
-      documented manual fallback policy in
-      `src/aichestra/orchestration/handoff.py` (FR-035/036)
-- [x] T023 [US2] Implement optional local worker adapter in
-      `src/aichestra/providers/local_worker.py` (FR-005/006)
+- [ ] T020 [US2] REOPENED: Orca adapter must be the sole Mode C execution path;
+      create/resume exactly one Run; no dual control-plane (FR-001/045;
+      MODE-C-001/002; Phase 20)
+- [x] T021 [US2] Implement Codex preferred / Cursor fallback **policy** for
+      Orca (not hidden direct-execution fallback) in
+      `src/aichestra/orchestration/roles.py` (FR-002/003/004)
+- [ ] T022 [US2] REOPENED: Codex→Cursor handoff MUST prefer continuation inside
+      the existing Orca Run; manual path MUST be one executable action
+      (FR-035/036; Phase 20)
+- [ ] T023 [US2] REOPENED: local-worker adapter is discovery/capability only for
+      Mode C; execution MUST be via Orca worker dispatch (FR-005/006;
+      MODE-C-004; Phase 20)
 - [x] T024 [US2] Contract/unit tests for modes, lead selection, and handoff in
       `tests/contract/test_lead_handoff.py` and `tests/contract/test_modes.py`
 
-**Checkpoint**: Orchestrated mode is opt-in; native and interactive modes remain
+**Checkpoint**: Mode C is opt-in via Orca; native and interactive modes remain
 
 ---
 
-## Phase 6: Agent roles, workflow, verification, maintenance-audit
+## Phase 6: Agent roles, gates, verification, maintenance-audit
 
 **Purpose**: Research compaction + anti-bloat gates + verifier (US3)
 
-- [x] T025 [US3] Implement repository-researcher + compaction in
-      `src/aichestra/orchestration/research_compact.py` (FR-021/022/053)
-- [x] T026 [US3] Implement default orchestrated workflow in
-      `src/aichestra/orchestration/workflow.py` (FR-054)
+- [ ] T025 [US3] REOPENED: repository-researcher compaction helpers OK;
+      research **execution** MUST be Orca task on existing Run (FR-021/022/053;
+      Phase 20)
+- [ ] T026 [US3] REOPENED / SUPERSEDES dual-orchestrator: replace
+      `OrchestratedWorkflow` general-purpose phase engine with thin Mode C
+      controller (policy + gates + one Orca Run). Do NOT keep a Python engine
+      that schedules workers (FR-043/045/054; Phase 20)
 - [x] T027 [US3] Implement maintenance-reviewer with structured output in
       `src/aichestra/orchestration/maintenance_reviewer.py`
       (FR-023/024/025/055)
-- [x] T028 [US3] Implement test/doc writer preference helpers in
-      `src/aichestra/orchestration/writers.py` (FR-026/027)
+- [ ] T028 [US3] REOPENED: test/doc writer **preference** helpers may remain;
+      writer **execution** MUST be Orca tasks (FR-026/027; Phase 20)
 - [x] T029 [US3] Implement verification-runner in
       `src/aichestra/orchestration/verification.py` (FR-056; SC-015)
 - [x] T030 [P] [US3] Encode Spec Kit proportionality helper in
       `src/aichestra/orchestration/speckit_policy.py` (FR-028/063)
 - [x] T031 [P] [US3] Implement Factory-preservation guard in
       `src/aichestra/orchestration/factory_preserve.py` (FR-029)
-- [x] T032 [P] [US3] Implement worktree/serial edit policy in
-      `src/aichestra/orchestration/worktrees.py` (FR-057)
+- [ ] T032 [P] [US3] REOPENED: rework/remove custom worktree edit-lock
+      (`worktrees.py`, `.aichestra/edit.lock`) if it duplicates Orca worktree
+      ownership; keep only thin concurrency policy if needed (FR-057; Phase 20)
 - [x] T033 [US3] Implement maintenance-audit analysis-only workflow in
       `src/aichestra/orchestration/maintenance_audit.py` (FR-042)
-- [x] T034 [US3] Fixture tests for maintenance-reviewer, skipped writers,
-      research compaction, and verifier exit codes in
-      `tests/integration/test_maintenance_reviewer.py` and
-      `tests/integration/test_workflow.py` (SC-005/SC-015)
+- [ ] T034 [US3] REOPENED: rewrite fixture/integration tests that encode
+      dual-orchestrator / direct provider Mode C execution
+      (SC-005/SC-015/SC-016; Phase 20)
 
 **Checkpoint**: Reviewer can block unnecessary tests/docs; research compacted;
-verifier authoritative
+verifier authoritative; agents owned by Orca
 
 ---
 
@@ -268,16 +280,107 @@ verifier authoritative
       paths) (FR-060)
 - [x] T063 Verify Spec Kit proportionality note and AGENTS.md remain the
       process entrypoints (FR-028/063)
-- [x] T064 Run full local pytest suite; fix failures; mark any blocked live
-      validation explicitly
-- [x] T065 Cross-check FR-001–FR-064 and SC-001–SC-015 against implemented
-      tasks; close gaps or record NOT VALIDATED blockers
+- [ ] T064 REOPENED: full pytest + architecture contract suite after Phase 20
+      production realignment
+- [ ] T065 REOPENED: cross-check FR/MODE-C/SC against implementation after
+      Phase 20; do not claim complete while dual-orchestrator remains
 - [x] T066 Final repo hygiene: no secrets, no model weights, no machine-local
       paths in tracked files (FR-016/019/020)
 - [x] T067 [P] [US3] Implement file/vision routing helper in
       `src/aichestra/orchestration/media_routing.py` (FR-058; SC-012)
 
-**Checkpoint**: Feature ready for Spec Kit converge / PR
+**Checkpoint**: Feature ready for Spec Kit converge / PR **only after Phase 20**
+
+---
+
+## Phase 14–19: Historical remediation (audit)
+
+Earlier convergence/remediation tasks (T068–T102) partially moved Mode C toward
+Orca, but several still encode or accept a Python phase engine /
+`OrchestratedWorkflow` as Mode C. Treat the following as **SUPERSEDED** by
+Phase 20 — do not leave them as acceptance of the dual-orchestrator design:
+
+- [ ] T077 SUPERSEDED: “wire OrchestratedWorkflow to real phase execution” for
+      Codex/Cursor/local-worker — **forbidden** Mode C shape
+- [ ] T081–T084 SUPERSEDED-in-part: intent (Orca-only, one Run) kept; completion
+      claims invalid while phase engine remains the Mode C core
+- [ ] T096–T099 SUPERSEDED-in-part: renaming to `ModeCRunController` is
+      insufficient if it remains a general-purpose phase/worker scheduler
+- [ ] T026/T032/T034 and related workflow/worktree tasks: see REOPENED above
+
+Historical [x] marks on T068–T076, T078–T080, T085–T095, T100–T102 may remain
+for non-architecture work (staging, doctor, smoke labels) but **do not** imply
+Mode C architecture completion.
+
+---
+
+## Phase 20: Architecture contract realignment (CURRENT)
+
+**Purpose**: Make spec/plan/tasks/tests the source of truth for single-Orca-Run
+Mode C. Then refactor production. **Do not mark feature complete until this
+phase finishes.**
+
+### Contract artifacts (this pass — no production refactor required yet)
+
+- [x] T103 CRITICAL: Rewrite `spec.md` with MODE-C-001–010 and three-mode
+      contract; do not soften to match current workflow engine
+- [x] T104 CRITICAL: Rewrite `plan.md` with Aichestra IS / IS NOT, Mode C
+      10-step flow, and obsolete-component list
+- [x] T105 CRITICAL: Reopen/supersede dual-orchestrator tasks; add Phase 20
+- [x] T106 HIGH: Update `AGENTS.md` (+ constitution graceful-degradation /
+      Mode C constraints) for Orca-required Mode C
+- [x] T107 CRITICAL: Add architecture contract tests (names below) and remove
+      tests that assert Orca-less Mode C / direct lead fallback /
+      project_root=None continuation (SC-016)
+
+### Required architecture contract tests (T107)
+
+```text
+test_mode_c_requires_orca
+test_mode_c_requires_project_root
+test_mode_c_creates_exactly_one_orca_run
+test_mode_c_never_directly_executes_codex
+test_mode_c_never_directly_executes_cursor
+test_mode_c_never_directly_executes_local_worker
+test_all_mode_c_tasks_use_same_orca_run
+test_mode_a_allows_direct_codex
+test_mode_a_allows_direct_cursor
+test_orca_unavailable_does_not_fallback_directly_to_lead
+test_provider_can_be_independently_disabled
+test_attachments_are_forwarded_to_orca
+```
+
+### Production realignment (NEXT — not this pass)
+
+- [ ] T108 CRITICAL: Define single-Orca-run Mode C contract in code
+      (`mode_c` thin controller; remove general-purpose phase engine)
+- [ ] T109 CRITICAL: Make project-root mandatory/resolvable for Mode C; fail
+      before orchestration if unresolved (MODE-C-005)
+- [ ] T110 CRITICAL: Fail Mode C when Orca unavailable; never direct lead
+      fallback (MODE-C-001/006)
+- [ ] T111 CRITICAL: Replace direct provider execution with Orca worker
+      dispatch for implement/research/writers/review (MODE-C-003/004)
+- [ ] T112 CRITICAL: Ensure exactly one `orca orchestration run-create` per
+      Mode C invocation; count==1 contract (MODE-C-002)
+- [ ] T113 CRITICAL: Associate every Orca task/worker/worktree with the same
+      `run_id` (MODE-C-007)
+- [ ] T114 HIGH: Route research through Orca (not LocalWorkerProvider scheduler)
+- [ ] T115 HIGH: Route test/doc writers through Orca
+- [ ] T116 HIGH: Route final lead review through Orca
+- [ ] T117 HIGH: Remove direct Mode-C Codex/Cursor/local-worker fallback paths
+- [ ] T118 HIGH: Rework/remove custom worktree edit-lock if Orca owns worktrees
+- [ ] T119 HIGH: Provider enabled/disabled configuration (MODE-C-009; FR-066)
+- [ ] T120 HIGH: Real attachment forwarding through Orca (MODE-C-010); honest
+      limitation if primitive missing
+- [ ] T121 HIGH: Codex→Cursor handoff inside existing Orca context (FR-035/036)
+- [ ] T122 MEDIUM: Capability-based profiles only; quarantine Mac identity
+      fixtures; fix tier ordering
+- [ ] T123 CRITICAL: Remove obsolete tests asserting Orca-less Mode C or
+      direct-lead fallback; keep SC-016 contract suite green against target
+- [ ] T124: After T108–T123, re-run full suite; only then consider converge
+
+**Checkpoint**: Architecture contract locked in docs+tests; production still
+explicitly pending T108–T124. Feature NOT converged.
 
 ---
 
@@ -285,30 +388,24 @@ verifier authoritative
 
 ### Phase Dependencies
 
-- Phase 1 → Phase 2 → Phase 3 → Phase 4
-- Phase 5 depends on Phase 4
-- Phase 6 depends on Phases 3–5
-- Phase 7 can proceed after Phase 1–2 (security mostly independent)
-- Phase 8 depends on Phases 2–4
-- Phase 9 depends on Phases 3, 4, and 8
-- Phase 10 depends on Phases 2–7
-- Phase 11 depends on Phases 1–10 tests existing
-- Phase 12 depends on Phase 8–9
-- Phase 13 depends on all prior desired phases
+- Phases 1–13 historical foundation
+- Phase 20 contract artifacts (T103–T107) precede production realignment
+- T108–T124 depend on T103–T107
+- Converge / “feature complete” only after T124
 
 ### User Story Mapping
 
 - **US1** (bootstrap/portability): Phases 2, 8, 9
-- **US2** (modes/providers/Orca): Phases 4, 5
-- **US3** (research/reviewer/verify): Phase 6
+- **US2** (modes/providers/Orca): Phases 4, 5, 20
+- **US3** (research/reviewer/verify): Phase 6, 20
 - **US4** (staging security): Phase 7
 - **US5** (isolation/CI/smoke): Phases 10–12
-- **US6** (machine/local AI): Phase 3, parts of 9
+- **US6** (machine/local AI): Phase 3, parts of 9, T122
 
 ### Parallel Opportunities
 
-- T003/T004; T006/T008; T011; T016/T017; T030–T032; T041–T043; T050/T051
-- After Phase 4: Phase 5 and Phase 7 can proceed in parallel
+- After T107: T119/T122 can proceed in parallel with T108–T113
+- T114–T116 parallel once T111 lands
 
 ---
 
@@ -316,14 +413,14 @@ verifier authoritative
 
 | Requirement cluster | Tasks |
 |---------------------|-------|
+| MODE-C-001–010 architecture contract | T103–T107, T108–T123 |
 | Windows/Linux native bootstrap | T006, T041–T043 |
 | Arbitrary clone path / no fixed home | T005, T009, T053, T054 |
-| Machine profiler / local runtime / routing | T010–T014 |
-| Three modes + graceful degradation | T015–T024 |
-| maintenance-reviewer + verifier + audit | T025–T034 |
+| Machine profiler / local runtime / routing | T010–T014, T122 |
+| Three modes + graceful degradation | T015–T024, T108–T117 |
+| maintenance-reviewer + verifier + audit | T025–T034, T114–T116 |
 | Staging read-only + sanitization | T035–T039 |
 | GitHub Actions matrix / no quota | T055–T057 |
-| Machine-local config separation | T007, T008, T040, T045 |
 | Isolation fixtures | T050–T052 |
 | Truthful validation + operator UX | T058–T061, T064 |
 
@@ -331,163 +428,8 @@ verifier authoritative
 
 ## Implementation Strategy
 
-1. Complete Phases 1–2 (foundation)
-2. Complete Phase 3 (profiler/local AI) + Phase 4 (discovery)
-3. Add Phase 5 (modes/Orca/leads)
-4. Add Phases 6–7 (workflow + security)
-5. Add Phases 8–9 (bootstrap + doctor)
-6. Add Phases 10–12 (fixtures, CI, Mac smoke)
-7. Phase 13 convergence
-
-Do not stop at scaffolding. Run tests after each meaningful batch. Do not claim
-Windows/Linux live validation from macOS-only execution.
-
----
-
-## Phase 14: Convergence
-
-**Purpose**: Close remaining gaps found by Spec Kit converge against FR/SC/edge cases (append-only; do not renumber prior tasks).
-
-- [x] T068 Implement staging SSH alias resolution with fail-closed unknown-alias messaging and an allowlist-gated remote diagnostic runner that never uses unrestricted shell strings, never reads private key contents, and sanitizes output before cloud handoff per US4 edge case / FR-030/032/034 / Constitution IV (partial)
-- [x] T069 Complete operator daily-command documentation in `README.md` for repository research, staging diagnostics invocation, and worktree diff (Orca/native) per FR-064 (partial)
-
-
-## Phase 15: Convergence
-
-**Purpose**: Close remaining gaps found by Spec Kit converge against FR/SC/edge cases (append-only; do not renumber prior tasks).
-
-- [x] T070 CRITICAL: Tighten staging curl allowlist in `src/aichestra/security/staging_allowlist.py` so read-only structural enforcement rejects remote writes (deny `-X POST/PUT/PATCH/DELETE`, `-d/--data`, `-T/-F/--upload-file`, and local write-out `-o/-O`); keep typed `CURL_HEALTH` GET-style argv allowed; add security fixture tests covering curl write cases before any executor/SSH call per Constitution IV / FR-032 / FR-033 / US4/AC1-AC2 (partial)
-
-## Phase 16: Convergence
-
-**Purpose**: Close remaining gaps found by Spec Kit converge against FR/SC/edge cases (append-only; do not renumber prior tasks).
-
-- [x] T071 CRITICAL: Deny shell redirect / write tokens (`>`, `>>`, and equivalent) in `src/aichestra/security/staging_allowlist.py` before SSH execution, and restrict the operator/public staging path to typed `StagingOp` / `op_kind` only (keep free-form `remote_argv` test-only if retained); add security fixture tests for redirect argv rejected before any executor call per Constitution IV / FR-032 / FR-033 / FR-059 (partial)
-- [x] T072 Wire `assess_resources` into local-worker selection/doctor paths and invoke real unload when supported under HIGH/CRITICAL pressure (replace no-op `OllamaRuntime.unload_idle`); never terminate unrelated user apps; add regression tests per FR-052 / resource edge case (partial)
-- [x] T073 Honor `AICHESTRA_FAKE_PROVIDERS` / `AICHESTRA_NO_REAL_QUOTA` in `src/aichestra/providers/discovery.py` so CI-injected fake providers are used instead of probing real Codex/Cursor binaries; add a regression test per FR-039 / plan: CI fake providers (partial)
-- [x] T074 Add tests for worktree/serial edit lease refuse-shared-checkout and `reset_hard_helper_allowed() is False` in `src/aichestra/orchestration/worktrees.py` per FR-057 (partial)
-- [x] T075 Make `repository-researcher` prefer an available local-worker and degrade to compact filesystem research without mislabeling `PROVIDER` when local-worker is unused per FR-053 (partial)
-- [x] T076 Persist `--approve-model-download` into existing `.local/machine.local.json` on re-bootstrap (today only recorded when creating the file) per FR-049 / SC-014 (partial)
-
-## Phase 17: Review remediation (Mode C execution + staging quoting)
-
-**Purpose**: Address PR review blockers — executable Mode C provider interface,
-strict staging parameter allowlist + remote quoting, truthful phase status /
-maintenance-reviewer gate, honest local-worker research labeling.
-
-- [x] T077 CRITICAL: Add Mode C provider execution interface
-      (`start_session` / `send` / `execute_task`) on
-      `src/aichestra/providers/base.py`, implement for Orca/Codex/Cursor/
-      local-worker, wire `OrchestratedWorkflow` to real phase execution;
-      keep native Codex/Cursor unintercepted (FR-001/043/045/054/064)
-- [x] T078 CRITICAL: Replace staging typed-parameter blacklist with strict
-      allowlist grammars + POSIX remote quoting in
-      `staging_ops.py` / `staging_ssh.py`; add regression tests proving typed
-      params cannot cause an extra remote command (Constitution IV / FR-032/059)
-- [x] T079 HIGH: Model workflow phase status
-      (pending/running/succeeded/failed/skipped); mark succeeded only after
-      real operation ok; enforce maintenance-reviewer before writer phases
-      (FR-023/054)
-- [x] T080 HIGH: Invoke local-worker for research when selected or keep
-      `PROVIDER=filesystem`; honor `--query` inside research
-      (FR-021/053); update CLI `research` / add `orchestrate`
-
-## Phase 18: Architecture remediation (Orca control plane)
-
-**Purpose**: Close PR #1 P0–P1 gaps against target architecture —
-Aichestra is policy/bootstrap/integration; Mode C is one Orca Run with
-tasks/workers/worktrees; Mode A remains native Codex/Cursor outside Mode C.
-Green CI with fake providers must not encode Orca bypass.
-
-### P0 — Mode C / Orca
-
-- [x] T081 CRITICAL: Mode C agent phases (implement, review, writers) execute
-      only through Orca; on Orca UNAVAILABLE fail Mode C — do not fall back to
-      direct Codex/Cursor `_run_lead` (FR-001/043/045; Constitution VI). Mode A
-      remains native and separate.
-- [x] T082 CRITICAL: Create exactly one Orca Run per Mode C workflow; persist
-      `orca_run_id` on `WorkflowState`; reuse for all task-create/worker-start;
-      stop `_report_orca_phase` / control_plane from creating additional Runs
-      (FR-001/045).
-- [x] T083 CRITICAL: After `worker-start --worktree new-child`, capture
-      worktree path/id from receipt; adopt as effective project root for
-      maintenance-reviewer, writers, and verification; record explicit
-      integration policy (continue on child — no silent verify-on-parent)
-      (FR-057).
-- [x] T084 CRITICAL: Replace tests that require Orca-unavailable→lead bypass
-      (`test_phase_succeeded_only_after_operation_ok` and similar); add contract
-      tests: Mode C without Orca fails; one run_id reused; worktree adoption
-      switches effective root (FR-045/062).
-
-### P1 — policy fidelity
-
-- [x] T085 HIGH: maintenance-reviewer inputs include implementation diff (not
-      only changed paths), and do not treat “any test file touched” as
-      `existing_tests_cover=True` without stronger signal (FR-023/055).
-- [x] T086 HIGH: Spec Kit MEDIUM/LARGE execute real brief/plan/tasks gates
-      (or hard-block implement) rather than metadata-only stubs (FR-028/063).
-      *(hard-block until metadata statuses ready/approved or *_satisfied)*
-- [x] T087 HIGH: Deliver attachments via Orca/native file capability (not only
-      path text in prompt); enforce vision provider_hint (FR-058).
-      *(stage inbox + Orca --attach + Codex/Cursor image flags; vision fails
-      closed when bytes_delivered=false)*
-- [x] T088 HIGH: `aichestra handoff` performs one-action Orca
-      `worktree create --agent cursor --prompt …` when Orca available; JSON
-      packet alone is insufficient (FR-035/036).
-      *(default execute; `--prepare-only` keeps packet-only)*
-- [x] T089 HIGH: Bootstrap performs or clearly reports remaining install /
-      Orca+provider integration / local-worker / smoke steps; do not mark
-      download approval as download (FR-013/014; SC truthful status).
-- [x] T090 HIGH: Doctor reports version/commit, Git, Orca+skills, Codex,
-      Cursor, OpenCode, models, selected model+reason, Spec Kit detection,
-      build/test commands per FR-040/061.
-- [x] T091 HIGH: `smoke_mac.py` labels LIVE only after real execute_task (or
-      rename probe-only to DISCOVERED); LIVE ≠ DISCOVERED (Constitution V).
-      *(probe → DISCOVERED; `AICHESTRA_SMOKE_EXECUTE=1` → LIVE on ok execute;
-      `AICHESTRA_SMOKE_ORCA_SUPERVISED=1` → Mode C-shaped supervised smoke)*
-
-### P2 — follow-ups (non-blocking for architecture merge bar if P0+P1 done)
-
-- [ ] T092 MEDIUM: LocalWorkerProvider selects via LocalRuntime abstraction
-      (not hard-wired Ollama) (FR-047/051).
-- [ ] T093 MEDIUM: Expand `run_cli_task` failure classification for NETWORK /
-      CRASH / CANCEL (FR-062 / graceful degradation).
-- [ ] T094 MEDIUM: Windows profiler: CIM/PowerShell fallback when WMIC absent.
-- [ ] T095 LOW: Fold review-history regression tests into canonical suites
-      (orca/workflow/bootstrap/security) per anti-bloat policy.
-
-## Phase 19: Structural Mode C — one Orca Run controller
-
-**Purpose**: Stop treating symptom patches as architecture. Make Mode C a thin
-controller over **one Orca Run**; Aichestra owns policy + deterministic gates
-only. Re-align artifacts already updated in this phase; complete code/tests.
-
-### P0 — ownership model
-
-- [x] T096 CRITICAL: Rename/document `OrchestratedWorkflow` as
-      `ModeCRunController`; state that canonical lifecycle is `orca_run_id`
-      (resume supported); local phases are policy/gate schedule mirrors, not a
-      competing orchestrator (FR-001/043/045/054; Constitution VI).
-- [x] T097 CRITICAL: Mode C agent steps (research, implement, writers,
-      lead_review) dispatch **only** via Orca under the same Run; remove
-      direct `local_worker` / `writer_fn`→lead / `_run_lead` Mode C paths
-      (FR-045/054).
-- [x] T098 CRITICAL: Lead review + maintenance gates receive adopted-worktree
-      change signals (diff/paths/status) — never silent parent-checkout review
-      when a child worktree was created (FR-055/057).
-- [x] T099 CRITICAL: Rewrite integration/contract tests that encode
-      dual-orchestrator fan-out (`lead.sent` / `worker.sent` as Mode C agents);
-      assert one `run_id`, Orca-only agent dispatch, worktree adoption
-      (FR-045/062).
-
-### P1 — remaining fidelity
-
-- [x] T100 HIGH: Spec Kit LARGE path invokes real skill/command flow or remains
-      hard-blocked until artifacts exist — no `status=recorded` fake success
-      (FR-028/063).
-      *(pending + hard-block; clarify metadata; speckit_execution marker)*
-- [x] T101 HIGH: Attachments delivered via Orca native attach when available
-      (close T087) (FR-058).
-- [x] T102 HIGH: Governance ADR/SPEC pending has an Orca task continuation path
-      (not dead-end) (FR-055).
-      *(one Orca governance task under same Run before hard-stop)*
+1. **This pass**: lock contract in spec/plan/tasks/AGENTS + architecture tests
+2. **Next pass**: remove/refactor dual-orchestrator production code (T108+)
+3. Run architecture contract tests continuously; delete obsolete assertions
+4. Do not claim Windows/Linux live validation from macOS-only execution
+5. Do not mark converged while `OrchestratedWorkflow` remains a worker scheduler

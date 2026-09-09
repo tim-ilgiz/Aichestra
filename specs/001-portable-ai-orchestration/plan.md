@@ -4,17 +4,61 @@
 
 **Input**: Feature specification from `/specs/001-portable-ai-orchestration/spec.md`
 
+**Status**: Architecture contract realigned. Production code is **not** yet
+fully compliant. Do not mark the feature converged until Mode C matches this
+plan.
+
 ## Summary
 
-Deliver a portable, project-agnostic AI development orchestration environment
-with Orca as the opt-in control plane, three user modes (Native / Orca
-Interactive / Orchestrated), Codex as preferred lead, Cursor as fallback lead,
-and an optional OpenCode + local-runtime worker. Cross-platform Python owns
-portable helper logic including machine-profiler, local-runtime-discovery,
-capability routing, verification-runner, and structural staging safety. OS
-bootstrap entrypoints wrap the shared core. CI and fixtures prove portability
-and isolation without consuming real provider quota. No Docker/VM required for
-Aichestra itself; no duplicate CAO/general orchestrator.
+Deliver a portable, project-agnostic AI development environment where:
+
+- **Mode A** — native Codex / Cursor (unintercepted)
+- **Mode B** — Orca interactive (manual; no automatic full Mode C)
+- **Mode C** — Aichestra → **exactly one Orca Run** → Orca owns workers/tasks/
+  worktrees/handoffs; Aichestra owns policy, discovery, config, and
+  deterministic gates/verification
+
+Cross-platform Python owns portable helpers. OS bootstrap entrypoints wrap the
+shared core. CI and fixtures prove portability without real provider quota.
+
+### Aichestra IS
+
+- bootstrap / update
+- discovery (Orca + providers)
+- policy and configuration layering
+- deterministic gates (classify / Spec Kit path, maintenance-reviewer,
+  verification-runner, security allowlists, context compaction)
+- Orca adapter (create/resume one Run; create tasks; read state; forward
+  attachments)
+
+### Aichestra is NOT
+
+- a general-purpose workflow engine
+- a worker scheduler
+- a session manager
+- a worktree manager (beyond thin policy checks)
+- a replacement for Orca
+- authorized to fall back to direct Codex/Cursor when Orca is missing (Mode C)
+
+### Forbidden Mode C shapes
+
+```text
+classify → run-create
+implement → another run-create
+phase report → another run-create
+review → another run-create
+```
+
+```text
+Aichestra → CodexProvider.execute_task()     # Mode C implement/review/writers
+Aichestra → CursorProvider.execute_task()
+Aichestra → LocalWorkerProvider.execute_task()  # Mode C research/writers
+```
+
+```text
+Orca unavailable → fallback directly to Codex
+project_root=None → Orca skipped → workflow continues
+```
 
 ## Technical Context
 
@@ -29,7 +73,8 @@ OS defaults + untracked machine-local + target-project + runtime overrides; no
 application database
 
 **Testing**: pytest unit/integration/contract/security tests; fake providers;
-fixture repositories; GitHub Actions OS matrix
+fixture repositories; GitHub Actions OS matrix; **architecture contract tests**
+for MODE-C-001–010 before further production realignment
 
 **Target Platform**: macOS, Windows, and Linux (native; WSL optional never
 required; Docker/VM not required for Aichestra)
@@ -43,10 +88,10 @@ time; research compaction keeps cloud handoff payloads bounded
 **Constraints**: No hard-coded home paths; no secrets/models/sessions in Git;
 no production SSH; CI must not use real Codex/Cursor quota; avoid extra daemons
 if Orca already supplies the capability; inspect current Orca docs before
-integration syntax
+integration syntax; **do not soft-pedal requirements to match current
+`OrchestratedWorkflow`**
 
-**Scale/Scope**: Single orchestration repository; ≥2 fixture projects; one
-initial platform feature covering bootstrap→providers→roles→security→CI
+**Scale/Scope**: Single orchestration repository; ≥2 fixture projects
 
 ## Constitution Check
 
@@ -55,12 +100,12 @@ initial platform feature covering bootstrap→providers→roles→security→CI
 | Principle | Status | Notes |
 |-----------|--------|-------|
 | I. Portability First | PASS | Python package + OS entrypoints; no fixed paths |
-| II. Graceful Degradation | PASS | Provider discovery with fakes/absent modes |
+| II. Graceful Degradation | PASS | Optional providers; Orca required only for Mode C; Mode A remains |
 | III. Minimum Maintenance Cost | PASS | maintenance-reviewer + conditional tests/docs |
 | IV. Security Is Structural | PASS | typed staging ops + sanitization outside prompts |
 | V. Verify, Don't Claim | PASS | CI matrix + truthful smoke reporting |
 | VI. Native Tools Remain Native | PASS | three modes; Orca opt-in; no command interception |
-| VII. Project Agnosticism | PASS | fixtures prove isolation; no app-specific assumptions |
+| VII. Project Agnosticism | PASS | fixtures prove isolation; Factory preserved |
 | VIII. One Canonical Source | PASS | Spec Kit + AGENTS.md + constitution; avoid doc sprawl |
 
 ## Project Structure
@@ -77,90 +122,71 @@ specs/001-portable-ai-orchestration/
     └── quality.md
 ```
 
-Optional Spec Kit research/data-model/contracts/quickstart artifacts are
-intentionally omitted to reduce documentation debt; durable decisions live here
-and in `spec.md`.
-
-### Source Code (repository root)
+### Source Code (target shape)
 
 ```text
 src/aichestra/
-├── __init__.py
-├── __main__.py             # python -m aichestra CLI entry
-├── cli.py                  # doctor / profile / bootstrap / update dispatch
-├── repo.py                 # arbitrary clone-path root resolution
-├── platform_detect.py      # OS detection helpers
-├── machine_profiler.py     # deterministic hardware facts
+├── cli.py                  # doctor / profile / bootstrap / update / orchestrate
+├── repo.py
+├── platform_detect.py
+├── machine_profiler.py     # capability facts (no Mac identity dependency)
 ├── config/
-│   ├── layering.py         # tracked → OS → machine-local → project → runtime
-│   └── hardware_profiles.py
+│   ├── layering.py         # includes per-provider enabled flags
+│   └── hardware_profiles.py  # capability tiers; fixture-only named examples
 ├── local_runtime/
-│   ├── base.py             # extensible runtime interface
-│   ├── discovery.py
-│   ├── ollama.py           # initial runtime
-│   ├── model_selector.py   # AVAILABLE/CAPABLE/ALLOWED/PREFERRED
-│   └── resources.py        # one-worker / pressure handling
 ├── providers/
 │   ├── discovery.py
-│   ├── base.py
-│   ├── orca.py
-│   ├── codex.py
+│   ├── orca.py             # Mode C control-plane adapter (one Run)
+│   ├── codex.py            # discovery + Mode A direct use (not Mode C exec)
 │   ├── cursor.py
-│   └── local_worker.py     # OpenCode + local runtime optional
+│   └── local_worker.py
 ├── orchestration/
-│   ├── modes.py            # Native / Interactive / Orchestrated
-│   ├── workflow.py         # Mode C thin run controller (policy + gates)
-│   ├── roles.py
-│   ├── research_compact.py # repository-researcher + compaction
+│   ├── modes.py            # A / B / C
+│   ├── mode_c.py           # thin: resolve project → policy → one Run → gates
+│   ├── roles.py            # preferred/fallback policy for Orca
+│   ├── research_compact.py # compaction helpers (dispatch via Orca)
 │   ├── maintenance_reviewer.py
-│   ├── writers.py          # test/doc preference helpers
-│   ├── verification.py     # verification-runner
-│   ├── handoff.py          # Codex→Cursor bounded context
-│   ├── worktrees.py        # serial/isolated edit policy
-│   ├── media_routing.py    # files/vision capability routing
+│   ├── writers.py          # preference helpers (dispatch via Orca)
+│   ├── verification.py
+│   ├── handoff.py          # inside existing Run when possible
+│   ├── media_routing.py
 │   ├── factory_preserve.py
-│   ├── speckit_policy.py
+│   ├── speckit_policy.py   # policy input — not a workflow engine
 │   └── maintenance_audit.py
 ├── security/
-│   ├── staging_ops.py      # typed diagnostic builders
-│   ├── staging_allowlist.py
-│   └── sanitize.py
 ├── doctor.py
 └── bootstrap/
-    └── core.py             # idempotent shared bootstrap/update logic
-
-bootstrap/
-├── macos/setup.sh
-├── windows/setup.ps1
-└── linux/setup.sh
-
-scripts/
-├── doctor.py
-├── machine_profile.py
-└── smoke_mac.py
-
-fixtures/
-├── project_a/              # Python/pytest sample
-└── project_b/              # Node sample (different layout)
-
-tests/
-├── unit/
-├── integration/
-├── contract/
-├── security/
-└── fakes/
-
-.github/workflows/
-└── ci.yml                  # macOS + Windows + Linux; fake providers
-
-policies/                   # tracked portable defaults
-└── defaults.yml
 ```
 
-**Structure Decision**: Single Python package at repo root with thin OS
-bootstrap scripts under `bootstrap/`. No microservice/daemon layer beyond what
-Orca already provides. Fixtures and fake providers live in-repo for isolation
-and CI.
+**Remove or radically shrink** (current conflicting components):
+
+| Component | Why obsolete / conflicting |
+|-----------|----------------------------|
+| `orchestration/workflow.py` `OrchestratedWorkflow` / `ModeCRunController` as a multi-phase agent scheduler | Second general-purpose orchestration engine; owns phase machine, agent switching, writers, research, edit lease, provider fallback |
+| Direct Mode C paths calling Codex/Cursor/local-worker `execute_task` | Violates MODE-C-003/004 |
+| Custom worktree/session manager + `.aichestra/edit.lock` if it duplicates Orca | Violates FR-057 / “worktrees belong to Orca” |
+| Production `M4_PRO_24GB` / host-identity special cases | Violates capability-based profiling |
+| Tests asserting “Orca unavailable → lead adapter” or “project_root=None → classify succeeds” | Lock wrong architecture |
+
+Allowed to remain as **small deterministic helpers**: classify, maintenance
+decision, verification runner, provider/security policy, compaction.
+
+## Mode C control flow (target)
+
+```text
+1. resolve target project root (fail if unresolved)
+2. load policy/config (providers.*.enabled, preferred lead, local.enabled)
+3. discover Orca + providers
+4. fail if Orca unavailable / unreachable / cannot create Run
+5. classify task / Spec Kit path (deterministic policy helper)
+6. create ONE Orca Run (or resume one run_id)
+7. create tasks/workers inside this run (research, implement, writers, review)
+8. perform deterministic maintenance/verification gates locally
+9. feed gate results into the SAME run
+10. obtain final review/state from that run
+```
+
+Canonical lifecycle identity: Orca `run_id`.
 
 ## Architecture Notes
 
@@ -168,90 +194,61 @@ and CI.
 
 1. Tracked common defaults/policies
 2. OS-specific tracked defaults
-3. Untracked machine-local overrides (models/providers/local.enabled)
+3. Untracked machine-local overrides (models/providers/local.enabled /
+   providers.codex|cursor|local-worker.enabled)
 4. Target-project configuration
 5. Runtime/task override
-Resolution never requires a fixed home-directory string in tracked files.
 
 ### Three modes
 
 - **A Native**: Codex/Cursor used directly; Aichestra does not intercept.
-- **B Orca Interactive**: single-agent session; no automatic full orchestration.
-- **C Mode C**: Aichestra creates/resumes **one Orca Run**, applies policy and
-  deterministic gates; Orca owns tasks/workers/worktrees/agent scheduling.
-  Mode C fails closed if Orca is unavailable (no direct Codex/Cursor fallback).
+- **B Orca Interactive**: manual Orca use; no automatic full Mode C.
+- **C Mode C**: exactly one Orca Run; fails closed without Orca or project root.
 
-### Provider discovery
+### Graceful degradation (precise)
 
-Discovery returns structured availability including failure classes where
-practical (quota, auth, network, timeout, crash, cancel). Missing
-Codex/Cursor/local worker yields degraded but useful modes. Native Codex/Cursor
-invocation paths are not wrapped globally.
+| Condition | Behavior |
+|-----------|----------|
+| Codex missing | Orca may use Cursor |
+| Cursor missing | Orca may use Codex |
+| local-worker missing | cloud-oriented Mode C |
+| both Codex and Cursor unavailable | fail or degraded Orca flow per remaining workers |
+| **Orca missing** | **Mode C FAIL**; Mode A remains |
 
 ### Orca integration
 
-Inspect current installed/version-matched Orca documentation before wiring
-adapters. Prefer Orca primitives for runs, tasks, workers, worktrees, diffs,
-handoff, and provider visibility. **ONE user task = ONE Orca Run** (create once,
-reuse `run_id` for all task-create/worker-start; resume by `run_id`).
-Child worktree results MUST be adopted before verification/reviewer.
-Smallest reliable adapters only; no CAO / second workflow engine.
+Inspect current Orca docs before wiring. Prefer Orca primitives for runs,
+tasks, workers, worktrees, diffs, handoff, attachments, and provider visibility.
+**ONE Mode C invocation = ONE Orca Run.** Child worktree ownership is Orca’s;
+adopt results before verification/review. Smallest reliable adapters only.
 
-### Machine profiler + local runtime
+### Attachments
 
-`machine_profiler` uses `platform`, `os`, `shutil`, and OS-specific safe probes.
-`local_runtime` abstracts discovery; Ollama is the first implementation.
-Selection is capability-based. Hardware profiles suggest model class (M4 Pro
-24 GB example → conservative ~14B, one worker) without committing weights,
-host paths, or global mandatory model ids.
+`--attach` paths MUST reach Orca via supported attachment/file primitives.
+If the installed Orca version lacks the primitive: document limitation; do not
+fake success. Vision tasks MUST NOT go to text-only local models.
 
-### Mode C policy schedule (not a second orchestrator)
+### Machine profiler
 
-Policy order: classify → research if useful → lead (Codex→Cursor via Orca) →
-maintenance-reviewer → optional test/docs writers → verification-runner →
-lead review.
-
-- **Agent steps** → Orca tasks/workers on the same Run (child worktree for edits).
-- **Gates** → Aichestra local: Spec Kit scale/heuristics, maintenance-reviewer,
-  verification-runner (exit codes), against adopted worktree.
-- Canonical lifecycle identity is the Orca `run_id`, not a Python phase engine.
-
-### Staging safety
-
-Typed diagnostic operations build argv arrays. Allowlist/deny execute before
-any remote shell. Reject sudo, rm, restart/stop, docker rm/stop, kubectl
-apply/delete, package installs, chmod/chown, and remote writes. Sanitize
-outputs before cloud handoff. Production SSH targets have no integration path.
-Never inspect/copy private key contents.
+Capability-based: OS, CPU, RAM, disk, GPU/accelerator, installed runtimes and
+models. Order stronger tiers before weaker ones (`powerful` before `capable`).
+Local inference always optional.
 
 ### Quota handoff
 
-Prefer automatic Codex→Cursor fallback only if Orca primitives make it reliable;
-otherwise document and implement one-action manual handoff preserving bounded
-task context (FR-036). Bounded packet fields: original request, accepted
-decisions, repo/worktree, git status/diff, workflow phase, completed/remaining
-work, known failures, next action, compacted research. Do not hard-code fragile
-stderr matching alone. Do not transfer huge full transcripts.
+Prefer Codex→Cursor continuation **inside** the existing Orca Run. Manual
+fallback must be one executable action with bounded context, not a placeholder
+shell recipe.
 
-### Maintenance audit
+### Spec Kit
 
-Optional analysis-only first phase. Doc classes: KEEP_CANONICAL, MERGE, UPDATE,
-ARCHIVE_HISTORY, GENERATED_OR_DERIVABLE, OBSOLETE, DELETE_CANDIDATE. Test
-classes: HIGH_VALUE, BUSINESS_INVARIANT, INTEGRATION_BEHAVIOR, CONTRACT,
-SECURITY_OR_MONEY_CRITICAL, DUPLICATE, IMPLEMENTATION_DETAIL, TRIVIAL,
-OVER_MOCKED, REDUNDANT_PARAMETER_VARIATION, FLAKY, OBSOLETE,
-CONSOLIDATION_CANDIDATE. Cleanup is separate and reviewable.
+SMALL / MEDIUM / LARGE-HIGH-RISK remain policy inputs to Orca — not a reason to
+keep a Python phase engine that schedules agents.
 
-### Files / vision routing
+### Staging safety / CI / maintenance audit
 
-Prefer Orca native attachments. Provide a small routing helper that marks
-vision-required tasks and refuses text-only local models. Large text inputs may
-be locally summarized before cloud lead handoff.
-
-### CI
-
-Matrix on macOS, Windows, Linux. Inject fake providers. Never call real
-Codex/Cursor account APIs in CI.
+Unchanged in intent from prior plan: structural staging allowlists; fake
+providers in CI; analysis-only maintenance audit classes.
 
 ## Complexity Tracking
 
@@ -260,3 +257,13 @@ Codex/Cursor account APIs in CI.
 | Violation | Why Needed | Simpler Alternative Rejected Because |
 |-----------|------------|-------------------------------------|
 | — | — | — |
+
+## Implementation sequencing (after this contract update)
+
+1. Land architecture contract tests (MODE-C-001–010) — this pass.
+2. Refactor/remove dual-orchestrator `workflow.py` into thin Mode C controller.
+3. Ensure all agent dispatch is Orca-only under one `run_id`.
+4. Rework/remove duplicate worktree edit-lock if Orca owns worktrees.
+5. Complete real attachment forwarding; provider enable flags; handoff-in-run.
+6. Delete obsolete tests; keep minimal regression net.
+7. Only then mark feature tasks complete / converge.

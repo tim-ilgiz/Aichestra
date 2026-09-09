@@ -143,9 +143,8 @@ def test_maintenance_uses_change_signals_not_defaults(tmp_path: Path) -> None:
             project_root=str(tmp_path),
             task_prompt="change authorization behavior",
             # No maintenance_kwargs — must infer from summary / paths.
-            writer_fn=lambda _state, _phase: fake_codex("success").execute_task(
-                ProviderTaskRequest(prompt="write")
-            ),
+            # Writers execute via Orca only; do not inject direct lead writer_fn.
+            writer_fn=None,
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
