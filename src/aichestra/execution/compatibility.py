@@ -18,11 +18,18 @@ def load_compatibility_bindings(
 
     A binding without ``model`` means ``runtime`` supports ``provider`` and the
     resolver expands discovered models. It does not mean "no model forever".
+
+    If any explicit ``execution.bindings`` entry exists for the same
+    ``(runtime, provider)`` pair as a legacy compatibility binding, the
+    explicit binding(s) supersede that legacy pair completely — including when
+    the explicit row is a model wildcard and legacy carries a concrete model.
+    Unrelated explicit pairs do not suppress unrelated legacy pairs.
     """
     execution = config.get("execution", {})
     raw = execution.get("bindings", ())
     bindings: list[Compatibility] = []
     seen: set[tuple[str, str | None, str | None]] = set()
+    explicit_pairs: set[tuple[str, str | None]] = set()
     if isinstance(raw, (list, tuple)):
         for entry in raw:
             binding = _binding_from_entry(entry)
@@ -32,11 +39,14 @@ def load_compatibility_bindings(
             if key in seen:
                 raise ValueError(f"Duplicate compatibility binding: {key}")
             seen.add(key)
+            explicit_pairs.add((binding.runtime, binding.provider))
             bindings.append(binding)
     for legacy in legacy_local_compatibility(config):
+        if (legacy.runtime, legacy.provider) in explicit_pairs:
+            # Explicit runtime/provider pair supersedes the legacy seam.
+            continue
         key = (legacy.runtime, legacy.provider, legacy.model)
         if key in seen:
-            # Explicit config wins over legacy alias.
             continue
         seen.add(key)
         bindings.append(legacy)

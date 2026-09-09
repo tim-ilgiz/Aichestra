@@ -15,11 +15,14 @@ DEFAULT_RUNTIME_BINARIES: dict[str, tuple[str, ...]] = {
     "opencode": ("opencode",),
 }
 
-# Tracked defaults for well-known agent processes (tools/attachments), not
-# model modalities. Config / probe facts override or extend these.
+# Conservative static capabilities for well-known agent processes. Only facts
+# that are safe without proving provider/model selection belong here. Model-
+# dependent modalities (e.g. vision) must come from proven runtime/session or
+# provider+model intersection later — never optimistic static defaults.
+# Config / probe facts may override or extend these.
 TRACKED_RUNTIME_CAPABILITY_DEFAULTS: dict[str, frozenset[str]] = {
     "codex": frozenset({"code_edit", "repository_read", "shell"}),
-    "cursor": frozenset({"code_edit", "repository_read", "shell", "vision"}),
+    "cursor": frozenset({"code_edit", "repository_read", "shell"}),
     "opencode": frozenset({"code_edit", "repository_read", "shell"}),
 }
 

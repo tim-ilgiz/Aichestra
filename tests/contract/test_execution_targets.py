@@ -483,6 +483,115 @@ def test_configuration_and_legacy_are_compatibility_inputs():
     assert not legacy_local_compatibility(config)[0].enabled
 
 
+def test_explicit_wildcard_supersedes_legacy_local_model_without_duplicate():
+    """Explicit opencode/ollama wildcard wins over legacy local.model=qwen."""
+    config = {
+        "local": {"enabled": True, "model": "qwen"},
+        "providers": {"local_worker": {"enabled": True}},
+        "execution": {
+            "bindings": [
+                {"runtime": "opencode", "provider": "ollama"},
+            ],
+        },
+    }
+    bindings = load_compatibility_bindings(config)
+    assert len(bindings) == 1
+    assert bindings[0] == Compatibility(runtime="opencode", provider="ollama")
+    assert bindings[0].model is None
+    facts = DiscoveryFacts(
+        runtimes=(
+            AgentRuntime(
+                "opencode",
+                True,
+                capabilities=Caps(
+                    frozenset({"code_edit", "repository_read", "shell", "code"})
+                ),
+            ),
+        ),
+        providers=(
+            ModelProvider(
+                "ollama",
+                True,
+                endpoint="http://127.0.0.1:11434",
+                locality=Locality.LOCAL,
+            ),
+        ),
+        models=(
+            Model(
+                "qwen",
+                "ollama",
+                True,
+                capabilities=Caps(frozenset({"code"})),
+            ),
+        ),
+        machine=MachineCapabilities("linux", 16),
+    )
+    targets = resolve_targets(facts, bindings)
+    assert len(targets) == 1
+    assert targets[0].model is not None and targets[0].model.id == "qwen"
+    assert targets[0].id == ExecutionTargetKey(
+        "opencode", "ollama", "qwen"
+    ).target_id()
+
+
+@pytest.mark.parametrize("legacy_model", ["qwen", "other"])
+def test_explicit_exact_model_supersedes_legacy_local_pair(legacy_model):
+    """Legacy opencode/ollama pair must not add a second target."""
+    config = {
+        "local": {"enabled": True, "model": legacy_model},
+        "providers": {"local_worker": {"enabled": True}},
+        "execution": {
+            "bindings": [
+                {
+                    "runtime": "opencode",
+                    "provider": "ollama",
+                    "model": "qwen",
+                },
+            ],
+        },
+    }
+    bindings = load_compatibility_bindings(config)
+    assert len(bindings) == 1
+    assert bindings[0].model == "qwen"
+    facts = DiscoveryFacts(
+        runtimes=(AgentRuntime("opencode", True),),
+        providers=(ModelProvider("ollama", True),),
+        models=(
+            Model("qwen", "ollama", True),
+            Model("other", "ollama", True),
+        ),
+        machine=MachineCapabilities("linux", 16),
+    )
+    targets = resolve_targets(facts, bindings)
+    assert len(targets) == 1
+    assert targets[0].model is not None and targets[0].model.id == "qwen"
+
+
+def test_unrelated_explicit_bindings_do_not_suppress_legacy_pair():
+    config = {
+        "local": {"enabled": True, "model": "qwen"},
+        "providers": {"local_worker": {"enabled": True}},
+        "execution": {
+            "bindings": [
+                {"runtime": "cursor"},
+                {"runtime": "opencode", "provider": "openrouter"},
+            ],
+        },
+    }
+    bindings = load_compatibility_bindings(config)
+    legacy = [
+        b
+        for b in bindings
+        if b.runtime == "opencode" and b.provider == "ollama"
+    ]
+    assert len(legacy) == 1
+    assert legacy[0].model == "qwen"
+    assert Compatibility(runtime="cursor") in bindings
+    assert (
+        Compatibility(runtime="opencode", provider="openrouter") in bindings
+    )
+
+
 @pytest.mark.parametrize(
     "endpoint,expected",
     [
@@ -566,6 +675,31 @@ def test_tracked_runtime_capabilities_are_non_empty_for_builtins(monkeypatch):
     by_id = {r.id: r for r in facts.runtimes}
     for runtime_id, expected in TRACKED_RUNTIME_CAPABILITY_DEFAULTS.items():
         assert expected <= by_id[runtime_id].capabilities.names
+        assert "vision" not in expected
+
+
+def test_providerless_builtin_runtime_does_not_advertise_unproven_vision(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "aichestra.execution.runtimes.which_binary", lambda names: "/bin/fake"
+    )
+    facts = discover_execution_facts(
+        {}, machine=profile(), provider_probes=[]
+    )
+    by_id = {r.id: r for r in facts.runtimes}
+    for runtime_id in TRACKED_RUNTIME_CAPABILITY_DEFAULTS:
+        assert "vision" not in by_id[runtime_id].capabilities.names
+    providerless = resolve_targets(
+        facts,
+        tuple(
+            Compatibility(runtime=runtime_id)
+            for runtime_id in TRACKED_RUNTIME_CAPABILITY_DEFAULTS
+        ),
+    )
+    assert providerless
+    assert all("vision" not in t.capabilities.names for t in providerless)
+    assert all(t.provider is None and t.model is None for t in providerless)
 
 
 def test_duplicate_facts_fail_closed():
