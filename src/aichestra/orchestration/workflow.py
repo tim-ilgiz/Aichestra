@@ -61,6 +61,14 @@ from aichestra.providers.base import (
     ProviderTaskRequest,
     ProviderTaskResult,
 )
+from aichestra.execution.domain import ExecutionPolicy, ExecutionTarget
+from aichestra.execution.serialize import (
+    CANONICAL_EXECUTION_FIELDS,
+    EXECUTION_TARGET_CONTRACT_VERSION,
+    LEGACY_COMPATIBILITY_FIELDS,
+    serialize_execution_policy,
+    serialize_execution_target,
+)
 from aichestra.security.sanitize import sanitize_mapping
 
 
@@ -246,11 +254,23 @@ class WorkflowBindings:
     local_model_ref: str | None = None
     local_capabilities: tuple[str, ...] = ()
     installed_models: tuple[dict[str, Any], ...] = ()
+    # Canonical ExecutionTarget layer (T172). Empty until CLI/discovery fills it.
+    execution_targets: tuple[ExecutionTarget, ...] = ()
+    execution_policy: ExecutionPolicy = field(default_factory=ExecutionPolicy)
+    # TODO(T173): fail closed when no runnable bootstrap ExecutionTarget exists
+    # once T174/T175 prove launch strategies. Do not fail on unsupported-only
+    # targets during T172 (launch proof not implemented yet).
 
 
 @dataclass
 class ModeCPolicyPackage:
-    """Policy + ProjectContext package handed to Orca (not a worker schedule)."""
+    """Policy + ProjectContext package handed to Orca (not a worker schedule).
+
+    Canonical execution facts: ``execution_targets`` + ``execution_policy``.
+    Legacy preferred_lead / local_* / provider_policy remain as secondary
+    compatibility seams for existing Orca adapter bootstrap — not the source of
+    truth for new inner-worker policy.
+    """
 
     run_id: str
     task_prompt: str
@@ -265,6 +285,9 @@ class ModeCPolicyPackage:
     local_capabilities: tuple[str, ...] = ()
     installed_models: tuple[dict[str, Any], ...] = ()
     provider_policy: dict[str, Any] = field(default_factory=dict)
+    execution_targets: tuple[dict[str, Any], ...] = ()
+    execution_policy: dict[str, Any] = field(default_factory=dict)
+    execution_target_contract_version: int = EXECUTION_TARGET_CONTRACT_VERSION
     speckit_scale: str = "small"
     speckit_steps: tuple[str, ...] = ()
     attachments: tuple[str, ...] = ()
@@ -279,6 +302,12 @@ class ModeCPolicyPackage:
             "research_query": self.research_query,
             "project_root": self.project_root,
             "project_context": dict(self.project_context),
+            # Canonical ExecutionTarget contract (T172).
+            "execution_target_contract_version": self.execution_target_contract_version,
+            "execution_targets": [dict(t) for t in self.execution_targets],
+            "execution_policy": dict(self.execution_policy),
+            "canonical_execution_fields": list(CANONICAL_EXECUTION_FIELDS),
+            # Legacy compatibility seams — secondary; not inner-worker SoT.
             "preferred_lead": self.preferred_lead,
             "fallback_lead": self.fallback_lead,
             "local_enabled": self.local_enabled,
@@ -287,15 +316,17 @@ class ModeCPolicyPackage:
             "local_capabilities": list(self.local_capabilities),
             "installed_models": [dict(m) for m in self.installed_models],
             "provider_policy": dict(self.provider_policy),
+            "legacy_compatibility_fields": list(LEGACY_COMPATIBILITY_FIELDS),
             "speckit_scale": self.speckit_scale,
             "speckit_steps": list(self.speckit_steps),
             "attachments": list(self.attachments),
             "classify": dict(self.classify),
             "media_routing": dict(self.media_routing) if self.media_routing else None,
             "precedence": list(self.precedence),
-            # Explicit: Aichestra does not schedule agent phases.
+            # Explicit: Aichestra does not schedule agent phases / inner workers.
             "orchestration_owner": "orca",
             "aichestra_role": "policy_context_gates",
+            "inner_worker_selection_owner": "coordinator_under_orca",
         }
 
 
@@ -667,8 +698,27 @@ class ModeCRunController:
                 "policy_package": package.to_dict(),
                 "project_context": package.project_context,
                 "worktree": "current",
-                # Capability hints for Orca — not Aichestra worker scheduling.
+                # Canonical ExecutionTarget facts for the coordinator (T172).
+                "execution_targets": list(package.execution_targets),
+                "execution_policy": dict(package.execution_policy),
+                "execution_target_contract_version": (
+                    package.execution_target_contract_version
+                ),
+                # Capability hints — ExecutionTargets are canonical; legacy secondary.
                 "capabilities": {
+                    "execution_targets": list(package.execution_targets),
+                    "execution_policy": dict(package.execution_policy),
+                    "legacy_compatibility": {
+                        "preferred_lead": package.preferred_lead,
+                        "fallback_lead": package.fallback_lead,
+                        "local_enabled": package.local_enabled,
+                        "local_endpoint": package.local_endpoint,
+                        "local_model_ref": package.local_model_ref,
+                        "local_capabilities": list(package.local_capabilities),
+                        "installed_models": list(package.installed_models),
+                        "provider_policy": package.provider_policy,
+                    },
+                    # Keep flat legacy keys for existing adapter tests/seams.
                     "preferred_lead": package.preferred_lead,
                     "fallback_lead": package.fallback_lead,
                     "local_enabled": package.local_enabled,
@@ -686,6 +736,15 @@ class ModeCRunController:
                 "Orca owns workflow graph, task ordering, workers, handoffs, "
                 "and worktrees. Honor project-owned AGENTS/Spec Kit/Factory "
                 "instructions from project_context with stated precedence. "
+                "The coordinator owns concrete inner worker selection and DAG. "
+                "Choose inner workers only from allowed/runnable targets once "
+                "launch-capable targets are available. "
+                "Do not infer a worker from a raw ModelProvider. "
+                "Do not treat local as OpenCode/Ollama. "
+                "Do not use product-name phase routing. "
+                "Select inner workers from allowed ExecutionTargets using "
+                "capabilities, locality, availability, launchability, and "
+                "policy preferences. "
                 f"Objective: {package.task_prompt}"
             ),
             role=MODE_C_HANDOFF_ROLE,
@@ -887,6 +946,10 @@ class ModeCRunController:
         steps = tuple(
             (self.state.metadata.get("speckit_path") or {}).get("steps") or ()
         )
+        serialized_targets = tuple(
+            serialize_execution_target(t) for t in self.bindings.execution_targets
+        )
+        serialized_policy = serialize_execution_policy(self.bindings.execution_policy)
         return ModeCPolicyPackage(
             run_id=run_id,
             task_prompt=self.bindings.task_prompt or "Mode C task",
@@ -903,6 +966,9 @@ class ModeCRunController:
             local_capabilities=tuple(self.bindings.local_capabilities or ()),
             installed_models=tuple(self.bindings.installed_models or ()),
             provider_policy=dict(self.state.metadata.get("provider_policy") or {}),
+            execution_targets=serialized_targets,
+            execution_policy=serialized_policy,
+            execution_target_contract_version=EXECUTION_TARGET_CONTRACT_VERSION,
             speckit_scale=str(scale),
             speckit_steps=tuple(str(s) for s in steps),
             attachments=tuple(self.bindings.attachments or ()),

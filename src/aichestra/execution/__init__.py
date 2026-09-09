@@ -26,17 +26,29 @@ from .model_providers import (
     register_provider_probe,
     unregister_provider_probe,
 )
+from .serialize import (
+    CANONICAL_EXECUTION_FIELDS,
+    EXECUTION_TARGET_CONTRACT_VERSION,
+    LEGACY_COMPATIBILITY_FIELDS,
+    build_execution_policy,
+    resolve_mode_c_execution,
+    serialize_execution_policy,
+    serialize_execution_target,
+)
 from .targets import combine_capabilities, expand_compatibility, resolve_targets
 
 __all__ = [
     "AgentRuntime",
+    "CANONICAL_EXECUTION_FIELDS",
     "Compatibility",
     "DiscoveredModel",
     "DiscoveryFacts",
+    "EXECUTION_TARGET_CONTRACT_VERSION",
     "ExecutionCapabilities",
     "ExecutionPolicy",
     "ExecutionTarget",
     "ExecutionTargetKey",
+    "LEGACY_COMPATIBILITY_FIELDS",
     "LaunchBindingKey",
     "LaunchCapability",
     "LaunchStrategy",
@@ -47,6 +59,7 @@ __all__ = [
     "ModelProviderProbe",
     "PROVIDER_PROBE_REGISTRY",
     "ProviderProbeRegistry",
+    "build_execution_policy",
     "combine_capabilities",
     "discover_execution_facts",
     "endpoint_locality",
@@ -55,6 +68,9 @@ __all__ = [
     "load_compatibility_bindings",
     "provider_locality",
     "register_provider_probe",
+    "resolve_mode_c_execution",
     "resolve_targets",
+    "serialize_execution_policy",
+    "serialize_execution_target",
     "unregister_provider_probe",
 ]

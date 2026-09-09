@@ -641,7 +641,7 @@ security, deterministic gates and verification.
       Disabling one runtime/provider/model removes only affected targets.
       (MODE-C-017–020; FR-005/047/050/051/065/066/069)
 
-- [ ] T172 HIGH: Pass resolved ExecutionTargets and their capabilities/policy
+- [x] T172 HIGH: Pass resolved ExecutionTargets and their capabilities/policy
       into the generic coordinator bootstrap context.
 
       Coordinator must select inner workers using capabilities/policy.
@@ -847,7 +847,9 @@ are complete.
 - T114–T116 parallel once T111 lands
 - After T154–T157: T160–T162 can proceed in parallel with T158–T159 once
   controller seams are identified
-- T169 → T170 → T171 → T172/T173/T174 (T175 depends on T174 proof);
+- T169 → T170 → T171 → T172 → T174 → T175 → T173
+  (T173 requires a runnable bootstrap ExecutionTarget; runnable requires
+  proven launch strategy/proof from T174/T175);
   T176 can proceed in parallel with T169–T175 once Orca adapter seams exist
 - T167/T168 remain after production ExecutionTarget/launch work lands
 

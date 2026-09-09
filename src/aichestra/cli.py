@@ -325,6 +325,10 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         preferred_lead_name,
         resolve_config,
     )
+    from aichestra.execution import (
+        EXECUTION_TARGET_CONTRACT_VERSION,
+        resolve_mode_c_execution,
+    )
     from aichestra.orchestration.modes import Mode
     from aichestra.orchestration.roles import select_lead
     from aichestra.orchestration.verification import verification_commands_from_config
@@ -354,6 +358,8 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         no_cursor=bool(getattr(args, "no_cursor", False)),
         no_local=bool(getattr(args, "no_local", False)),
     )
+    # Canonical ExecutionTarget pipeline (T172). No synthetic LaunchCapability.
+    execution_targets, execution_policy, _facts = resolve_mode_c_execution(cfg)
     local_cfg = cfg.get("local") if isinstance(cfg.get("local"), dict) else {}
     ollama_host = local_cfg.get("ollama_host") or local_cfg.get("endpoint")
     preferred_ids = _local_cfg_list(local_cfg, "preferred_models", "preferred_ids")
@@ -451,6 +457,8 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         local_model_ref=local_model_ref,
         local_capabilities=local_capabilities,
         installed_models=installed_models,
+        execution_targets=execution_targets,
+        execution_policy=execution_policy,
     )
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
@@ -473,6 +481,8 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         "attachments": list(attachments),
         "orca_run_id": state.metadata.get("orca_run_id"),
         "resume_run_id": bindings.resume_run_id,
+        "execution_target_count": len(execution_targets),
+        "execution_target_contract_version": EXECUTION_TARGET_CONTRACT_VERSION,
     }
     sys.stdout.write(json.dumps(payload, indent=2, default=str) + "\n")
     return 0 if not state.failed and not state.stopped else 1
