@@ -1,8 +1,9 @@
 """Architecture contract: Mode C single-Orca-Run invariants (MODE-C-001–016).
 
-These tests lock the *target* architecture after Phase 24: Orca owns the
-workflow graph; Aichestra supplies ProjectContext, policy/capabilities, one
-Run handoff, and deterministic gates.
+These tests lock the *target* architecture after Phase 24: coordinator under
+Orca owns the concrete workflow/DAG and inner worker selection; Orca owns
+canonical Run/Task/Dispatch/worker/terminal/worktree lifecycle; Aichestra
+supplies discovery, ExecutionTargets, policy, security, and deterministic gates.
 """
 
 from __future__ import annotations
@@ -392,7 +393,11 @@ def test_local_policy_forwarded_not_scheduled(tmp_path: Path) -> None:
     assert not state.failed, state.failed
     package = state.metadata.get("mode_c_policy_package") or {}
     assert package.get("local_enabled") is False
-    assert package.get("orchestration_owner") == "orca"
+    assert package.get("canonical_lifecycle_owner") == "orca"
+    assert package.get("workflow_dag_owner") == "coordinator_under_orca"
+    assert package.get("inner_worker_selection_owner") == "coordinator_under_orca"
+    assert package.get("aichestra_role") == "policy_context_gates"
+    assert "orchestration_owner" not in package
     roles = {(r.role or "") for r in orca.sent}
     assert "research" not in roles
     assert MODE_C_HANDOFF_ROLE in roles
@@ -474,8 +479,10 @@ def test_mode_c_does_not_own_general_purpose_agent_phase_scheduler(tmp_path: Pat
     state = wf.run_all()
     assert not state.failed, state.failed
     assert state.metadata.get("orchestration_shape_agnostic") is True
-    assert state.metadata.get("workflow_owner") == "orca"
+    assert state.metadata.get("canonical_lifecycle_owner") == "orca"
+    assert state.metadata.get("workflow_dag_owner") == "coordinator_under_orca"
     assert state.metadata.get("aichestra_owns_agent_phases") is False
+    assert "workflow_owner" not in state.metadata
     agent_roles = [
         (r.role or "")
         for r in orca.sent

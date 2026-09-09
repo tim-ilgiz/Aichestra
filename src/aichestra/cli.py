@@ -169,7 +169,10 @@ def build_parser() -> argparse.ArgumentParser:
     orch_p.add_argument(
         "--no-local",
         action="store_true",
-        help="Disable local-worker for this run",
+        help=(
+            "Forbid all locality=local ExecutionTargets for this invocation "
+            "(also sets legacy local.enabled=false)"
+        ),
     )
     orch_p.add_argument("--json", action="store_true", default=True)
 

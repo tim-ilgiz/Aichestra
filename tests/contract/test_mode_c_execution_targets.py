@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import sys
 from pathlib import Path
 
@@ -24,7 +25,9 @@ from aichestra.execution.serialize import (
     CANONICAL_EXECUTION_FIELDS,
     EXECUTION_TARGET_CONTRACT_VERSION,
     LEGACY_COMPATIBILITY_FIELDS,
+    OWNERSHIP_METADATA,
     resolve_mode_c_execution,
+    safe_endpoint_for_context,
     serialize_execution_policy,
     serialize_execution_target,
 )
@@ -32,6 +35,7 @@ from aichestra.execution.targets import resolve_targets
 from aichestra.orchestration.modes import Mode
 from aichestra.orchestration.workflow import (
     MODE_C_HANDOFF_ROLE,
+    ModeCPolicyPackage,
     ModeCRunController,
     WorkflowBindings,
 )
@@ -245,9 +249,13 @@ def test_coordinator_context_receives_capabilities_locality_policy(
     )
     prompt = handoff.prompt or ""
     assert "ExecutionTargets" in prompt
+    assert "Coordinator running under Orca owns the concrete workflow/DAG" in prompt
+    assert "Orca owns canonical Run/Task/Dispatch lifecycle" in prompt
     assert "Do not infer a worker from a raw ModelProvider" in prompt
     assert "Do not treat local as OpenCode/Ollama" in prompt
     assert "Do not use product-name phase routing" in prompt
+    assert "Orca owns workflow graph" not in prompt
+    assert "Orca owns task ordering" not in prompt
 
 
 def test_product_id_change_does_not_require_workflow_branch(tmp_path: Path) -> None:
@@ -300,7 +308,10 @@ def test_execution_targets_do_not_schedule_aichestra_inner_workers(
         assert forbidden not in roles
     package = state.metadata["mode_c_policy_package"]
     assert package["inner_worker_selection_owner"] == "coordinator_under_orca"
-    assert package["orchestration_owner"] == "orca"
+    assert package["workflow_dag_owner"] == "coordinator_under_orca"
+    assert package["canonical_lifecycle_owner"] == "orca"
+    assert package["aichestra_role"] == "policy_context_gates"
+    assert "orchestration_owner" not in package
 
 
 def test_legacy_fields_marked_secondary_compatibility(tmp_path: Path) -> None:
@@ -387,3 +398,178 @@ def test_serialize_execution_policy_round_trip_shape() -> None:
     assert data["disabled_providers"] == ["y"]
     assert data["disabled_models"] == [["y", "m"]]
     assert data["allowed_localities"] == ["cloud"]
+
+
+def test_no_local_forbids_all_local_execution_targets() -> None:
+    """CLI --no-local must forbid locality=local via ExecutionPolicy, agnostic of ids."""
+    from aichestra.config.layering import apply_provider_enable_overrides
+
+    config = {
+        "local": {"enabled": True},
+        "execution": {
+            "runtimes": {
+                "acme-agent": {
+                    "enabled": True,
+                    "binaries": (),
+                    "locality": "local",
+                    "capabilities": ["code_edit"],
+                },
+                "sky-agent": {
+                    "enabled": True,
+                    "binaries": (),
+                    "locality": "cloud",
+                    "capabilities": ["code_edit"],
+                },
+            },
+            "model_providers": {
+                "home-vllm": {
+                    "enabled": True,
+                    "endpoint": "http://127.0.0.1:8000",
+                    "locality": "local",
+                    "models": {
+                        "lab": {"available": True, "capabilities": ["code"]},
+                    },
+                },
+                "cloud-llm": {
+                    "enabled": True,
+                    "endpoint": "https://api.example.com",
+                    "locality": "cloud",
+                    "models": {
+                        "pro": {"available": True, "capabilities": ["code"]},
+                    },
+                },
+            },
+            "bindings": [
+                {
+                    "runtime": "acme-agent",
+                    "provider": "home-vllm",
+                    "model": "lab",
+                },
+                {
+                    "runtime": "sky-agent",
+                    "provider": "cloud-llm",
+                    "model": "pro",
+                },
+            ],
+            # Explicit localities including local — CLI override still wins.
+            "policy": {
+                "allowed_localities": ["local", "remote", "cloud"],
+            },
+        },
+    }
+
+    normal_targets, normal_policy, _ = resolve_mode_c_execution(config)
+    by_runtime = {t.runtime.id: t for t in normal_targets}
+    assert "acme-agent" in by_runtime
+    assert by_runtime["acme-agent"].locality is Locality.LOCAL
+    assert by_runtime["acme-agent"].allowed is True
+    assert Locality.LOCAL in normal_policy.allowed_localities
+
+    no_local_cfg = apply_provider_enable_overrides(config, no_local=True)
+    assert no_local_cfg["local"]["enabled"] is False  # legacy seam preserved
+    targets, policy, _ = resolve_mode_c_execution(no_local_cfg)
+    assert Locality.LOCAL not in policy.allowed_localities
+    assert Locality.CLOUD in policy.allowed_localities
+    by_runtime = {t.runtime.id: t for t in targets}
+    assert by_runtime["acme-agent"].allowed is False
+    assert by_runtime["sky-agent"].allowed is True
+    # Source must not branch on product/provider names.
+    from aichestra.config import layering as layering_mod
+
+    src = inspect.getsource(layering_mod.apply_provider_enable_overrides)
+    assert "ollama" not in src.lower()
+    assert "opencode" not in src.lower()
+
+
+def test_safe_endpoint_redacts_userinfo_and_credential_query() -> None:
+    assert (
+        safe_endpoint_for_context("http://127.0.0.1:11434") == "http://127.0.0.1:11434"
+    )
+    assert (
+        safe_endpoint_for_context(
+            "https://alice:SUPER_SECRET_ENDPOINT_PASSWORD@example.com/v1"
+        )
+        == "https://example.com/v1"
+    )
+    safe = safe_endpoint_for_context(
+        "https://example.com/v1?api_key=SUPER_SECRET_ENDPOINT_TOKEN&q=ok"
+    )
+    assert "SUPER_SECRET_ENDPOINT_TOKEN" not in (safe or "")
+    assert "api_key" not in (safe or "")
+    assert "q=ok" in (safe or "")
+    assert "SUPER_SECRET_ENDPOINT_PASSWORD" not in (
+        safe_endpoint_for_context(
+            "https://example.com/v1#access_token=SUPER_SECRET_ENDPOINT_PASSWORD"
+        )
+        or ""
+    )
+
+
+def test_serialized_surfaces_never_leak_endpoint_secrets(tmp_path: Path) -> None:
+    secret_pw = "SUPER_SECRET_ENDPOINT_PASSWORD"
+    secret_tok = "SUPER_SECRET_ENDPOINT_TOKEN"
+    dirty = (
+        f"https://alice:{secret_pw}@example.com/v1"
+        f"?api_key={secret_tok}&region=eu"
+    )
+    target = _target(
+        runtime="acme-agent",
+        provider="home-vllm",
+        model="lab",
+        endpoint=dirty,
+        locality=Locality.LOCAL,
+    )
+    # Internal exact endpoint must remain intact for future launch proof.
+    assert secret_pw in (target.endpoint or "")
+    assert secret_tok in (target.endpoint or "")
+
+    row = serialize_execution_target(target)
+    blob_row = json.dumps(row)
+    assert secret_pw not in blob_row
+    assert secret_tok not in blob_row
+    assert "alice" not in blob_row
+    assert row["endpoint"] == "https://example.com/v1?region=eu"
+
+    orca = fake_orca("success")
+    wf = ModeCRunController(
+        mode=Mode.ORCHESTRATED,
+        bindings=_bindings(tmp_path, orca=orca, targets=[target]),
+    )
+    wf.bindings.local_endpoint = dirty
+    state = wf.run_all()
+    assert not state.failed, state.failed
+
+    package = state.metadata["mode_c_policy_package"]
+    package_blob = json.dumps(package)
+    assert secret_pw not in package_blob
+    assert secret_tok not in package_blob
+    assert "alice" not in package_blob
+    assert package["local_endpoint"] == "https://example.com/v1?region=eu"
+    assert package["execution_targets"][0]["endpoint"] == (
+        "https://example.com/v1?region=eu"
+    )
+
+    handoff = next(r for r in orca.sent if (r.role or "") == MODE_C_HANDOFF_ROLE)
+    ctx_blob = json.dumps(handoff.context or {})
+    assert secret_pw not in ctx_blob
+    assert secret_tok not in ctx_blob
+
+    state_blob = json.dumps(state.to_dict())
+    assert secret_pw not in state_blob
+    assert secret_tok not in state_blob
+
+    direct = ModeCPolicyPackage(
+        run_id="r1",
+        task_prompt="t",
+        research_query="",
+        project_root=str(tmp_path),
+        project_context={},
+        local_endpoint=safe_endpoint_for_context(dirty),
+        execution_targets=(serialize_execution_target(target),),
+    ).to_dict()
+    direct_blob = json.dumps(direct)
+    assert secret_pw not in direct_blob
+    assert secret_tok not in direct_blob
+    for key, value in OWNERSHIP_METADATA.items():
+        assert direct[key] == value
+    assert "orchestration_owner" not in direct

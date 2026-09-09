@@ -1,16 +1,41 @@
 """Mode C thin controller: project context + one Orca Run + deterministic gates.
 
-Orca owns the workflow graph and execution state machine. Aichestra MUST NOT
-hard-code research → implement → writers → review. Production flow:
+Ownership contract (canonical):
+
+```text
+Coordinator running under Orca:
+- owns concrete workflow/DAG
+- owns task dependencies and ordering
+- owns inner worker selection
+
+Orca:
+- owns canonical Run lifecycle/state
+- Task/Dispatch lifecycle/state
+- worker lifecycle
+- terminal/worktree lifecycle
+- messages/handoffs lifecycle
+
+Aichestra:
+- discovery
+- ExecutionTarget resolution
+- policy
+- security
+- deterministic gates
+- verification
+```
+
+Aichestra MUST NOT hard-code research → implement → writers → review.
+Production flow:
 
 ```text
 task + project root
 → ProjectContext discovery
-→ provider/capability policy
+→ ExecutionTarget resolution + policy
 → bounded context + policy package
 → exactly one Orca Run
 → handoff objective/context to Orca
-→ Orca owns tasks/workers/dependencies/handoffs/worktrees
+→ coordinator under Orca owns concrete DAG / inner workers
+→ Orca owns Run/Task/Dispatch/worker/terminal/worktree lifecycle
 → deterministic Aichestra gates where required
 → Mode C result from Orca Run state + gate results
 ```
@@ -66,6 +91,8 @@ from aichestra.execution.serialize import (
     CANONICAL_EXECUTION_FIELDS,
     EXECUTION_TARGET_CONTRACT_VERSION,
     LEGACY_COMPATIBILITY_FIELDS,
+    OWNERSHIP_METADATA,
+    safe_endpoint_for_context,
     serialize_execution_policy,
     serialize_execution_target,
 )
@@ -123,7 +150,7 @@ _SCOPE_HINTS = (
     "migrate",
 )
 
-# Single Orca orchestration handoff role — Orca owns internal workflow shape.
+# Single Orca orchestration handoff role — coordinator under Orca owns DAG shape.
 MODE_C_HANDOFF_ROLE = "mode_c_handoff"
 
 
@@ -323,10 +350,8 @@ class ModeCPolicyPackage:
             "classify": dict(self.classify),
             "media_routing": dict(self.media_routing) if self.media_routing else None,
             "precedence": list(self.precedence),
-            # Explicit: Aichestra does not schedule agent phases / inner workers.
-            "orchestration_owner": "orca",
-            "aichestra_role": "policy_context_gates",
-            "inner_worker_selection_owner": "coordinator_under_orca",
+            # Explicit ownership (never ambiguous orchestration_owner=orca).
+            **dict(OWNERSHIP_METADATA),
         }
 
 
@@ -350,7 +375,7 @@ class ModeCRunController:
         self.state.metadata["research_useful_hint"] = research_useful
         self.state.metadata["canonical_orchestration"] = "orca_run"
         self.state.metadata["controller"] = "ModeCRunController"
-        self.state.metadata["workflow_owner"] = "orca"
+        self.state.metadata.update(OWNERSHIP_METADATA)
         self.state.metadata["aichestra_owns_agent_phases"] = False
         if self.bindings.resume_run_id and self.bindings.resume_run_id.strip():
             self.state.metadata["orca_run_id"] = self.bindings.resume_run_id.strip()
@@ -688,7 +713,7 @@ class ModeCRunController:
         return True
 
     def _handoff_to_orca(self, run_id: str) -> bool:
-        """ONE orchestration handoff — Orca owns the workflow graph thereafter."""
+        """ONE orchestration handoff — Orca owns Run lifecycle; coordinator owns DAG."""
         package = self._build_policy_package(run_id)
         self.state.metadata["mode_c_policy_package"] = package.to_dict()
 
@@ -733,10 +758,14 @@ class ModeCRunController:
         out = self._run_via_orca(
             prompt=(
                 "Mode C handoff under a single Orca Run. "
-                "Orca owns workflow graph, task ordering, workers, handoffs, "
-                "and worktrees. Honor project-owned AGENTS/Spec Kit/Factory "
+                "Coordinator running under Orca owns the concrete workflow/DAG, "
+                "task dependencies and ordering, and inner worker selection. "
+                "Orca owns canonical Run/Task/Dispatch lifecycle, worker "
+                "lifecycle, terminal/worktree lifecycle, and messages/handoffs. "
+                "Aichestra supplies discovery, ExecutionTargets, policy, "
+                "security, and deterministic gates/verification only. "
+                "Honor project-owned AGENTS/Spec Kit/Factory "
                 "instructions from project_context with stated precedence. "
-                "The coordinator owns concrete inner worker selection and DAG. "
                 "Choose inner workers only from allowed/runnable targets once "
                 "launch-capable targets are available. "
                 "Do not infer a worker from a raw ModelProvider. "
@@ -770,7 +799,10 @@ class ModeCRunController:
         }
         self._succeed_gate(
             GateKind.ORCA_HANDOFF,
-            detail="handoff to Orca complete; Orca owns workflow",
+            detail=(
+                "handoff to Orca complete; "
+                "coordinator owns DAG; Orca owns Run lifecycle"
+            ),
             result=out,
         )
         return True
@@ -931,13 +963,13 @@ class ModeCRunController:
             "suggested_lead": lead_kind,
             "local_enabled": bool(self.bindings.local_enabled),
             "local_available": local_available,
-            "local_endpoint": self.bindings.local_endpoint,
+            "local_endpoint": safe_endpoint_for_context(self.bindings.local_endpoint),
             "local_model_ref": self.bindings.local_model_ref,
             "local_capabilities": list(self.bindings.local_capabilities),
             "installed_models": [dict(m) for m in self.bindings.installed_models],
             "providers": by_kind,
-            # Orca decides workers; Aichestra only supplies policy.
-            "scheduler": "orca",
+            # Coordinator under Orca selects workers; Aichestra supplies policy.
+            "scheduler": "coordinator_under_orca",
         }
 
     def _build_policy_package(self, run_id: str) -> ModeCPolicyPackage:
@@ -961,7 +993,7 @@ class ModeCRunController:
             preferred_lead=self.bindings.preferred_lead,
             fallback_lead=self.bindings.fallback_lead,
             local_enabled=bool(self.bindings.local_enabled),
-            local_endpoint=self.bindings.local_endpoint,
+            local_endpoint=safe_endpoint_for_context(self.bindings.local_endpoint),
             local_model_ref=self.bindings.local_model_ref,
             local_capabilities=tuple(self.bindings.local_capabilities or ()),
             installed_models=tuple(self.bindings.installed_models or ()),

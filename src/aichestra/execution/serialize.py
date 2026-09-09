@@ -7,6 +7,7 @@ machine dumps. Does not launch workers or invent LaunchCapability proofs.
 from __future__ import annotations
 
 from typing import Any, Mapping
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .compatibility import load_compatibility_bindings
 from .discovery import discover_execution_facts
@@ -41,6 +42,144 @@ CANONICAL_EXECUTION_FIELDS: tuple[str, ...] = (
     "execution_policy",
 )
 
+# Explicit Mode C ownership — not ambiguous ``orchestration_owner: orca``.
+OWNERSHIP_METADATA: dict[str, str] = {
+    "workflow_dag_owner": "coordinator_under_orca",
+    "canonical_lifecycle_owner": "orca",
+    "inner_worker_selection_owner": "coordinator_under_orca",
+    "aichestra_role": "policy_context_gates",
+}
+
+_REDACTED_ENDPOINT = "[REDACTED_ENDPOINT]"
+
+_SENSITIVE_QUERY_KEYS = frozenset(
+    {
+        "api_key",
+        "apikey",
+        "api-key",
+        "access_token",
+        "access-token",
+        "refresh_token",
+        "refresh-token",
+        "auth_token",
+        "auth-token",
+        "token",
+        "password",
+        "passwd",
+        "secret",
+        "client_secret",
+        "client-secret",
+        "authorization",
+        "auth",
+        "key",
+        "private_key",
+        "private-key",
+        "session",
+        "session_id",
+        "session-id",
+        "sig",
+        "signature",
+        "credential",
+        "credentials",
+    }
+)
+
+
+def safe_endpoint_for_context(endpoint: str | None) -> str | None:
+    """Return a coordinator-safe endpoint representation (never mutate internals).
+
+    Keeps ordinary loopback URLs useful. Strips URL userinfo, credential-bearing
+    query parameters and fragments. Malformed or suspicious values fail closed.
+    """
+    if endpoint is None:
+        return None
+    if not isinstance(endpoint, str):
+        return _REDACTED_ENDPOINT
+    text = endpoint.strip()
+    if not text:
+        return None
+
+    # Bare host:port / opaque tokens without a URL shape — fail closed if
+    # credential-like markers appear; otherwise pass through for discovery ids.
+    if "://" not in text and not text.startswith("//"):
+        lowered = text.lower()
+        if "@" in text or any(
+            marker in lowered
+            for marker in ("password", "token", "secret", "api_key", "apikey")
+        ):
+            return _REDACTED_ENDPOINT
+        return text
+
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        return _REDACTED_ENDPOINT
+
+    if not parts.scheme or not parts.netloc:
+        return _REDACTED_ENDPOINT
+
+    hostname = parts.hostname
+    if hostname is None:
+        return _REDACTED_ENDPOINT
+
+    # Drop userinfo entirely (never expose alice:secret).
+    try:
+        port = parts.port
+    except ValueError:
+        return _REDACTED_ENDPOINT
+    host_part = hostname
+    if ":" in hostname and not hostname.startswith("["):
+        host_part = f"[{hostname}]"
+    netloc = host_part
+    if port is not None:
+        netloc = f"{host_part}:{port}"
+
+    safe_query_pairs: list[tuple[str, str]] = []
+    for key, value in parse_qsl(parts.query, keep_blank_values=True):
+        if _sensitive_query_key(key):
+            continue
+        safe_query_pairs.append((key, value))
+
+    fragment = parts.fragment
+    if fragment and _sensitive_fragment(fragment):
+        fragment = ""
+
+    return urlunsplit(
+        (
+            parts.scheme,
+            netloc,
+            parts.path,
+            urlencode(safe_query_pairs, doseq=True),
+            fragment,
+        )
+    )
+
+
+def _sensitive_query_key(key: str) -> bool:
+    lowered = key.strip().lower().replace(" ", "_")
+    if lowered in _SENSITIVE_QUERY_KEYS:
+        return True
+    return any(
+        part in lowered
+        for part in ("password", "token", "secret", "credential", "apikey", "api_key")
+    )
+
+
+def _sensitive_fragment(fragment: str) -> bool:
+    lowered = fragment.lower()
+    return any(
+        part in lowered
+        for part in (
+            "password",
+            "token",
+            "secret",
+            "credential",
+            "api_key",
+            "apikey",
+            "access_token",
+        )
+    ) or ("=" in fragment and _sensitive_query_key(fragment.split("=", 1)[0]))
+
 
 def serialize_execution_target(target: ExecutionTarget) -> dict[str, Any]:
     """Neutral bounded representation for the generic coordinator."""
@@ -49,7 +188,7 @@ def serialize_execution_target(target: ExecutionTarget) -> dict[str, Any]:
         "runtime": target.runtime.id,
         "provider": target.provider.id if target.provider else None,
         "model": target.model.id if target.model else None,
-        "endpoint": target.endpoint,
+        "endpoint": safe_endpoint_for_context(target.endpoint),
         "locality": target.locality.value,
         "capabilities": sorted(target.capabilities.names),
         "enabled": target.enabled,

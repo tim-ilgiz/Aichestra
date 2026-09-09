@@ -176,7 +176,9 @@ class FakeModeCProvider(ProviderAdapter):
                 if ctx.get("speckit_scale") in {"medium", "large_high_risk"}:
                     shape = f"speckit_{ctx.get('speckit_scale')}"
                 meta["simulated_workflow_shape"] = shape
-                meta["orchestration_owner"] = "orca"
+                meta["canonical_lifecycle_owner"] = "orca"
+                meta["workflow_dag_owner"] = "coordinator_under_orca"
+                meta["inner_worker_selection_owner"] = "coordinator_under_orca"
             if role == "mode_c_agents":
                 meta["simulated_roles"] = ["research", "lead_implement"]
             if role == "mode_c_writers":

@@ -54,6 +54,21 @@ def test_provider_enabled_defaults_and_overrides(tmp_path: Path) -> None:
     assert provider_enabled(merged, "cursor") is False
 
 
+def test_no_local_override_strips_local_locality_from_execution_policy() -> None:
+    cfg = {
+        "local": {"enabled": True},
+        "execution": {
+            "policy": {"allowed_localities": ["local", "cloud", "remote"]},
+        },
+    }
+    merged = apply_provider_enable_overrides(cfg, no_local=True)
+    assert merged["local"]["enabled"] is False
+    localities = merged["execution"]["policy"]["allowed_localities"]
+    assert "local" not in localities
+    assert "cloud" in localities
+    assert "remote" in localities
+
+
 def test_discover_respects_enabled_map(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AICHESTRA_FAKE_PROVIDERS", "1")
     statuses = discover_providers(

@@ -168,7 +168,8 @@ def test_mode_c_wires_orca_only_end_to_end(fixture_project_a: Path) -> None:
     state = wf.run_all()
     assert not state.failed, state.failed
     assert state.metadata.get("orchestration_shape_agnostic") is True
-    assert state.metadata.get("workflow_owner") == "orca"
+    assert state.metadata.get("canonical_lifecycle_owner") == "orca"
+    assert state.metadata.get("workflow_dag_owner") == "coordinator_under_orca"
     assert orca.sent
     assert lead.sent == []
     assert worker.sent == []

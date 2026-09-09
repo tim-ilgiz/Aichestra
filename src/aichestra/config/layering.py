@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from aichestra.platform_detect import detect_os
 from aichestra.repo import find_repo_root
@@ -142,7 +142,15 @@ def apply_provider_enable_overrides(
     no_cursor: bool = False,
     no_local: bool = False,
 ) -> dict[str, Any]:
-    """Return a deep-copied config with CLI disable flags applied as runtime override."""
+    """Return a deep-copied config with CLI disable flags applied as runtime override.
+
+    ``--no-local`` is the highest invocation override for local execution:
+
+    * legacy ``local.enabled=false`` (migration seam)
+    * remove ``local`` from canonical ``execution.policy.allowed_localities``
+      so *all* ExecutionTargets with ``locality=local`` are forbidden for this
+      invocation (product/provider-agnostic; remote/cloud unaffected)
+    """
     override: dict[str, Any] = {"providers": {}, "local": {}}
     if no_orca:
         override["providers"]["orca"] = {"enabled": False}
@@ -152,10 +160,35 @@ def apply_provider_enable_overrides(
         override["providers"]["cursor"] = {"enabled": False}
     if no_local:
         override["local"]["enabled"] = False
-    if not override["providers"] and "enabled" not in override["local"]:
+        # Highest invocation override: strip LOCAL even if config explicitly
+        # listed it under execution.policy.allowed_localities.
+        override["execution"] = {
+            "policy": {
+                "allowed_localities": _allowed_localities_without_local(config),
+            }
+        }
+    if (
+        not override["providers"]
+        and "enabled" not in override["local"]
+        and "execution" not in override
+    ):
         return config
     if not override["providers"]:
         del override["providers"]
     if "enabled" not in override["local"]:
         del override["local"]
     return deep_merge(config, override)
+
+
+def _allowed_localities_without_local(config: Mapping[str, Any] | dict[str, Any]) -> list[str]:
+    """Compute allowed_localities for a ``--no-local`` invocation override."""
+    # Stable non-local localities; keep config order when localities are explicit.
+    default_non_local = ("remote", "cloud")
+    execution = config.get("execution") if isinstance(config.get("execution"), dict) else {}
+    policy = (
+        execution.get("policy") if isinstance(execution.get("policy"), dict) else {}
+    )
+    raw = policy.get("allowed_localities") if isinstance(policy, dict) else None
+    if raw is None:
+        return list(default_non_local)
+    return [str(loc) for loc in raw if str(loc).strip().lower() != "local"]
