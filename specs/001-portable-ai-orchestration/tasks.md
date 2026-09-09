@@ -427,10 +427,10 @@ Green CI with fake providers must not encode Orca bypass.
 - [x] T086 HIGH: Spec Kit MEDIUM/LARGE execute real brief/plan/tasks gates
       (or hard-block implement) rather than metadata-only stubs (FR-028/063).
       *(hard-block until metadata statuses ready/approved or *_satisfied)*
-- [ ] T087 HIGH: Deliver attachments via Orca/native file capability (not only
+- [x] T087 HIGH: Deliver attachments via Orca/native file capability (not only
       path text in prompt); enforce vision provider_hint (FR-058).
-      *(partial: bytes_delivered=false honesty + media_delivery note; native
-      attach still TODO)*
+      *(stage inbox + Orca --attach + Codex/Cursor image flags; vision fails
+      closed when bytes_delivered=false)*
 - [x] T088 HIGH: `aichestra handoff` performs one-action Orca
       `worktree create --agent cursor --prompt …` when Orca available; JSON
       packet alone is insufficient (FR-035/036).
@@ -443,7 +443,8 @@ Green CI with fake providers must not encode Orca bypass.
       build/test commands per FR-040/061.
 - [x] T091 HIGH: `smoke_mac.py` labels LIVE only after real execute_task (or
       rename probe-only to DISCOVERED); LIVE ≠ DISCOVERED (Constitution V).
-      *(probe → DISCOVERED; `AICHESTRA_SMOKE_EXECUTE=1` → LIVE on ok execute)*
+      *(probe → DISCOVERED; `AICHESTRA_SMOKE_EXECUTE=1` → LIVE on ok execute;
+      `AICHESTRA_SMOKE_ORCA_SUPERVISED=1` → Mode C-shaped supervised smoke)*
 
 ### P2 — follow-ups (non-blocking for architecture merge bar if P0+P1 done)
 
@@ -481,10 +482,11 @@ only. Re-align artifacts already updated in this phase; complete code/tests.
 
 ### P1 — remaining fidelity
 
-- [ ] T100 HIGH: Spec Kit LARGE path invokes real skill/command flow or remains
+- [x] T100 HIGH: Spec Kit LARGE path invokes real skill/command flow or remains
       hard-blocked until artifacts exist — no `status=recorded` fake success
       (FR-028/063).
-- [ ] T101 HIGH: Attachments delivered via Orca native attach when available
+      *(pending + hard-block; clarify metadata; speckit_execution marker)*
+- [x] T101 HIGH: Attachments delivered via Orca native attach when available
       (close T087) (FR-058).
 - [x] T102 HIGH: Governance ADR/SPEC pending has an Orca task continuation path
       (not dead-end) (FR-055).

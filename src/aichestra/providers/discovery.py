@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping
 
-from aichestra.providers.base import ProviderStatus
+from aichestra.providers.base import (
+    FailureClass,
+    ProviderKind,
+    ProviderRole,
+    ProviderStatus,
+)
 from aichestra.providers.codex import CodexProvider
 from aichestra.providers.cursor import CursorProvider
 from aichestra.providers.local_worker import LocalWorkerProvider
@@ -22,32 +27,60 @@ def discover_providers(
     local_enabled: bool = False,
     ollama_host: str | None = None,
     force_real: bool = False,
+    enabled: Mapping[str, bool] | None = None,
 ) -> list[ProviderStatus]:
     """Probe Orca/Codex/Cursor/local-worker without intercepting native CLIs.
 
     When ``AICHESTRA_FAKE_PROVIDERS`` or ``AICHESTRA_NO_REAL_QUOTA`` is set,
     return fake success statuses instead of probing real binaries (FR-039).
+
+    ``enabled`` maps kind names (``orca``, ``codex``, ``cursor``, ``local-worker``)
+    to booleans; disabled kinds are returned as unavailable without probing.
     """
     if _fake_providers_forced() and not force_real:
-        return _inline_fake_statuses(local_enabled=local_enabled)
+        statuses = _inline_fake_statuses(local_enabled=local_enabled)
+    else:
+        adapters = [
+            OrcaProvider(),
+            CodexProvider(),
+            CursorProvider(),
+            LocalWorkerProvider(local_enabled=local_enabled, ollama_host=ollama_host),
+        ]
+        statuses = [adapter.probe() for adapter in adapters]
+    return [_apply_enable(s, enabled) for s in statuses]
 
-    adapters = [
-        OrcaProvider(),
-        CodexProvider(),
-        CursorProvider(),
-        LocalWorkerProvider(local_enabled=local_enabled, ollama_host=ollama_host),
-    ]
-    return [adapter.probe() for adapter in adapters]
+
+def _apply_enable(
+    status: ProviderStatus,
+    enabled: Mapping[str, bool] | None,
+) -> ProviderStatus:
+    if not enabled:
+        return status
+    key = status.kind.value
+    # Accept both local-worker and local aliases.
+    if key == ProviderKind.LOCAL_WORKER.value:
+        flag = enabled.get(key)
+        if flag is None:
+            flag = enabled.get("local")
+    else:
+        flag = enabled.get(key)
+    if flag is None or flag:
+        return status
+    return ProviderStatus(
+        kind=status.kind,
+        available=False,
+        role=status.role,
+        binary_path=status.binary_path,
+        version=status.version,
+        failure=FailureClass.UNAVAILABLE,
+        detail=f"{key} disabled by configuration / CLI override",
+        intercepts_native_cli=False,
+        metadata={**dict(status.metadata), "disabled_by_config": True},
+    )
 
 
 def _inline_fake_statuses(*, local_enabled: bool) -> list[ProviderStatus]:
     """Stdlib-safe fakes when tests.fakes is not importable (installed package)."""
-    from aichestra.providers.base import (
-        FailureClass,
-        ProviderKind,
-        ProviderRole,
-        ProviderStatus,
-    )
 
     def fake(kind: ProviderKind, role: ProviderRole, available: bool) -> ProviderStatus:
         return ProviderStatus(
@@ -75,11 +108,13 @@ def discover_providers_report(
     local_enabled: bool = False,
     ollama_host: str | None = None,
     force_real: bool = False,
+    enabled: Mapping[str, bool] | None = None,
 ) -> dict[str, Any]:
     statuses = discover_providers(
         local_enabled=local_enabled,
         ollama_host=ollama_host,
         force_real=force_real,
+        enabled=enabled,
     )
     by_kind = {s.kind.value: s.to_dict() for s in statuses}
     return {
@@ -95,4 +130,16 @@ def discover_providers_report(
         ),
         "native_cli_intercepted": any(s.intercepts_native_cli for s in statuses),
         "fake_providers": _fake_providers_forced() and not force_real,
+    }
+
+
+def enabled_map_from_config(config: Mapping[str, Any] | None) -> dict[str, bool]:
+    """Build discover_providers ``enabled`` map from layered config."""
+    from aichestra.config.layering import provider_enabled
+
+    return {
+        "orca": provider_enabled(config, "orca"),
+        "codex": provider_enabled(config, "codex"),
+        "cursor": provider_enabled(config, "cursor"),
+        "local-worker": provider_enabled(config, "local-worker"),
     }

@@ -78,6 +78,50 @@ def _try_execute_live(adapter) -> tuple[str, dict]:
         return "DISCOVERED_EXECUTE_ERROR", meta
 
 
+def _try_orca_supervised_smoke(project_root: Path) -> dict:
+    """Optional Mode C-shaped Orca path: ensure_run → supervised implement.
+
+    Enabled with ``AICHESTRA_SMOKE_ORCA_SUPERVISED=1``. This is the production
+    shape (one Run + worker-start + worktree), not merely run-create.
+    """
+    from aichestra.providers.base import ProviderTaskRequest
+    from aichestra.providers.orca import OrcaProvider
+
+    orca = OrcaProvider()
+    meta: dict = {"path": "ensure_run→worker-start", "project_root": str(project_root)}
+    ensure = orca.execute_task(
+        ProviderTaskRequest(
+            prompt="Aichestra smoke Mode C ensure_run",
+            role="ensure_run",
+            read_only=True,
+            cwd=str(project_root),
+            timeout_seconds=30.0,
+        )
+    )
+    meta["ensure_ok"] = ensure.ok
+    meta["ensure_detail"] = ensure.detail
+    run_id = (ensure.metadata or {}).get("run_id")
+    meta["run_id"] = run_id
+    if not ensure.ok or not run_id:
+        meta["label"] = "SUPERVISED_ENSURE_FAILED"
+        return meta
+    implement = orca.execute_task(
+        ProviderTaskRequest(
+            prompt="Aichestra smoke supervised read-only ping — no edits.",
+            role="research",
+            read_only=True,
+            cwd=str(project_root),
+            timeout_seconds=60.0,
+            context={"run_id": run_id, "agent": "codex", "worktree": "current"},
+        )
+    )
+    meta["supervised_ok"] = implement.ok
+    meta["supervised_detail"] = implement.detail
+    meta["worktree_path"] = (implement.metadata or {}).get("worktree_path")
+    meta["label"] = "LIVE_SUPERVISED" if implement.ok else "SUPERVISED_FAILED"
+    return meta
+
+
 def main() -> int:
     system = platform.system().lower()
     root = find_repo_root(ROOT)
@@ -95,6 +139,7 @@ def main() -> int:
     live_components: dict[str, str] = {}
     provider_meta: dict[str, dict] = {}
     execute_results: dict[str, dict] = {}
+    supervised: dict | None = None
     if system == "darwin":
         live_components["machine_profiler"] = "LIVE"
         if profile.memory.available_bytes is not None:
@@ -116,6 +161,13 @@ def main() -> int:
                 label, meta = _execution_live(adapter)
             live_components[adapter.kind.value] = label
             provider_meta[adapter.kind.value] = meta
+        if os.environ.get("AICHESTRA_SMOKE_ORCA_SUPERVISED", "").strip() in {
+            "1",
+            "true",
+            "yes",
+        }:
+            supervised = _try_orca_supervised_smoke(root)
+            live_components["orca_supervised"] = supervised.get("label", "UNKNOWN")
     else:
         live_components["note"] = (
             f"This smoke script was executed on {system}; "
@@ -131,7 +183,8 @@ def main() -> int:
         "windows_status": "NOT VALIDATED",
         "linux_status": "NOT VALIDATED",
         "note": "Provider LIVE requires probe.available AND supports_execution; "
-        "discovery≠task execution.",
+        "discovery≠task execution. Set AICHESTRA_SMOKE_ORCA_SUPERVISED=1 for "
+        "Mode C-shaped ensure_run→worker-start smoke.",
         "components": live_components,
         "provider_meta": provider_meta,
         "profile_os": profile.os,
@@ -140,6 +193,8 @@ def main() -> int:
     }
     if execute_results:
         report["smoke_execute"] = execute_results
+    if supervised:
+        report["orca_supervised"] = supervised
     sys.stdout.write(json.dumps(report, indent=2) + "\n")
     return 0 if doctor.ok else 1
 

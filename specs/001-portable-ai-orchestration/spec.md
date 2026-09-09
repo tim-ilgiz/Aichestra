@@ -57,28 +57,33 @@ asserted by contract tests.
 
 **Acceptance Scenarios**:
 
-1. **Given** Orca is available, **When** the developer starts Mode C,
-   **Then** Aichestra creates or resumes exactly one Orca Run and Orca is the
-   primary interactive UI/control plane for agent work.
-2. **Given** the developer opens Orca and works with one agent (Mode B),
+1. **Given** Mode C is requested and Orca is available, **When** the developer
+   starts Mode C with `--project-root`, **Then** Aichestra creates or resumes
+   exactly one Orca Run and Orca is the orchestration control plane for agent
+   work (Aichestra supplies policy/gates only).
+2. **Given** Mode C is requested, **When** Orca is unavailable or unreachable,
+   **Then** Mode C fails closed before any worker execution with a clear
+   ORCA_UNAVAILABLE outcome and MUST NOT fall back to direct Codex/Cursor
+   (Mode A remains separate).
+3. **Given** Mode C is requested without a valid `--project-root`, **When**
+   orchestration starts, **Then** it fails before any provider execution
+   (no ambient-cwd write-agent).
+4. **Given** the developer opens Orca and works with one agent (Mode B),
    **When** no Mode C Run is started, **Then** full multi-role orchestration
    is not automatically started.
-3. **Given** Codex is available, **When** a lead is selected, **Then** Codex is
+5. **Given** Codex is available, **When** a lead is selected, **Then** Codex is
    preferred.
-4. **Given** Codex is unavailable and Cursor is available, **When** a lead is
+6. **Given** Codex is unavailable and Cursor is available, **When** a lead is
    selected, **Then** Cursor is used as fallback.
-5. **Given** local inference is disabled or missing, **When** Mode C runs,
+7. **Given** local inference is disabled or missing, **When** Mode C runs,
    **Then** the platform remains useful without the local worker (other Orca
    agents / gates still apply).
-6. **Given** native Codex or Cursor CLI/IDE usage (Mode A), **When** the
+8. **Given** native Codex or Cursor CLI/IDE usage (Mode A), **When** the
    developer works outside Orca, **Then** native commands remain unchanged and
    unintercepted.
-7. **Given** cloud-only configuration, **When** local runtime is absent,
+9. **Given** cloud-only configuration, **When** local runtime is absent,
    **Then** research/maintenance utilities that require local inference degrade
    without blocking lead workflows.
-8. **Given** Mode C is requested and Orca is unavailable, **When** Mode C
-   starts, **Then** it fails closed with a clear ORCA_UNAVAILABLE outcome and
-   MUST NOT fall back to direct Codex/Cursor (Mode A remains separate).
 
 ---
 
@@ -243,8 +248,11 @@ multi-model selection.
 - **FR-016**: Machine-local model/provider settings are untracked.
 - **FR-017**: Local model size is machine-specific rather than globally
   hard-coded.
-- **FR-018**: The current M4 Pro 24 GB hardware profile defaults to a
-  conservative approximately 14B-class local worker with one inference worker.
+- **FR-018**: Hardware profiles are examples / validation fixtures only. The
+  Apple M4 Pro 24 GB profile illustrates a ~14B-class local worker with one
+  inference worker for current Mac validation; it MUST NOT be treated as a
+  global product requirement. Profile selection is driven by measured
+  machine facts (memory/GPU), not a hard-coded Mac identity.
 - **FR-019**: Orca/Codex/Cursor/OpenCode/Ollama binaries and model weights are
   not stored in Git.
 - **FR-020**: Runtime sessions/caches/logs/secrets are not stored in Git.

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from aichestra.platform_detect import OperatingSystem, detect_os
+from aichestra.providers.attachments import orca_attach_flags, stage_attachments
 from aichestra.providers.base import (
     FailureClass,
     ProviderAdapter,
@@ -97,6 +98,8 @@ def build_orca_argv(
         return [binary, "status", "--json"]
     name = f"aichestra-{session_id[:8]}"
     worktree = str(request.context.get("worktree") or "new-child")
+    from aichestra.providers.attachments import orca_attach_flags
+
     return [
         binary,
         "orchestration",
@@ -111,6 +114,7 @@ def build_orca_argv(
         agent,
         "--setup",
         "skip",
+        *orca_attach_flags(request.attachments),
         "--json",
     ]
 
@@ -568,6 +572,12 @@ class OrcaProvider(ProviderAdapter):
             or request.context.get("worktree_id")
             or "new-child"
         )
+        # Stage attachment bytes into cwd (parent/project) so workers can read them;
+        # also pass native --attach flags for Orca when files resolve.
+        delivery = stage_attachments(request.attachments, request.cwd)
+        attach_flags = orca_attach_flags(
+            delivery.staged or delivery.resolved or request.attachments
+        )
         worker_argv = [
             binary,
             "orchestration",
@@ -582,6 +592,7 @@ class OrcaProvider(ProviderAdapter):
             agent,
             "--setup",
             "skip",
+            *attach_flags,
             "--json",
         ]
         worker_result = run_cli_task(
@@ -664,6 +675,9 @@ class OrcaProvider(ProviderAdapter):
             "steps": steps,
             "receipt": wait_payload or worker_payload,
             "wait_interpretation": done_meta,
+            "bytes_delivered": bool(delivery.bytes_delivered and attach_flags),
+            "attachment_delivery": delivery.to_dict(),
+            "orca_attach_flags": len(attach_flags) // 2,
         }
         if not wait_result.ok:
             return ProviderTaskResult(

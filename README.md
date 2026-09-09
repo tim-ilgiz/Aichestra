@@ -46,13 +46,18 @@ python -m aichestra update          # after git pull; preserves machine-local
 
 1. **Native** — run `codex` / Cursor IDE / `cursor` as usual (unchanged).
 2. **Orca interactive** — open Orca app; work with one agent (`orca open` / UI).
-3. **Mode C** — start explicitly (requires Orca):
+3. **Mode C** — start explicitly (requires Orca **and** `--project-root`):
    `python -m aichestra orchestrate --prompt "…" --project-root /path/to/target`
    Creates **one Orca Run**; agent work goes through Orca tasks/workers/worktrees;
-   Aichestra applies policy + deterministic gates. No direct Codex/Cursor
-   fallback in Mode C (use Mode A for native tools).
-4. **Codex→Cursor handoff** — one-action manual handoff builds a bounded brief;
-   prefer Orca: `orca worktree create --no-parent --agent cursor --prompt …`.
+   Aichestra applies policy + deterministic gates on the adopted worktree.
+   No direct Codex/Cursor fallback in Mode C (use Mode A for native tools).
+   Optional provider toggles: `--no-codex`, `--no-cursor`, `--no-local`
+   (and `--no-orca`, which fails Mode C closed).
+   Attachments: `--attach screenshot.png` delivers native file bytes
+   (Orca `--attach` / staged inbox; Codex `--image` in Mode A).
+4. **Codex→Cursor handoff** — one-action: `python -m aichestra handoff --prompt "…"`
+   creates an Orca Cursor worktree with a bounded brief (`--prepare-only` for
+   packet-only).
 5. **Disable local inference** — keep `local.enabled: false` in
    `.local/machine.local.json` (default).
 6. **Local repository research** —

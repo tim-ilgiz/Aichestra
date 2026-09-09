@@ -5,7 +5,10 @@
   "providers": {
     "preferred_lead": "codex",
     "fallback_lead": "cursor",
-    "local_worker": "local-worker"
+    "local_worker": "local-worker",
+    "orca": { "enabled": true },
+    "codex": { "enabled": true },
+    "cursor": { "enabled": true }
   },
   "orchestration": {
     "mode_default": "native",

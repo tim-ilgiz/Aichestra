@@ -127,7 +127,12 @@ def run_doctor(
     enabled = local_enabled(cfg)
 
     # Cloud providers — report each lead/control-plane distinctly (FR-061).
-    providers = discover_providers_report(local_enabled=enabled)
+    from aichestra.providers.discovery import enabled_map_from_config
+
+    providers = discover_providers_report(
+        local_enabled=enabled,
+        enabled=enabled_map_from_config(cfg),
+    )
     by_kind = providers.get("providers") if isinstance(providers.get("providers"), dict) else {}
     for kind_name, label in (
         ("orca", "orca"),

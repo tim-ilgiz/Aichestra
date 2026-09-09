@@ -134,15 +134,15 @@ def build_parser() -> argparse.ArgumentParser:
     orch_p.add_argument(
         "--project-root",
         type=Path,
-        default=None,
-        help="Target project root (.aichestra/project.json + verify commands)",
+        required=True,
+        help="Target project root (required for Mode C; verify commands + write isolation)",
     )
     orch_p.add_argument(
         "--attach",
         action="append",
         default=[],
         metavar="PATH",
-        help="Attachment path for media routing (repeatable)",
+        help="Attachment path for native media delivery (repeatable)",
     )
     orch_p.add_argument(
         "--resume-run-id",
@@ -150,6 +150,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Resume an existing Orca Run id (Mode C single-run lifecycle)",
     )
     orch_p.add_argument("--no-research", action="store_true")
+    orch_p.add_argument(
+        "--no-orca",
+        action="store_true",
+        help="Disable Orca (Mode C will fail closed)",
+    )
+    orch_p.add_argument("--no-codex", action="store_true", help="Disable Codex lead")
+    orch_p.add_argument("--no-cursor", action="store_true", help="Disable Cursor lead")
+    orch_p.add_argument(
+        "--no-local",
+        action="store_true",
+        help="Disable local-worker for this run",
+    )
     orch_p.add_argument("--json", action="store_true", default=True)
 
     return parser
@@ -279,14 +291,20 @@ def _local_cfg_list(local_cfg: dict[str, Any], *keys: str) -> list[str] | None:
 
 
 def _cmd_orchestrate(args: argparse.Namespace) -> int:
-    from aichestra.config.layering import local_enabled, resolve_config
+    from aichestra.config.layering import (
+        apply_provider_enable_overrides,
+        fallback_lead_name,
+        local_enabled,
+        preferred_lead_name,
+        resolve_config,
+    )
     from aichestra.orchestration.modes import Mode
     from aichestra.orchestration.roles import select_lead
     from aichestra.orchestration.verification import verification_commands_from_config
     from aichestra.orchestration.workflow import ModeCRunController, WorkflowBindings
     from aichestra.providers.codex import CodexProvider
     from aichestra.providers.cursor import CursorProvider
-    from aichestra.providers.discovery import discover_providers
+    from aichestra.providers.discovery import discover_providers, enabled_map_from_config
     from aichestra.providers.fakes import (
         fake_codex_lead,
         fake_cursor_lead,
@@ -297,35 +315,56 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
     from aichestra.providers.orca import OrcaProvider
     from aichestra.providers.quota_guard import real_provider_execution_blocked
 
+    # Mode C must never write into ambient cwd — project-root is mandatory.
+    if not args.project_root:
+        sys.stderr.write(
+            "Mode C requires --project-root before any provider execution\n"
+        )
+        return 2
+    project_root = Path(args.project_root).resolve()
+    if not project_root.is_dir():
+        sys.stderr.write(f"Mode C --project-root is not a directory: {project_root}\n")
+        return 2
+
     repo_root = Path(args.repo_root).resolve() if args.repo_root else find_repo_root()
-    project_root = Path(args.project_root).resolve() if args.project_root else None
     cfg = resolve_config(repo_root=repo_root, project_root=project_root)
+    cfg = apply_provider_enable_overrides(
+        cfg,
+        no_orca=bool(getattr(args, "no_orca", False)),
+        no_codex=bool(getattr(args, "no_codex", False)),
+        no_cursor=bool(getattr(args, "no_cursor", False)),
+        no_local=bool(getattr(args, "no_local", False)),
+    )
     local_cfg = cfg.get("local") if isinstance(cfg.get("local"), dict) else {}
     ollama_host = local_cfg.get("ollama_host") or local_cfg.get("endpoint")
     preferred_ids = _local_cfg_list(local_cfg, "preferred_models", "preferred_ids")
     allowed_ids = _local_cfg_list(local_cfg, "allowed_models", "allowed_ids")
     enabled_local = local_enabled(cfg)
+    preferred = preferred_lead_name(cfg)
+    fallback = fallback_lead_name(cfg)
+    enabled = enabled_map_from_config(cfg)
 
     use_fakes = real_provider_execution_blocked()
     providers = discover_providers(
         local_enabled=enabled_local,
         ollama_host=str(ollama_host) if ollama_host else None,
+        enabled=enabled,
     )
-    selection = select_lead(providers)
-    attachments = tuple(str(p) for p in (args.attach or []))
+    selection = select_lead(providers, preferred=preferred, fallback=fallback)
+    attachments = tuple(str(Path(p).expanduser().resolve()) for p in (args.attach or []))
 
     if use_fakes:
-        orca = fake_orca()
+        orca = fake_orca() if enabled.get("orca", True) else None
         local = fake_local_worker(enabled=enabled_local)
         lead: object | None = None
         if selection.lead and selection.lead.value == "codex":
             lead = fake_codex_lead()
         elif selection.lead and selection.lead.value == "cursor":
             lead = fake_cursor_lead()
-        else:
+        elif selection.lead:
             lead = fake_codex_lead()
     else:
-        orca = OrcaProvider()
+        orca = OrcaProvider() if enabled.get("orca", True) else None
         local = LocalWorkerProvider(
             local_enabled=enabled_local,
             ollama_host=str(ollama_host) if ollama_host else None,
@@ -346,12 +385,15 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         lead=lead,  # type: ignore[arg-type]
         local_worker=local,  # type: ignore[arg-type]
         providers=providers,
-        project_root=str(project_root) if project_root else None,
+        project_root=str(project_root),
         task_prompt=args.prompt,
         research_query=args.query,
         attachments=attachments,
         resume_run_id=getattr(args, "resume_run_id", None),
         verification_commands=verification_commands_from_config(cfg),
+        preferred_lead=preferred,
+        fallback_lead=fallback,
+        local_enabled=enabled_local,
     )
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
@@ -363,8 +405,11 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
     # manual_handoff already flows via state.metadata when the workflow sets it.
     payload["config_roots"] = {
         "repo_root": str(repo_root),
-        "project_root": str(project_root) if project_root else None,
+        "project_root": str(project_root),
         "local_enabled": enabled_local,
+        "preferred_lead": preferred,
+        "fallback_lead": fallback,
+        "providers_enabled": enabled,
         "fake_providers": use_fakes,
         "verification_commands": bindings.verification_commands,
         "attachments": list(attachments),

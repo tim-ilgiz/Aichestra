@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from aichestra.orchestration.change_signals import _is_test_path, infer_change_signals
@@ -188,6 +189,10 @@ class WorkflowBindings:
     research_fn: Callable[[WorkflowState], ResearchSummary] | None = None
     maintenance_kwargs: dict[str, Any] = field(default_factory=dict)
     verification_commands: list[list[str]] = field(default_factory=list)
+    preferred_lead: str = "codex"
+    fallback_lead: str = "cursor"
+    local_enabled: bool = False
+    local_model: Any = None
     # Deprecated Mode C seam — ignored when orca is bound (writers go via Orca).
     writer_fn: Callable[[WorkflowState, Phase], ProviderTaskResult] | None = None
 
@@ -420,6 +425,24 @@ class ModeCRunController:
         prompt = bindings.task_prompt or "orchestrated task"
         self.state.metadata["task_prompt"] = prompt
 
+        # Mode C must not run providers against ambient cwd.
+        root = bindings.project_root
+        if not root or not str(root).strip():
+            return {
+                "ok": False,
+                "detail": (
+                    "Mode C requires --project-root before any provider execution; "
+                    "refusing ambient cwd writes"
+                ),
+                "failure": FailureClass.ERROR.value,
+            }
+        if not Path(root).is_dir():
+            return {
+                "ok": False,
+                "detail": f"Mode C project-root is not a directory: {root}",
+                "failure": FailureClass.ERROR.value,
+            }
+
         if bindings.project_root:
             factory = detect_factory_tooling(bindings.project_root)
             self.state.metadata["factory"] = {
@@ -433,6 +456,15 @@ class ModeCRunController:
         attachment_routing = self._route_attachments(prompt=prompt)
         if attachment_routing is not None:
             self.state.metadata["media_routing"] = attachment_routing
+            if attachment_routing.get("vision_required") and not attachment_routing.get(
+                "allowed", True
+            ):
+                return {
+                    "ok": False,
+                    "detail": attachment_routing.get("reason")
+                    or "vision attachments cannot be routed",
+                    "failure": FailureClass.ERROR.value,
+                }
 
         if bindings.classify_fn:
             data = bindings.classify_fn(self.state)
@@ -477,13 +509,21 @@ class ModeCRunController:
             self.state.metadata["plan"] = {
                 "required": True,
                 "status": "pending",
-                "note": "LARGE path requires clarify/plan/tasks artifacts before implement",
+                "note": (
+                    "LARGE path hard-blocks implement until clarify/plan/tasks "
+                    "artifacts are ready (no fake status=recorded success)"
+                ),
                 "summary": prompt[:500],
             }
             self.state.metadata["tasks"] = {
                 "required": True,
                 "status": "pending",
             }
+            self.state.metadata["clarify"] = {
+                "required": True,
+                "status": "pending",
+            }
+            self.state.metadata["speckit_execution"] = "hard_blocked_until_artifacts"
 
         self._apply_scale_phases(path.scale)
 
@@ -564,14 +604,24 @@ class ModeCRunController:
             ):
                 # FR-058: vision inputs must reach a vision-capable provider via
                 # native attachments — path text alone is insufficient.
-                if attachment_routing.get("provider_hint") == "orca/cloud-vision":
-                    self.state.metadata["media_delivery"] = {
-                        "status": "path_only_pending_native_attach",
-                        "note": (
-                            "Attachments listed as paths; Orca native file attach "
-                            "not yet wired — vision work may be incomplete"
-                        ),
-                    }
+                return {
+                    "ok": False,
+                    "detail": (
+                        "Mode C vision attachments require native byte delivery "
+                        "(Orca --attach / staged inbox); path-only prompts refused"
+                    ),
+                    "failure": FailureClass.ERROR.value,
+                    "media_routing": attachment_routing,
+                }
+            if attachment_routing.get("vision_required") and not attachment_routing.get(
+                "allowed", True
+            ):
+                return {
+                    "ok": False,
+                    "detail": attachment_routing.get("reason")
+                    or "vision routing refused",
+                    "failure": FailureClass.ERROR.value,
+                }
 
         context: dict[str, Any] = {
             "task_prompt": prompt,
@@ -1125,7 +1175,11 @@ class ModeCRunController:
             }
         lead = self.bindings.lead
         if lead is None and self.bindings.providers:
-            selection = select_lead(self.bindings.providers)
+            selection = select_lead(
+                self.bindings.providers,
+                preferred=self.bindings.preferred_lead,
+                fallback=self.bindings.fallback_lead,
+            )
             self.state.metadata["lead_selection"] = {
                 "lead": selection.lead.value if selection.lead else None,
                 "reason": selection.reason,
@@ -1282,19 +1336,34 @@ class ModeCRunController:
             }
 
     def _route_attachments(self, *, prompt: str) -> dict[str, Any] | None:
-        paths = list(self.bindings.attachments or [])
+        paths = list(self.bindings.attachments or ())
         if not paths:
             return None
-        decision = route_media(paths, text=prompt)
+        from aichestra.providers.attachments import stage_attachments
+
+        decision = route_media(
+            paths,
+            text=prompt,
+            local_model=self.bindings.local_model,
+            local_enabled=bool(self.bindings.local_enabled),
+            prefer_orca_attachments=True,
+        )
+        delivery = stage_attachments(paths, self._effective_project_root())
+        bytes_ok = bool(delivery.bytes_delivered)
+        # Prefer staged paths for subsequent provider dispatch.
+        if delivery.staged:
+            self.bindings.attachments = tuple(delivery.staged)
+        elif delivery.resolved:
+            self.bindings.attachments = tuple(delivery.resolved)
         return {
             "vision_required": decision.vision_required,
             "allowed": decision.allowed,
             "provider_hint": decision.provider_hint,
             "reason": decision.reason,
             "summarized_text": decision.summarized_text,
-            "paths": paths,
-            # Native bytes attach not yet wired through Orca worker-start.
-            "bytes_delivered": False,
+            "paths": list(self.bindings.attachments),
+            "bytes_delivered": bytes_ok,
+            "attachment_delivery": delivery.to_dict(),
         }
 
     def _apply_scale_phases(self, scale: SpecKitScale) -> None:
@@ -1360,10 +1429,15 @@ class ModeCRunController:
         if lead is not None:
             return lead.kind.value
         if self.bindings.providers:
-            selection = select_lead(self.bindings.providers)
+            selection = select_lead(
+                self.bindings.providers,
+                preferred=self.bindings.preferred_lead,
+                fallback=self.bindings.fallback_lead,
+            )
             if selection.lead is not None:
                 return selection.lead.value
-        return ProviderKind.CODEX.value
+        preferred = (self.bindings.preferred_lead or "codex").strip().lower()
+        return preferred or ProviderKind.CODEX.value
 
     def _speckit_from_classify_data(
         self, data: Mapping[str, Any], *, prompt: str

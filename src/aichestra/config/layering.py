@@ -100,3 +100,62 @@ def save_machine_local(data: dict[str, Any], repo_root: Path | None = None) -> P
 def local_enabled(config: dict[str, Any] | None = None) -> bool:
     cfg = config if config is not None else resolve_config()
     return bool(cfg.get("local", {}).get("enabled", False))
+
+
+def provider_enabled(config: dict[str, Any] | None, kind: str) -> bool:
+    """Whether a named provider is enabled in layered config (default True).
+
+    Local worker uses ``local.enabled`` as the canonical switch.
+    """
+    cfg = config if config is not None else resolve_config()
+    key = kind.strip().lower().replace("_", "-")
+    if key in {"local", "local-worker", "local_worker"}:
+        return local_enabled(cfg)
+    providers = cfg.get("providers") if isinstance(cfg.get("providers"), dict) else {}
+    entry = providers.get(key) or providers.get(key.replace("-", "_"))
+    if isinstance(entry, dict) and "enabled" in entry:
+        return bool(entry["enabled"])
+    if isinstance(entry, bool):
+        return entry
+    return True
+
+
+def preferred_lead_name(config: dict[str, Any] | None = None) -> str:
+    cfg = config if config is not None else resolve_config()
+    providers = cfg.get("providers") if isinstance(cfg.get("providers"), dict) else {}
+    raw = providers.get("preferred_lead") or "codex"
+    return str(raw).strip().lower() or "codex"
+
+
+def fallback_lead_name(config: dict[str, Any] | None = None) -> str:
+    cfg = config if config is not None else resolve_config()
+    providers = cfg.get("providers") if isinstance(cfg.get("providers"), dict) else {}
+    raw = providers.get("fallback_lead") or "cursor"
+    return str(raw).strip().lower() or "cursor"
+
+
+def apply_provider_enable_overrides(
+    config: dict[str, Any],
+    *,
+    no_orca: bool = False,
+    no_codex: bool = False,
+    no_cursor: bool = False,
+    no_local: bool = False,
+) -> dict[str, Any]:
+    """Return a deep-copied config with CLI disable flags applied as runtime override."""
+    override: dict[str, Any] = {"providers": {}, "local": {}}
+    if no_orca:
+        override["providers"]["orca"] = {"enabled": False}
+    if no_codex:
+        override["providers"]["codex"] = {"enabled": False}
+    if no_cursor:
+        override["providers"]["cursor"] = {"enabled": False}
+    if no_local:
+        override["local"]["enabled"] = False
+    if not override["providers"] and "enabled" not in override["local"]:
+        return config
+    if not override["providers"]:
+        del override["providers"]
+    if "enabled" not in override["local"]:
+        del override["local"]
+    return deep_merge(config, override)

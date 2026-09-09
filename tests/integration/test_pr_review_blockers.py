@@ -80,7 +80,7 @@ def test_classify_not_hardcoded_medium() -> None:
     assert large.scale is SpecKitScale.LARGE_HIGH_RISK
 
 
-def test_workflow_classify_uses_speckit_and_binds_orca_run() -> None:
+def test_workflow_classify_uses_speckit_and_binds_orca_run(tmp_path: Path) -> None:
     orca = fake_orca("success")
     lead = fake_codex("success")
     wf = OrchestratedWorkflow(
@@ -89,7 +89,7 @@ def test_workflow_classify_uses_speckit_and_binds_orca_run() -> None:
         bindings=WorkflowBindings(
             orca=orca,
             lead=lead,
-            project_root=None,
+            project_root=str(tmp_path),
             task_prompt="fix one-line typo",
             maintenance_kwargs={"change_summary": "typo", "touches_behavior": False},
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
@@ -100,6 +100,25 @@ def test_workflow_classify_uses_speckit_and_binds_orca_run() -> None:
     assert wf.state.metadata["classify"]["classification"] == "small"
     assert wf.state.metadata.get("orca_run_id")
     assert any((req.role or "") == "ensure_run" for req in orca.sent)
+
+
+def test_mode_c_without_project_root_fails_before_orca() -> None:
+    orca = fake_orca("success")
+    wf = OrchestratedWorkflow(
+        mode=Mode.ORCHESTRATED,
+        research_useful=False,
+        bindings=WorkflowBindings(
+            orca=orca,
+            lead=fake_codex("success"),
+            project_root=None,
+            task_prompt="should not run",
+        ),
+    )
+    outcome = wf.run_phase()
+    assert outcome is not None
+    assert outcome.status.value == "failed"
+    assert "project-root" in outcome.detail
+    assert orca.sent == []
 
 
 def test_lead_review_includes_task_and_sanitized_verification(tmp_path: Path) -> None:

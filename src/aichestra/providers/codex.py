@@ -5,6 +5,7 @@ Never intercepts native `codex` CLI usage; Mode C calls this adapter explicitly.
 
 from __future__ import annotations
 
+from aichestra.providers.attachments import codex_image_flags
 from aichestra.providers.base import (
     FailureClass,
     ProviderAdapter,
@@ -66,6 +67,7 @@ class CodexProvider(ProviderAdapter):
         # Non-interactive exec path — does not shadow or wrap the user's `codex`.
         # Default sandbox is read-only; edits require an explicit workspace-write.
         sandbox = "read-only" if request.read_only else "workspace-write"
+        # Prompt before -i: Codex exec greedily consumes trailing tokens after --image.
         argv = [
             status.binary_path,
             "exec",
@@ -73,11 +75,27 @@ class CodexProvider(ProviderAdapter):
             "--sandbox",
             sandbox,
             prompt,
+            *codex_image_flags(request.attachments),
         ]
-        return run_cli_task(
+        result = run_cli_task(
             binary=status.binary_path,
             argv=argv,
             session=session,
             request=request,
             unavailable_detail="Codex binary unavailable",
         )
+        if request.attachments and any(
+            flag == "-i" for flag in argv
+        ):
+            meta = dict(result.metadata)
+            meta["bytes_delivered"] = True
+            meta["attachment_delivery"] = "codex_image_flags"
+            return ProviderTaskResult(
+                ok=result.ok,
+                output=result.output,
+                failure=result.failure,
+                detail=result.detail,
+                session_id=result.session_id,
+                metadata=meta,
+            )
+        return result

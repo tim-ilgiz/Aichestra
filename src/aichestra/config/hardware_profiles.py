@@ -68,8 +68,11 @@ def suggest_profile(memory_gb: float, *, has_gpu: bool = False) -> HardwareProfi
         return PROFILES["weak"]
     if memory_gb < 16:
         return PROFILES["medium"]
+    # Check powerful (>=32) before capable (>=24); otherwise 32+ never matches.
+    if memory_gb >= 32 and has_gpu:
+        return PROFILES["powerful"]
     if memory_gb >= 24 and has_gpu:
-        # Prefer example M4 profile only as a recommendation class, not identity.
+        # Example class for ~24GB unified-memory machines (e.g. M4 Pro fixture).
         return HardwareProfile(
             id="capable-unified-24plus",
             description="Capable machine (~24GB+) — ~14B-class optional",
@@ -79,8 +82,6 @@ def suggest_profile(memory_gb: float, *, has_gpu: bool = False) -> HardwareProfi
             normal_context_tokens=16_000,
             max_context_tokens=32_000,
         )
-    if memory_gb >= 32 and has_gpu:
-        return PROFILES["powerful"]
     return PROFILES["medium"]
 
 

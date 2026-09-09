@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from aichestra.providers.attachments import cursor_image_flags
 from aichestra.providers.base import (
     FailureClass,
     ProviderAdapter,
@@ -102,15 +103,29 @@ class CursorProvider(ProviderAdapter):
                 session_id=session.session_id,
             )
         prompt = request.bounded_prompt()
+        image_flags = cursor_image_flags(request.attachments)
         # Print/non-interactive; omit --force when read_only.
         if request.read_only:
-            argv = [status.binary_path, "-p", prompt]
+            argv = [status.binary_path, "-p", *image_flags, prompt]
         else:
-            argv = [status.binary_path, "-p", "--force", prompt]
-        return run_cli_task(
+            argv = [status.binary_path, "-p", "--force", *image_flags, prompt]
+        result = run_cli_task(
             binary=status.binary_path,
             argv=argv,
             session=session,
             request=request,
             unavailable_detail="Cursor agent binary unavailable",
         )
+        if image_flags:
+            meta = dict(result.metadata)
+            meta["bytes_delivered"] = True
+            meta["attachment_delivery"] = "cursor_image_flags"
+            return ProviderTaskResult(
+                ok=result.ok,
+                output=result.output,
+                failure=result.failure,
+                detail=result.detail,
+                session_id=result.session_id,
+                metadata=meta,
+            )
+        return result
