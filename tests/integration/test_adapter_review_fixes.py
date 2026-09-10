@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.fakes.providers import fake_execution_targets
+
 import json
 import sys
 from pathlib import Path
@@ -167,6 +169,7 @@ def test_missing_verification_commands_fail_workflow(tmp_path: Path) -> None:
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(
+            execution_targets=fake_execution_targets(),
             orca=fake_orca("success"),
             providers=[(fake_codex("success")).probe()],
             project_root=str(tmp_path),
@@ -193,6 +196,7 @@ def test_mode_c_does_not_use_edit_lock(tmp_path: Path) -> None:
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(
+            execution_targets=fake_execution_targets(),
             orca=fake_orca("success"),
             providers=[(fake_codex("success")).probe()],
             project_root=str(root),
@@ -280,7 +284,7 @@ def test_real_adapter_coordinator_contract(monkeypatch, tmp_path, provider, loca
         command = argv[2] if argv[1] == "orchestration" else "status"
         receipts = {
             "status": {}, "run-use": {}, "task-create": {"id": "t1"},
-            "worker-start": {"dispatchId": "d1", "worktreePath": str(tmp_path)},
+            "worker-start": {"dispatchId": "d1", "worktreePath": str(tmp_path), "launch": {"effective": {"agent": expected}}},
             "check": {"type": "worker_done", "dispatchId": "d1", "outcome": "succeeded"},
             "run-show": {"id": "r1", "state": "active"},
             "reply": {}, "worker-release": {"state": "released"}, "worker-list": {"workers": []},
@@ -295,7 +299,7 @@ def test_real_adapter_coordinator_contract(monkeypatch, tmp_path, provider, loca
               "local_available": local, "providers": {provider: {"available": True}}}
     attachment = tmp_path / "input.txt"
     attachment.write_text("reference")
-    request = ProviderTaskRequest(prompt="Update the project", role="mode_c_handoff", attachments=(str(attachment),),
+    request = ProviderTaskRequest(execution_target=fake_execution_targets(provider)[0], prompt="Update the project", role="mode_c_handoff", attachments=(str(attachment),),
         gate_handler=lambda gate: {"ok": True, "gate": gate},
         cwd=str(tmp_path), context={"run_id": "r1", "provider_policy": policy,
         "project_context": {"instruction_excerpts": {"AGENTS.md": "x" * 5000}, "marker": "CONTEXT_END"}})
@@ -359,8 +363,9 @@ def coordinator_rpc(monkeypatch, tmp_path):
             "run-use": {"run": {"id": "r1"}},
             "task-create": {"task": {"id": "t1"}},
             "worker-start": {"dispatchId": "d1", "agentTerminalHandle": "worker1",
-                             "worktreePath": str(tmp_path)},
+                             "worktreePath": str(tmp_path), "launch": {"effective": {"agent": "codex"}}},
             "reply": {}, "worker-release": {"state": "released"},
+            "worker-show": {"dispatchId": "d1", "terminalState": "released"},
             "worker-list": {"workers": []},
             # Real Run records are namespaces, with no terminal state field.
             "run-show": {"run": {"id": "r1", "objective": "change"}},
@@ -378,6 +383,8 @@ def coordinator_rpc(monkeypatch, tmp_path):
         if command == "reply":
             replied = True
         data = fault.get(command, data)
+        if callable(data):
+            data = data()
         return ProviderTaskResult(ok=data is not None, output=json.dumps({"result": data}))
 
     monkeypatch.setattr("aichestra.providers.orca.run_cli_task", run)
@@ -386,6 +393,7 @@ def coordinator_rpc(monkeypatch, tmp_path):
 
 def _coordinator_controller(adapter, tmp_path):
     return ModeCRunController(bindings=WorkflowBindings(
+        execution_targets=fake_execution_targets(),
         orca=adapter, providers=[fake_codex().probe()], project_root=str(tmp_path),
         task_prompt="fix typo", verification_commands=[[sys.executable, "-c", "pass"]]))
 
@@ -421,6 +429,9 @@ def test_production_gate_reply_precedes_completion_and_cleanup(coordinator_rpc, 
 def test_production_mode_c_fails_closed(coordinator_rpc, tmp_path, fault):
     adapter, _, faults = coordinator_rpc
     faults.update(fault)
+    if "worker-release" in fault:
+        release_fault = fault["worker-release"] or {}
+        faults["worker-show"] = {"dispatchId": "d1", "terminalState": release_fault.get("state", "release_unknown")}
     state = _coordinator_controller(adapter, tmp_path).run_all()
     assert state.failed and state.stopped
     assert state.metadata["orca_run_status"]["ok"] is False
@@ -431,12 +442,13 @@ def test_local_only_coordinator_cannot_use_unpinned_opencode(coordinator_rpc, tm
     from tests.fakes.providers import fake_local_worker
     controller = _coordinator_controller(adapter, tmp_path)
     controller.bindings.providers = [fake_local_worker().probe()]
+    controller.bindings.execution_targets = ()
     controller.bindings.local_enabled = True
     controller.bindings.local_model_ref = "ollama/qwen"
     controller.bindings.local_endpoint = "http://localhost:11434"
     state = controller.run_all()
     assert state.failed and state.stopped
-    assert "cannot yet pin" in state.gate_outcomes[GateKind.ORCA_HANDOFF.value].detail
+    assert "no runnable" in state.gate_outcomes[GateKind.ORCA_HANDOFF.value].detail
     assert not any("worker-start" in c or "task-create" in c for c in calls)
 
 
@@ -448,3 +460,81 @@ def test_legacy_mutations_require_authority(coordinator_rpc, monkeypatch, role):
         context={"run_id": "r1"}))
     assert not result.ok
     assert not any(c[1] == "orchestration" for c in calls)
+
+
+@pytest.mark.parametrize("runtime", ["claude", "gemini", "acme-agent"])
+def test_arbitrary_bootstrap_without_legacy_lead(coordinator_rpc, tmp_path, monkeypatch, runtime):
+    from aichestra.execution.launch_strategies import LAUNCH_ADAPTERS, NativeLaunch
+    monkeypatch.setattr("aichestra.execution.launch_strategies.LAUNCH_ADAPTERS",
+                        [*LAUNCH_ADAPTERS, NativeLaunch(runtime)])
+    adapter, calls, faults = coordinator_rpc
+    faults["worker-start"] = {"dispatchId": "d1", "agentTerminalHandle": "worker1",
+        "worktreePath": str(tmp_path), "launch": {"effective": {"agent": runtime}}}
+    controller = _coordinator_controller(adapter, tmp_path)
+    controller.bindings.providers = []
+    controller.bindings.execution_targets = fake_execution_targets(runtime)
+    state = controller.run_all()
+    assert not state.failed
+    launch = next(c for c in calls if "worker-start" in c)
+    assert launch[launch.index("--agent") + 1] == runtime
+    assert sum("run-create" in c for c in calls) == 1
+    assert state.metadata["bootstrap_execution_target"]["runtime"] == runtime
+
+
+def test_bootstrap_binding_receipt_mismatch_fails_closed(coordinator_rpc, tmp_path):
+    adapter, calls, faults = coordinator_rpc
+    faults["worker-start"] = {"dispatchId": "d1", "launch": {"effective": {"agent": "wrong"}}}
+    state = _coordinator_controller(adapter, tmp_path).run_all()
+    assert state.failed
+    assert not any("check" in c for c in calls)
+
+
+@pytest.mark.parametrize("initial", ["released", "already_released", "release_pending", "release_unknown"])
+def test_exact_release_recovery(coordinator_rpc, tmp_path, initial):
+    adapter, calls, faults = coordinator_rpc
+    receipts = iter([
+        {"state": initial, "projection": {"nextAction": {
+            "args": ["orchestration", "worker-release", "--dispatch", "d1", "--json"]}}},
+        {"state": "released", "dispatchId": "d1"},
+    ])
+    faults["worker-release"] = lambda: next(receipts)
+    state = _coordinator_controller(adapter, tmp_path).run_all()
+    assert not state.failed
+    if initial.startswith("release_"):
+        assert any("worker-show" in c for c in calls)
+    assert not any(c[1:3] == ["terminal", "close"] for c in calls)
+
+
+@pytest.mark.parametrize("action", [
+    ["terminal", "close", "--all"],
+    ["orchestration", "worker-release", "--dispatch", "someone-else", "--json"],
+    ["orchestration", "worker-release", "--dispatch", "d1", "--json", ";", "whoami"],
+    None,
+])
+def test_cleanup_rejects_unsafe_or_missing_recovery(coordinator_rpc, tmp_path, action):
+    adapter, calls, faults = coordinator_rpc
+    faults["worker-release"] = {"state": "release_pending", "projection": {"nextAction": action}}
+    faults["worker-show"] = {"dispatchId": "d1", "terminalState": "release_pending"}
+    state = _coordinator_controller(adapter, tmp_path).run_all()
+    assert state.failed
+    assert sum("worker-release" in c for c in calls) == 1
+
+
+def test_cleanup_recovery_is_bounded(coordinator_rpc, tmp_path):
+    adapter, calls, faults = coordinator_rpc
+    pending = {"dispatchId": "d1", "state": "release_pending", "terminalState": "release_pending",
+        "projection": {"nextAction": ["orchestration", "worker-release", "--dispatch", "d1", "--json"]}}
+    faults.update({"worker-release": pending, "worker-show": pending})
+    state = _coordinator_controller(adapter, tmp_path).run_all()
+    assert state.failed
+    assert sum("worker-release" in c for c in calls) == 4
+
+
+
+def test_pending_automatic_recovery_can_finish_without_retry(coordinator_rpc, tmp_path):
+    adapter, calls, faults = coordinator_rpc
+    faults["worker-release"] = {"state": "release_pending", "recovery": "Recovery will retry after reconnect"}
+    state = _coordinator_controller(adapter, tmp_path).run_all()
+    assert not state.failed
+    assert sum("worker-release" in c for c in calls) == 1
+    assert any("worker-show" in c for c in calls)

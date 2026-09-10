@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.fakes.providers import fake_execution_targets
+
 import sys
 from pathlib import Path
 from unittest import mock
@@ -88,6 +90,7 @@ def test_workflow_classify_uses_speckit_and_binds_orca_run(tmp_path: Path) -> No
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(
+            execution_targets=fake_execution_targets(),
             orca=orca,
             providers=[(lead).probe()],
             project_root=str(tmp_path),
@@ -110,6 +113,7 @@ def test_mode_c_without_project_root_fails_before_orca() -> None:
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(
+            execution_targets=fake_execution_targets(),
             orca=orca,
             providers=[(fake_codex("success")).probe()],
             project_root=None,
@@ -133,6 +137,7 @@ def test_mode_c_handoff_includes_task_without_lead_review_role(tmp_path: Path) -
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(
+            execution_targets=fake_execution_targets(),
             orca=orca,
             providers=[(lead).probe()],
             project_root=str(proj),
@@ -190,6 +195,7 @@ def test_quota_failure_prepares_manual_handoff(tmp_path: Path) -> None:
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(
+            execution_targets=fake_execution_targets(),
             orca=orca,
             providers=[(fake_codex("success")).probe()],
             project_root=str(proj),

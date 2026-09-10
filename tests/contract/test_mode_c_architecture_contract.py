@@ -8,6 +8,8 @@ supplies discovery, ExecutionTargets, policy, security, and deterministic gates.
 
 from __future__ import annotations
 
+from tests.fakes.providers import fake_execution_targets
+
 import json
 import sys
 from pathlib import Path
@@ -57,6 +59,7 @@ def _small_bindings(
     else:
         root = project_root  # type: ignore[assignment]
     return WorkflowBindings(
+        execution_targets=fake_execution_targets(),
         orca=orca,
 
 
@@ -96,6 +99,7 @@ def test_mode_c_requires_project_root() -> None:
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         bindings=WorkflowBindings(
+            execution_targets=fake_execution_targets(),
             orca=orca,
             providers=[(lead).probe()],
             project_root=None,
@@ -354,6 +358,7 @@ def test_disabled_lead_never_dispatched(tmp_path: Path) -> None:
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         bindings=WorkflowBindings(
+            execution_targets=(),
             orca=orca,
 
             providers=[
@@ -574,6 +579,7 @@ def test_disabled_codex_is_never_dispatched(tmp_path: Path) -> None:
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         bindings=WorkflowBindings(
+            execution_targets=fake_execution_targets(),
             orca=orca,
 
             providers=[orca.probe(), codex.probe(), cursor.probe()],
@@ -599,6 +605,7 @@ def test_disabled_cursor_is_never_dispatched(tmp_path: Path) -> None:
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         bindings=WorkflowBindings(
+            execution_targets=fake_execution_targets(),
             orca=orca,
 
             providers=[orca.probe(), codex.probe(), cursor.probe()],
@@ -620,6 +627,7 @@ def test_no_available_lead_does_not_default_to_codex(tmp_path: Path) -> None:
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         bindings=WorkflowBindings(
+            execution_targets=(),
             orca=orca,
 
             providers=[

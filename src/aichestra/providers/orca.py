@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import os
 from dataclasses import replace
 import time
@@ -36,6 +37,34 @@ from aichestra.providers.execution import run_cli_task
 # Common CLI names; discovery only for PATH — never wraps/intercepts user invocations.
 _ORCA_BINARIES = ("orca", "orca-cli")
 _DEFAULT_AGENT = "codex"
+
+
+def _release_recovery_args(action, dispatch_id: str, binary: str) -> list[str] | None:
+    if isinstance(action, dict):
+        action = action.get("args", action.get("argv", action.get("command")))
+    if isinstance(action, str):
+        if action.startswith("Inspect with: "):
+            action = action[len("Inspect with: "):]
+        try:
+            action = shlex.split(action)
+        except ValueError:
+            return None
+    if not isinstance(action, list) or not all(isinstance(x, str) for x in action):
+        return None
+    args = list(action)
+    if args and args[0] in {binary, "orca", "orca-cli", "orca-ide"}:
+        args.pop(0)
+    if len(args) < 5 or args[:2] not in (["orchestration", "worker-release"], ["orchestration", "worker-show"]):
+        return None
+    # Exact grammar prevents shell injection, scope broadening and duplicate flags.
+    tail = args[2:]
+    if tail == ["--dispatch", dispatch_id, "--json"]:
+        return args
+    if (len(tail) == 5 and tail[:2] == ["--dispatch", dispatch_id]
+            and tail[2] == "--retry-request" and tail[3] and not tail[3].startswith("-")
+            and tail[4] == "--json"):
+        return args
+    return None
 
 
 def resolve_orca_binary() -> str | None:
@@ -445,16 +474,13 @@ class OrcaProvider(ProviderAdapter):
                 session_id=session.session_id)
         agent = str(request.context.get("agent") or _DEFAULT_AGENT)
         if role == "mode_c_handoff":
-            policy = request.context.get("provider_policy") or {}
-            available = policy.get("providers") or {}
-            agent = next((name for name in (
-                policy.get("preferred_lead"), policy.get("fallback_lead")
-            ) if name in {"codex", "cursor"} and available.get(name, {}).get("available")), "")
-            if not agent and policy.get("local_enabled") and policy.get("local_available"):
-                agent = "opencode"
-            if not agent:
+            from aichestra.execution.launch_strategies import adapter_for
+            try:
+                launch_adapter = adapter_for(request.execution_target)
+                agent = request.execution_target.runtime.id
+            except (ValueError, AttributeError) as exc:
                 return ProviderTaskResult(ok=False, failure=FailureClass.UNAVAILABLE,
-                    detail="No enabled, available coordinator provider", session_id=session.session_id)
+                    detail=f"No proven coordinator ExecutionTarget: {exc}", session_id=session.session_id)
             # Preserve the complete policy; generic bounded_prompt truncates context.
             contract = (
                 "Target:\nYou are the explicit Mode C coordinator for project_root in ProjectContext. "
@@ -474,9 +500,6 @@ class OrcaProvider(ProviderAdapter):
                 "Do not impose product-name phase routing. "
                 "Unsupported targets MUST NOT be dispatched. "
                 "Legacy preferred_lead/local_* fields are secondary compatibility seams only. "
-                "Coordinator bootstrap itself may still use a temporary legacy launch path "
-                "until launch-strategy migration completes; "
-                "legacy bootstrap launch is not the inner-worker selection policy.\n"
                 "Ownership:\nYou own the dynamic DAG: create arbitrary Tasks/Dispatches through Orca. "
                 "Orca owns child workers and worktrees. Aichestra owns deterministic gates. "
                 "At the implementation boundary, converge edits into the coordinator checkout, "
@@ -519,11 +542,6 @@ class OrcaProvider(ProviderAdapter):
                 detail="Canonical Run settled" if settled else "Canonical Run failed, unsettled, or unverifiable",
                 metadata={**result.metadata, "receipt": receipt, "tasks": _parse_orca_json(tasks.output),
                           "settled": settled})
-
-        if agent == "opencode" and role not in {"ensure_run", "control_plane", "classify", "phase_report", "status_ping"}:
-            return ProviderTaskResult(ok=False, failure=FailureClass.UNAVAILABLE,
-                detail="Orca OpenCode launch cannot yet pin the selected Ollama model/endpoint; local-only Mode C unavailable",
-                session_id=session.session_id)
 
         # Phase reports must never create Runs — local metadata only at adapter.
         if role in {"phase_report", "status_ping"}:
@@ -584,6 +602,65 @@ class OrcaProvider(ProviderAdapter):
             return self._register_run(binary, session, request)
 
         return self._dispatch_supervised(binary, session, request, agent=agent)
+
+    def _release_worker(self, binary, session, request, dispatch_id, run_id):
+        """Bounded exact-dispatch recovery; never execute arbitrary receipt text."""
+        history = []
+        def call(args):
+            result = run_cli_task(binary=binary, argv=[binary, *args],
+                session=session, request=request, unavailable_detail="Orca unavailable")
+            history.append({"argv": args, "result": result.to_dict()})
+            payload = _parse_orca_json(result.output)
+            data = payload.get("result", payload)
+            return result, data if isinstance(data, dict) else {}
+
+        result, data = call(["orchestration", "worker-release", "--dispatch", dispatch_id, "--json"])
+        state = data.get("state", "release_unknown") if data.get("dispatchId", dispatch_id) == dispatch_id else "release_unknown"
+        for _ in range(3):
+            if state not in {"release_pending", "release_unknown"}:
+                break
+            projection = data.get("projection")
+            action = projection.get("nextAction") if isinstance(projection, dict) else None
+            if action is None:
+                action = data.get("recovery")
+            args = _release_recovery_args(action, dispatch_id, binary)
+            if args is not None:
+                result, data = call(args)
+            # Recovery results alone cannot establish that this worker exited.
+            inspection, exact = call(["orchestration", "worker-show", "--dispatch", dispatch_id, "--json"])
+            worker = exact.get("worker") or {}
+            exact_id = exact.get("dispatchId") or worker.get("dispatch_id")
+            if not inspection.ok or exact_id != dispatch_id:
+                state = "release_unknown"
+                break
+            state = data.get("state", "release_unknown")
+            if data.get("dispatchId", dispatch_id) != dispatch_id:
+                state = "release_unknown"
+                break
+            if state not in {"released", "already_released"}:
+                data = exact
+                projection = exact.get("projection") or {}
+                if not isinstance(projection, dict):
+                    projection = {}
+                resource = exact.get("terminalResource") or {}
+                observed = projection.get("terminalState", exact.get("terminalState"))
+                if observed is None and isinstance(resource, dict) and resource.get("releaseState") == "released":
+                    observed = "released"
+                state = observed or state
+                if state == "released":
+                    result = inspection
+            if args is None:
+                # Automatic Orca recovery may have completed during inspection.
+                # Unknown instructions never authorize a mutation or blind retry.
+                break
+
+        workers, listing = call(["orchestration", "worker-list", "--run", run_id, "--json"])
+        rows = _receipt_rows(listing, "workers")
+        unresolved = rows is None or any(row.get("terminalState") not in {"released", "retained"}
+                                        for row in rows)
+        released = state in {"released", "already_released"}
+        ok = bool(result.ok and released and workers.ok and not unresolved)
+        return ok, {"state": state, "history": history, "unresolved_resources": unresolved}
 
     def _register_run(
         self,
@@ -779,6 +856,11 @@ class OrcaProvider(ProviderAdapter):
             *attach_flags,
             "--json",
         ]
+        if request.execution_target is not None:
+            from aichestra.execution.launch_strategies import adapter_for
+            launch_adapter = adapter_for(request.execution_target)
+            index = worker_argv.index("--agent")
+            worker_argv[index:index + 2] = launch_adapter.arguments(request.execution_target)
         if worktree not in {"new-child", "new-top-level"}:
             for flag in ("--name", "--setup"):
                 index = worker_argv.index(flag)
@@ -812,8 +894,23 @@ class OrcaProvider(ProviderAdapter):
             }
         )
         if not worker_result.ok or not dispatch_id:
+            data = worker_payload.get("result", worker_payload)
+            detail = data.get("lastError") or worker_result.detail or "Missing coordinator dispatch id"
+            failed = self._failed_dispatch(replace(worker_result, ok=False,
+                failure=FailureClass.ERROR, detail=detail), steps, session.session_id)
+            # A failed start may leave a settled worker resource. Orca release
+            # itself enforces ownership; never close the terminal ourselves.
+            if dispatch_id and data.get("state") == "failed":
+                _, cleanup = self._release_worker(binary, session, request, dispatch_id, run_id)
+                failed = replace(failed, metadata={**failed.metadata, "cleanup": cleanup})
+            return failed
+
+        if request.execution_target is not None and not launch_adapter.confirms(
+            request.execution_target, worker_payload
+        ):
             return self._failed_dispatch(replace(worker_result, ok=False,
-                failure=FailureClass.ERROR, detail=worker_result.detail or "Missing coordinator dispatch id"),
+                failure=FailureClass.ERROR,
+                detail=f"Orca launch binding unverified for dispatch {dispatch_id}; inspect worker-show"),
                 steps, session.session_id)
 
         timeout_ms = max(1_000, int(float(request.timeout_seconds) * 1000))
@@ -954,19 +1051,9 @@ class OrcaProvider(ProviderAdapter):
                 metadata=meta,
             )
         if done_meta.get("event_type") == "worker_done" and done_meta.get("event_dispatch_id") == dispatch_id:
-            release = run_cli_task(binary=binary,
-                argv=[binary, "orchestration", "worker-release", "--dispatch", dispatch_id, "--json"],
-                session=session, request=request, unavailable_detail="Orca unavailable")
-            workers = run_cli_task(binary=binary,
-                argv=[binary, "orchestration", "worker-list", "--run", run_id,
-                      "--terminal-state", "reclaimable", "--json"],
-                session=session, request=request, unavailable_detail="Orca unavailable")
-            rows = _receipt_rows(_parse_orca_json(workers.output), "workers")
-            meta["cleanup"] = {"release": release.to_dict(), "workers": workers.to_dict()}
-            release_receipt = _parse_orca_json(release.output)
-            release_state = release_receipt.get("result", release_receipt)
-            released = isinstance(release_state, dict) and release_state.get("state") in {"released", "already_released"}
-            if not release.ok or not released or not workers.ok or rows != []:
+            cleaned, cleanup = self._release_worker(binary, session, request, dispatch_id, run_id)
+            meta["cleanup"] = cleanup
+            if not cleaned:
                 done_ok, done_detail = False, "Coordinator resource cleanup failed or unverifiable"
         if request.role == "mode_c_handoff" and not gate_answered:
             done_ok, done_detail = False, "Coordinator omitted maintenance gate handshake"

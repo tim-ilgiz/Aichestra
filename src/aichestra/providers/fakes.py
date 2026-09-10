@@ -213,3 +213,14 @@ def fake_local_worker(*, enabled: bool) -> FakeModeCProvider:
         available=enabled,
         output="fake local-worker research summary",
     )
+
+
+def fake_execution_targets(statuses, policy):
+    """Quota-free CLI test bindings. These are never live launch evidence."""
+    from aichestra.execution.domain import AgentRuntime, Compatibility, DiscoveryFacts, LaunchCapability, LaunchStrategy
+    from aichestra.execution.targets import resolve_targets
+    runtimes = tuple(AgentRuntime(s.kind.value, available=s.available)
+                     for s in statuses if s.kind.value in {"codex", "cursor"})
+    return tuple(resolve_targets(DiscoveryFacts(runtimes=runtimes),
+        tuple(Compatibility(r.id) for r in runtimes), policy,
+        tuple(LaunchCapability(r.id, strategy=LaunchStrategy.ORCA_NATIVE) for r in runtimes)))

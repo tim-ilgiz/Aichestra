@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.fakes.providers import fake_execution_targets
+
 import json
 import sys
 from pathlib import Path
@@ -120,6 +122,7 @@ def test_vision_attachment_delivered_and_wired(tmp_path: Path) -> None:
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(
+            execution_targets=fake_execution_targets(),
             orca=orca,
             providers=[(fake_codex("success")).probe()],
             project_root=str(tmp_path),

@@ -144,8 +144,8 @@ class Compatibility:
 class LaunchCapability:
     """Trusted adapter input for an exact binding, NOT discovery evidence.
 
-    T169–T171 supply no production launch capabilities. Future launch adapters
-    must verify the Orca-supervised process before supplying this input.
+    The installed Orca contract establishes the launch path. Production launch
+    adapters must also validate its effective binding receipt on every dispatch.
     """
 
     runtime: str

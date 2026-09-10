@@ -656,7 +656,7 @@ security, deterministic gates and verification.
       policy.
       (MODE-C-017–020; FR-005/047/050/051/065/066/069)
 
-- [ ] T173 CRITICAL: Resolve exactly one runnable bootstrap ExecutionTarget
+- [x] T173 CRITICAL: Resolve exactly one runnable bootstrap ExecutionTarget
       solely for launching the generic Mode C coordinator.
 
       This is a narrow bootstrap placement exception.
@@ -666,6 +666,12 @@ security, deterministic gates and verification.
 
       No runnable coordinator target → Mode C fail closed.
       (MODE-C-017–020; FR-005/047/050/051/065/066/069)
+
+      Implemented: bootstrap selects one runnable target before Run creation;
+      the production Orca adapter uses that target and validates its effective
+      native launch receipt. No legacy lead/local fallback controls startup.
+      Adapter tests launch an arbitrary registered native runtime with no legacy
+      providers, assert one Run, and reject a mismatched launch receipt.
 
 - [ ] T174 CRITICAL: Implement launch-strategy abstraction for ExecutionTargets.
 
@@ -685,6 +691,11 @@ security, deterministic gates and verification.
 
       The bridge must not create an Aichestra-owned agent loop.
       (MODE-C-017–020; FR-005/047/050/051/065/066/069)
+
+      Partial production implementation: launch adapter protocol/registry,
+      installed Orca schema probing, runtime-managed native launches, and
+      fail-closed unsupported bindings. Proven existing-terminal/terminal-bridge
+      backend bindings are still missing; this task remains open.
 
 - [ ] T175 CRITICAL: An ExecutionTarget may be advertised as runnable only when
       its launch strategy is proven to bind the actual agent process to the
@@ -708,7 +719,11 @@ security, deterministic gates and verification.
       and Mode C must not select the target.
       (MODE-C-017–020; FR-005/047/050/051/065/066/069)
 
-- [ ] T176 HIGH: Implement Orca worker-release recovery semantics.
+      Partial evidence: native worker-start effective runtime receipt checked
+      on every bootstrap launch. Explicit provider/model/endpoint combinations
+      remain unsupported; terminal process binding proof is not implemented.
+
+- [x] T176 HIGH: Implement Orca worker-release recovery semantics.
 
       Handle at least:
 
@@ -798,8 +813,19 @@ security, deterministic gates and verification.
       If no suitable local target is available on the current machine, keep
       local-only live validation explicitly NOT VALIDATED rather than silently
       passing it.
-      <!-- NOT VALIDATED: no fresh live Mode C smoke on current HEAD.
-           Local-only Mode C live validation: NOT VALIDATED. -->
+      <!-- NOT VALIDATED (2026-09-10): real CLI in isolated Orca worktree
+           created run_644b49cc1a2d and coordinator ctx_0ea2d3fc56ef with
+           launch.effective.agent=codex. Orca worker-start failed at
+           dispatch_input: agent_prompt_stalled; terminal showed
+           zsh: parse error near `)'. No child Dispatch or canonical success.
+           Exact failed worker released and worker-list confirmed released.
+           Second real CLI invocation with --no-codex selected Gemini:
+           run_38ad790d2947 / ctx_adcb7abb14df, launch.effective.agent=gemini.
+           Gemini required interactive Code Assist login; no child/success.
+           Production adapter released the failed worker; canonical worker-list
+           confirmed released. No live acceptance claim for either invocation.
+           Local-only Mode C live validation: NOT VALIDATED; no proven
+           provider/model/endpoint launch adapter on this machine. -->
 
 Do not mark T163/T169–T176 complete merely because documentation describes the
 architecture. Coordinator bootstrap, project-context, and workflow-ownership

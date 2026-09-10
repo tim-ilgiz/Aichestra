@@ -102,7 +102,7 @@ def _target(
 def _bindings(root: Path, *, orca, targets=(), policy=None) -> WorkflowBindings:
     return WorkflowBindings(
         orca=orca,
-        providers=[fake_codex("success").probe()],
+        providers=[],
         project_root=str(root),
         task_prompt="implement safely",
         maintenance_kwargs={"change_summary": "x", "touches_behavior": False},
@@ -114,7 +114,7 @@ def _bindings(root: Path, *, orca, targets=(), policy=None) -> WorkflowBindings:
 
 def test_mode_c_package_contains_execution_targets(tmp_path: Path) -> None:
     orca = fake_orca("success")
-    target = _target()
+    target = _target(provider=None, model=None, endpoint=None, launch_strategy=LaunchStrategy.ORCA_NATIVE)
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         bindings=_bindings(tmp_path, orca=orca, targets=[target]),
@@ -129,12 +129,12 @@ def test_mode_c_package_contains_execution_targets(tmp_path: Path) -> None:
     assert len(package["execution_targets"]) == 1
     row = package["execution_targets"][0]
     assert row["runtime"] == "weird-agent"
-    assert row["provider"] == "weird-backend"
-    assert row["model"] == "coder"
+    assert row["provider"] is None
+    assert row["model"] is None
     assert row["locality"] == "local"
     assert "code_edit" in row["capabilities"]
-    assert row["launch_strategy"] == "unsupported"
-    assert row["runnable"] is False
+    assert row["launch_strategy"] == "orca-native"
+    assert row["runnable"] is True
 
 
 def test_arbitrary_fake_runtime_serializes_without_product_branches() -> None:
@@ -230,7 +230,7 @@ def test_coordinator_context_receives_capabilities_locality_policy(
         preferred_targets=frozenset(),
         allowed_localities=frozenset({Locality.LOCAL, Locality.CLOUD}),
     )
-    target = _target(preferred=True, caps=frozenset({"shell", "code_edit"}))
+    target = _target(launch_strategy=LaunchStrategy.ORCA_NATIVE, preferred=True, caps=frozenset({"shell", "code_edit"}))
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         bindings=_bindings(tmp_path, orca=orca, targets=[target], policy=policy),
@@ -265,7 +265,7 @@ def test_coordinator_context_receives_capabilities_locality_policy(
     assert "Use only enabled, available cloud providers" not in adapter_src
     assert "OpenCode launch is unavailable" not in adapter_src
     assert "The coordinator owns inner worker selection" in adapter_src
-    assert "legacy bootstrap launch is not the inner-worker selection policy" in adapter_src
+    assert "temporary legacy launch path" not in adapter_src
     assert "Unsupported targets MUST NOT be dispatched" in adapter_src
     assert "Target locality may be local, remote, or cloud" in adapter_src
 
@@ -273,7 +273,7 @@ def test_coordinator_context_receives_capabilities_locality_policy(
 def test_product_id_change_does_not_require_workflow_branch(tmp_path: Path) -> None:
     orca = fake_orca("success")
     for runtime, provider in (("alpha-rt", "alpha-p"), ("beta-rt", "beta-p")):
-        target = _target(runtime=runtime, provider=provider, model="m")
+        target = _target(runtime=runtime, provider=provider, model="m", launch_strategy=LaunchStrategy.ORCA_NATIVE)
         wf = ModeCRunController(
             mode=Mode.ORCHESTRATED,
             bindings=_bindings(tmp_path, orca=orca, targets=[target]),
@@ -297,8 +297,8 @@ def test_execution_targets_do_not_schedule_aichestra_inner_workers(
     orca = fake_orca("success")
     # Many targets still must not create research/implement/writer roles.
     targets = [
-        _target(runtime="rt-a", provider="p-a", model="m1"),
-        _target(runtime="rt-b", provider="p-b", model="m2", locality=Locality.CLOUD),
+        _target(runtime="rt-a", provider="p-a", model="m1", launch_strategy=LaunchStrategy.ORCA_NATIVE),
+        _target(runtime="rt-b", provider="p-b", model="m2", locality=Locality.CLOUD, launch_strategy=LaunchStrategy.ORCA_NATIVE),
     ]
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
@@ -330,7 +330,7 @@ def test_legacy_fields_marked_secondary_compatibility(tmp_path: Path) -> None:
     orca = fake_orca("success")
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
-        bindings=_bindings(tmp_path, orca=orca, targets=[_target()]),
+        bindings=_bindings(tmp_path, orca=orca, targets=[_target(launch_strategy=LaunchStrategy.ORCA_NATIVE)]),
     )
     wf.bindings.preferred_lead = "codex"
     wf.bindings.fallback_lead = "cursor"
@@ -634,6 +634,7 @@ def test_serialized_surfaces_never_leak_endpoint_secrets(tmp_path: Path) -> None
         provider="home-vllm",
         model="lab",
         endpoint=dirty,
+        launch_strategy=LaunchStrategy.ORCA_NATIVE,
         locality=Locality.LOCAL,
     )
     # Internal exact endpoint must remain intact for future launch proof.
@@ -684,3 +685,43 @@ def test_serialized_surfaces_never_leak_endpoint_secrets(tmp_path: Path) -> None
     for key, value in OWNERSHIP_METADATA.items():
         assert direct[key] == value
     assert "orchestration_owner" not in direct
+
+
+def test_no_runnable_target_fails_before_run_creation(tmp_path):
+    orca = fake_orca("success")
+    controller = ModeCRunController(bindings=_bindings(tmp_path, orca=orca, targets=[_target()]))
+    state = controller.run_all()
+    assert state.failed
+    assert not orca.sent
+
+
+def test_production_resolver_discovers_native_launch_contract(monkeypatch):
+    from types import SimpleNamespace
+    from aichestra.execution import serialize as module
+    from aichestra.execution.domain import Compatibility
+    from aichestra.execution.launch_strategies import NativeLaunch
+    facts = DiscoveryFacts(runtimes=(AgentRuntime("acme-agent", available=True),))
+    monkeypatch.setattr(module, "discover_execution_facts", lambda *a, **k: facts)
+    monkeypatch.setattr(module, "load_compatibility_bindings", lambda c: (Compatibility("acme-agent"),))
+    monkeypatch.setattr("aichestra.providers.orca.resolve_orca_binary", lambda: "orca-test")
+    monkeypatch.setattr("aichestra.execution.launch_strategies.LAUNCH_ADAPTERS", [NativeLaunch("acme-agent")])
+    calls = []
+    def probe(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"schemaVersion": 1, "commands": [
+            {"path": ["orchestration", "worker-start"], "flags": ["agent", "task", "worktree"]}]}))
+    monkeypatch.setattr("aichestra.execution.launch_strategies.subprocess.run", probe)
+    targets, _, _ = module.resolve_mode_c_execution({})
+    assert targets[0].runnable
+    assert calls == [["orca-test", "agent-context", "--json"]]
+    # Native launch cannot pretend that --agent also selects an endpoint/model.
+    assert not NativeLaunch("acme-agent").accepts(_target(runtime="acme-agent"))
+
+
+def test_unproven_candidates_not_exposed_to_coordinator(tmp_path):
+    from tests.fakes.providers import fake_execution_targets
+    orca = fake_orca("success")
+    targets = [*fake_execution_targets(), _target()]
+    state = ModeCRunController(bindings=_bindings(tmp_path, orca=orca, targets=targets)).run_all()
+    assert not state.failed
+    assert len(state.metadata["mode_c_policy_package"]["execution_targets"]) == 1

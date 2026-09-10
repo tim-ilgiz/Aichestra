@@ -50,6 +50,11 @@ def load_compatibility_bindings(
             continue
         seen.add(key)
         bindings.append(legacy)
+    # Runtime-managed inference is an explicit provider-less compatibility seam.
+    from .runtimes import DEFAULT_RUNTIME_BINARIES
+    for runtime in (() if "bindings" in execution else DEFAULT_RUNTIME_BINARIES):
+        if not any(b.runtime == runtime for b in bindings):
+            bindings.append(Compatibility(runtime))
     return tuple(bindings)
 
 

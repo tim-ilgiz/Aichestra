@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.fakes.providers import fake_execution_targets
+
 import json
 import sys
 from pathlib import Path
@@ -45,6 +47,7 @@ def test_verification_failure_fails_workflow(tmp_path: Path) -> None:
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(
+            execution_targets=fake_execution_targets(),
             orca=fake_orca("success"),
             providers=[(fake_codex("success")).probe()],
             project_root=str(tmp_path),
@@ -138,6 +141,7 @@ def test_maintenance_uses_change_signals_not_defaults(tmp_path: Path) -> None:
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(
+            execution_targets=fake_execution_targets(),
             orca=fake_orca("success"),
             providers=[(fake_codex("success")).probe()],
             project_root=str(tmp_path),
@@ -163,6 +167,7 @@ def test_maintenance_gate_records_required_tests_without_writer_roles(
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(
+            execution_targets=fake_execution_targets(),
             orca=orca,
             providers=[(fake_codex("success")).probe()],
             project_root=str(tmp_path),

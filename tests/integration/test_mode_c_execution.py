@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.fakes.providers import fake_execution_targets
+
 import sys
 from pathlib import Path
 
@@ -27,6 +29,7 @@ def test_handoff_failed_does_not_complete_or_bypass_lead(tmp_path: Path) -> None
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         bindings=WorkflowBindings(
+            execution_targets=fake_execution_targets(),
             orca=orca,
             providers=[(lead).probe()],
             task_prompt="implement feature",
@@ -55,6 +58,7 @@ def test_mode_c_without_orca_fails_at_validate(tmp_path: Path) -> None:
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         bindings=WorkflowBindings(
+            execution_targets=fake_execution_targets(),
             providers=[(fake_codex("success")).probe()],
             task_prompt="implement feature",
             project_root=str(proj),
@@ -74,6 +78,7 @@ def test_mode_c_orca_unavailable_does_not_fallback_to_lead(tmp_path: Path) -> No
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         bindings=WorkflowBindings(
+            execution_targets=fake_execution_targets(),
             orca=fake_orca("unavailable"),
             providers=[(lead).probe()],
             task_prompt="implement feature",
@@ -93,6 +98,7 @@ def test_mode_c_resume_run_id(tmp_path: Path) -> None:
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         bindings=WorkflowBindings(
+            execution_targets=fake_execution_targets(),
             orca=orca,
             providers=[(fake_codex("success")).probe()],
             task_prompt="resume me",
@@ -120,6 +126,7 @@ def test_maintenance_is_gate_not_writer_scheduler(tmp_path: Path) -> None:
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         bindings=WorkflowBindings(
+            execution_targets=fake_execution_targets(),
             orca=orca,
             providers=[(fake_codex("success")).probe()],
             task_prompt="api change",
@@ -152,6 +159,7 @@ def test_mode_c_wires_orca_only_end_to_end(fixture_project_a: Path) -> None:
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         bindings=WorkflowBindings(
+            execution_targets=fake_execution_targets(),
             orca=orca,
             providers=[(lead).probe()] + [p.probe() for p in [(worker)] if p is not None],
 

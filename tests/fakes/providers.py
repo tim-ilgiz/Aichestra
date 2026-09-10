@@ -338,3 +338,11 @@ def fake_provider_set(
         fake_cursor(cursor).probe(),
         fake_local_worker(local).probe(),
     ]
+
+
+def fake_execution_targets(runtime="codex"):
+    """Explicit runnable binding for fake Orca, never production launch evidence."""
+    from aichestra.execution.domain import AgentRuntime, Compatibility, DiscoveryFacts, LaunchCapability, LaunchStrategy
+    from aichestra.execution.targets import resolve_targets
+    return tuple(resolve_targets(DiscoveryFacts(runtimes=(AgentRuntime(runtime, available=True),)),
+        (Compatibility(runtime),), known_launches=(LaunchCapability(runtime, strategy=LaunchStrategy.ORCA_NATIVE),)))

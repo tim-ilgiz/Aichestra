@@ -361,8 +361,10 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         no_cursor=bool(getattr(args, "no_cursor", False)),
         no_local=bool(getattr(args, "no_local", False)),
     )
-    # Canonical ExecutionTarget pipeline (T172). No synthetic LaunchCapability.
-    execution_targets, execution_policy, _facts = resolve_mode_c_execution(cfg)
+    # CI/fake mode never probes or launches real runtimes.
+    use_fakes = real_provider_execution_blocked()
+    execution_targets, execution_policy, _facts = resolve_mode_c_execution(
+        cfg, known_launches=() if use_fakes else None)
     local_cfg = cfg.get("local") if isinstance(cfg.get("local"), dict) else {}
     ollama_host = local_cfg.get("ollama_host") or local_cfg.get("endpoint")
     preferred_ids = _local_cfg_list(local_cfg, "preferred_models", "preferred_ids")
@@ -372,12 +374,14 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
     fallback = fallback_lead_name(cfg)
     enabled = enabled_map_from_config(cfg)
 
-    use_fakes = real_provider_execution_blocked()
     providers = discover_providers(
         local_enabled=enabled_local,
         ollama_host=str(ollama_host) if ollama_host else None,
         enabled=enabled,
     )
+    if use_fakes:
+        from aichestra.providers.fakes import fake_execution_targets
+        execution_targets = fake_execution_targets(providers, execution_policy)
     # Policy resolution for observability / config_roots — not adapter construction.
     selection = select_lead(providers, preferred=preferred, fallback=fallback)
     attachments = tuple(str(Path(p).expanduser().resolve()) for p in (args.attach or []))

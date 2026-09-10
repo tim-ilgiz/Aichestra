@@ -207,7 +207,7 @@ def build_execution_policy(config: Mapping[str, Any]) -> ExecutionPolicy:
 def resolve_mode_c_execution(
     config: Mapping[str, Any],
     *,
-    known_launches: tuple[LaunchCapability, ...] = (),
+    known_launches: tuple[LaunchCapability, ...] | None = None,
     machine=None,
     runtime_binaries: Mapping[str, tuple[str, ...]] | None = None,
     provider_registry: ProviderProbeRegistry | None = None,
@@ -215,8 +215,8 @@ def resolve_mode_c_execution(
 ) -> tuple[tuple[ExecutionTarget, ...], ExecutionPolicy, DiscoveryFacts]:
     """Production Mode C pipeline: facts → bindings → policy → targets.
 
-    ``known_launches`` defaults empty. T172 MUST NOT synthesize LaunchCapability;
-    unproven targets stay ``launch_strategy=unsupported`` / ``runnable=false``.
+    Production probes the installed Orca launch contract. Tests may inject
+    exact adapter capabilities; unproven bindings remain unsupported.
     """
     facts = discover_execution_facts(
         config,
@@ -227,6 +227,9 @@ def resolve_mode_c_execution(
     )
     bindings = load_compatibility_bindings(config)
     policy = build_execution_policy(config)
+    if known_launches is None:
+        from .launch_strategies import discover_launches
+        known_launches = discover_launches(resolve_targets(facts, bindings, policy))
     targets = resolve_targets(
         facts,
         bindings,

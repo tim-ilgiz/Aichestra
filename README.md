@@ -157,7 +157,7 @@ Fixture projects under `fixtures/project_a` (Python) and `fixtures/project_b`
 `AICHESTRA_NO_REAL_QUOTA=1`.
 
 Mode C bootstraps one explicit coordinator in the current Orca checkout using
-an available provider from policy. The coordinator reads project context,
+one runnable ExecutionTarget. Legacy provider fields do not select the coordinator. The coordinator reads project context,
 including scoped nested AGENTS.md, owns child Tasks/Dispatches and worktree
 placement in the same Run, waits for their outcomes and converges their results
 before completing. At the implementation boundary it calls
@@ -168,11 +168,28 @@ and checks reclaimable resources. Success requires this handshake, explicit
 successful completion, passing verification, and a confirmed canonical Run with
 all Tasks completed. Missing or failed state is a non-success result.
 
-Local-only Mode C is currently unavailable: the installed Orca `worker-start`
-cannot pin OpenCode's model and endpoint. Such launches fail closed. Cloud Mode C
-uses enabled Codex/Cursor providers; direct local-worker usage remains available.
-A portable, proven Orca/OpenCode launch contract remains required before enabling
-local workers in Mode C.
+The production resolver probes the installed Orca `agent-context --json` launch
+contract. Native adapters support runtime-managed inference for Codex, Cursor,
+Claude Code and Gemini CLI; explicit `execution.bindings` may select supported
+runtimes. Only runnable targets enter the coordinator package. Every native
+coordinator launch must return the matching `launch.effective.agent`; missing
+or mismatched binding receipts fail closed. Runtime-specific launch adapters
+can be registered without adding workflow product branches.
+
+Explicit provider/model/endpoint combinations remain `unsupported` unless an
+adapter can prove all requested dimensions. A native `--agent` flag does not
+prove a backend binding. Production terminal reuse/bridge adapters with such
+proof remain open under T174/T175; local-only live acceptance is NOT VALIDATED.
+
+Worker release distinguishes `released`, `already_released`, `release_pending`
+and `release_unknown`. Recovery executes only exact-dispatch allowlisted
+commands from Orca's receipt, bounded to three recovery attempts, and inspects
+the exact worker again. Automatic recovery can settle a pending release without
+a retry. Unresolved Run resources prevent success; broad terminal close is
+never used. Failed starts retain their diagnostic and attempt Orca-owned
+cleanup only when the receipt proves the worker is failed.
+
 An ordinary headless shell without Orca terminal authority is unsupported and
 fails before Run creation. Do not invent or reuse a stale terminal handle.
-Adapter contract tests validate this handoff, not a live coordinator's DAG.
+Adapter contract tests validate launch construction and receipts, not a live DAG.
+See the active tasks' T167/T168 entries for current CI and live acceptance evidence.

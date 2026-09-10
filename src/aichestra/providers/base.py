@@ -6,7 +6,10 @@ import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Mapping, Callable
+from typing import Any, Mapping, Callable, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from aichestra.execution.domain import ExecutionTarget
 
 
 class ProviderKind(str, Enum):
@@ -95,6 +98,7 @@ class ProviderTaskRequest:
     cwd: str | None = None
     attachments: tuple[str, ...] = ()
 
+    execution_target: "ExecutionTarget | None" = field(default=None, repr=False, compare=False)
     gate_handler: Callable[[str], dict[str, Any]] | None = field(default=None, repr=False, compare=False)
 
     def bounded_prompt(self) -> str:

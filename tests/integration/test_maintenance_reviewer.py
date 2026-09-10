@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.fakes.providers import fake_execution_targets
+
 from aichestra.orchestration.maintenance_reviewer import review_change
 from aichestra.orchestration.modes import Mode
 from aichestra.orchestration.workflow import ModeCRunController
@@ -87,6 +89,7 @@ def test_workflow_skips_writers_when_none(tmp_path) -> None:
         mode=Mode.ORCHESTRATED,
         research_useful=False,
         bindings=WorkflowBindings(
+            execution_targets=fake_execution_targets(),
             orca=orca,
             providers=[(fake_codex("success")).probe()],
             project_root=str(tmp_path),

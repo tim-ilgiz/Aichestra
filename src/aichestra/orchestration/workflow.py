@@ -410,6 +410,16 @@ class ModeCRunController:
             if not self._gate_attachments():
                 return self.state
 
+            from aichestra.execution.launch_strategies import select_bootstrap
+            bootstrap = select_bootstrap(self.bindings.execution_targets)
+            if bootstrap is None:
+                self._fail_gate(GateKind.ORCA_HANDOFF,
+                    detail="Mode C has no runnable bootstrap ExecutionTarget",
+                    result={"ok": False, "failure": FailureClass.UNAVAILABLE.value})
+                return self.state
+            self._bootstrap_target = bootstrap
+            self.state.metadata["bootstrap_execution_target"] = serialize_execution_target(bootstrap)
+
             ensure = self._ensure_orca_run(
                 objective=self.bindings.task_prompt or "Aichestra Mode C run"
             )
@@ -430,21 +440,6 @@ class ModeCRunController:
                         "refusing synthetic aichestra-run ids"
                     ),
                     result={"ok": False, "failure": FailureClass.ERROR.value},
-                )
-                return self.state
-
-            # Policy fail-closed: do not invent a disabled lead for Orca.
-            policy = self.state.metadata.get("provider_policy") or {}
-            if not policy.get("suggested_lead") and not (
-                policy.get("local_enabled") and policy.get("local_available")
-            ):
-                self._fail_gate(
-                    GateKind.ORCA_HANDOFF,
-                    detail=(
-                        "Mode C has no available/enabled lead provider "
-                        "(Codex/Cursor); refuse to invent a disabled agent"
-                    ),
-                    result={"ok": False, "failure": FailureClass.UNAVAILABLE.value},
                 )
                 return self.state
 
@@ -725,6 +720,7 @@ class ModeCRunController:
                 "worktree": "current",
                 # Canonical ExecutionTarget facts for the coordinator (T172).
                 "execution_targets": list(package.execution_targets),
+                "bootstrap_execution_target": serialize_execution_target(self._bootstrap_target),
                 "execution_policy": dict(package.execution_policy),
                 "execution_target_contract_version": (
                     package.execution_target_contract_version
@@ -978,7 +974,7 @@ class ModeCRunController:
             (self.state.metadata.get("speckit_path") or {}).get("steps") or ()
         )
         serialized_targets = tuple(
-            serialize_execution_target(t) for t in self.bindings.execution_targets
+            serialize_execution_target(t) for t in self.bindings.execution_targets if t.runnable
         )
         serialized_policy = serialize_execution_policy(self.bindings.execution_policy)
         return ModeCPolicyPackage(
@@ -1165,6 +1161,7 @@ class ModeCRunController:
                 timeout_seconds=300.0,
                 read_only=read_only,
                 attachments=tuple(self.bindings.attachments or ()),
+                execution_target=self._bootstrap_target if role == MODE_C_HANDOFF_ROLE else None,
                 gate_handler=self._answer_orca_gate if role == MODE_C_HANDOFF_ROLE else None,
             )
         )

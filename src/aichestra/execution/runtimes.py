@@ -12,6 +12,8 @@ from .domain import AgentRuntime, ExecutionCapabilities, Locality
 DEFAULT_RUNTIME_BINARIES: dict[str, tuple[str, ...]] = {
     "codex": ("codex",),
     "cursor": ("cursor-agent",),
+    "claude": ("claude",),
+    "gemini": ("gemini",),
     "opencode": ("opencode",),
 }
 
@@ -23,6 +25,8 @@ DEFAULT_RUNTIME_BINARIES: dict[str, tuple[str, ...]] = {
 TRACKED_RUNTIME_CAPABILITY_DEFAULTS: dict[str, frozenset[str]] = {
     "codex": frozenset({"code_edit", "repository_read", "shell"}),
     "cursor": frozenset({"code_edit", "repository_read", "shell"}),
+    "claude": frozenset({"code_edit", "repository_read", "shell"}),
+    "gemini": frozenset({"code_edit", "repository_read", "shell"}),
     "opencode": frozenset({"code_edit", "repository_read", "shell"}),
 }
 

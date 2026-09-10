@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.fakes.providers import fake_execution_targets
+
 import sys
 from pathlib import Path
 
@@ -58,6 +60,7 @@ def test_one_run_id_reused_across_handoff(tmp_path: Path) -> None:
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         bindings=WorkflowBindings(
+            execution_targets=fake_execution_targets(),
             orca=orca,
             providers=[(fake_codex("success")).probe()],
             project_root=str(tmp_path),
@@ -85,6 +88,7 @@ def test_speckit_policy_without_competing_tree(tmp_path: Path) -> None:
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         bindings=WorkflowBindings(
+            execution_targets=fake_execution_targets(),
             orca=orca,
             providers=[(fake_codex("success")).probe()],
             project_root=str(tmp_path),
@@ -109,6 +113,7 @@ def test_run_phase_is_early_validate_only(tmp_path: Path) -> None:
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         bindings=WorkflowBindings(
+            execution_targets=fake_execution_targets(),
             orca=orca,
             providers=[(fake_codex("success")).probe()],
             project_root=str(tmp_path),
@@ -154,6 +159,7 @@ def test_worktree_adoption_switches_effective_root(tmp_path: Path) -> None:
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         bindings=WorkflowBindings(
+            execution_targets=fake_execution_targets(),
             orca=orca,
             providers=[(fake_codex("success")).probe()],
             project_root=str(parent),

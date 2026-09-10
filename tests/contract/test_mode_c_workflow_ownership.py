@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.fakes.providers import fake_execution_targets
+
 import sys
 from pathlib import Path
 
@@ -18,6 +20,7 @@ from tests.fakes.providers import fake_codex, fake_orca
 
 def _bindings(root: Path, *, prompt: str, orca) -> WorkflowBindings:
     return WorkflowBindings(
+        execution_targets=fake_execution_targets(),
         orca=orca,
         providers=[(fake_codex("success")).probe()],
         project_root=str(root),
