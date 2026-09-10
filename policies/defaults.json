@@ -1,0 +1,25 @@
+{
+  "local": {
+    "enabled": false
+  },
+  "providers": {
+    "preferred_lead": "codex",
+    "fallback_lead": "cursor",
+    "local_worker": "local-worker",
+    "orca": { "enabled": true },
+    "codex": { "enabled": true },
+    "cursor": { "enabled": true }
+  },
+  "orchestration": {
+    "mode_default": "native",
+    "automatic_quota_fallback_reliable": false,
+    "handoff": "manual_one_action"
+  },
+  "security": {
+    "staging_only": true,
+    "production_ssh": false
+  },
+  "speckit": {
+    "ai_factory_in_aichestra_v1": false
+  }
+}

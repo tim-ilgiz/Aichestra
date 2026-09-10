@@ -1,0 +1,5 @@
+{
+  "project_id": "fixture-project-b",
+  "stack": "node",
+  "verify": ["node", "test.js"]
+}

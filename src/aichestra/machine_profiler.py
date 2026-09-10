@@ -1,0 +1,463 @@
+"""Deterministic machine profiler — OS/CPU/RAM/disk/GPU via system APIs, not LLMs."""
+
+from __future__ import annotations
+
+import os
+import platform
+import re
+import shutil
+import subprocess
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any
+
+from aichestra.config.hardware_profiles import suggest_profile
+from aichestra.platform_detect import platform_info
+
+
+@dataclass(frozen=True)
+class CpuInfo:
+    name: str
+    cores_logical: int
+    cores_physical: int | None
+
+
+@dataclass(frozen=True)
+class MemoryInfo:
+    total_bytes: int
+    available_bytes: int | None
+
+    @property
+    def total_gb(self) -> float:
+        return round(self.total_bytes / (1024**3), 2)
+
+
+@dataclass(frozen=True)
+class DiskInfo:
+    path: str
+    total_bytes: int
+    free_bytes: int
+
+
+@dataclass(frozen=True)
+class GpuInfo:
+    name: str
+    vendor: str | None = None
+    memory_bytes: int | None = None
+    accelerator_kind: str | None = None
+
+
+@dataclass(frozen=True)
+class LocalAiStub:
+    """Lightweight local-AI presence stub (full discovery lives in local_runtime)."""
+
+    ollama_on_path: bool
+    opencode_on_path: bool
+    local_enabled_default: bool = False
+
+
+@dataclass(frozen=True)
+class MachineProfile:
+    os: str
+    system: str
+    architecture: str
+    python_version: str
+    is_wsl: bool
+    cpu: CpuInfo
+    memory: MemoryInfo
+    disks: tuple[DiskInfo, ...]
+    gpus: tuple[GpuInfo, ...]
+    local_ai: LocalAiStub
+    suggested_profile_id: str
+    suggested_model_class: str
+    max_local_workers: int
+    extras: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        return data
+
+
+def profile_machine(*, root: Path | None = None) -> MachineProfile:
+    """Collect deterministic hardware facts without LLM involvement."""
+    info = platform_info()
+    cpu = _cpu_info()
+    memory = _memory_info()
+    disks = _disk_info(root)
+    gpus = _gpu_info()
+    local_ai = _local_ai_stub()
+    has_gpu = bool(gpus)
+    suggestion = suggest_profile(memory.total_gb, has_gpu=has_gpu)
+    local_models = _local_models_snapshot()
+    return MachineProfile(
+        os=info.os.value,
+        system=info.system,
+        architecture=info.architecture,
+        python_version=info.python_version,
+        is_wsl=info.is_wsl,
+        cpu=cpu,
+        memory=memory,
+        disks=disks,
+        gpus=gpus,
+        local_ai=local_ai,
+        suggested_profile_id=suggestion.id,
+        suggested_model_class=suggestion.recommended_model_class,
+        max_local_workers=suggestion.max_local_workers,
+        extras={
+            "hostname": platform.node(),
+            "processor": platform.processor() or "",
+            "installed_models": local_models.get("installed_models", []),
+            "selected_model": local_models.get("selected_model"),
+            "local_capabilities": local_models.get("capabilities", []),
+            "local_endpoint": local_models.get("endpoint"),
+        },
+    )
+
+
+def _local_models_snapshot() -> dict[str, Any]:
+    """Best-effort installed models + selected model for machine profile."""
+    try:
+        from aichestra.local_runtime.base import LocalModel, ModelCapability
+        from aichestra.local_runtime.discovery import discover_local_runtime_report
+        from aichestra.local_runtime.model_selector import select_model
+    except Exception:  # noqa: BLE001
+        return {}
+    try:
+        report = discover_local_runtime_report(local_enabled=True)
+    except Exception:  # noqa: BLE001
+        return {}
+    installed: list[dict[str, Any]] = []
+    models: list[LocalModel] = []
+    endpoint: str | None = None
+    caps: set[str] = set()
+    for runtime in report.get("runtimes") or []:
+        if not isinstance(runtime, dict):
+            continue
+        if runtime.get("endpoint"):
+            endpoint = str(runtime["endpoint"])
+        for raw in runtime.get("models") or []:
+            if not isinstance(raw, dict):
+                continue
+            installed.append(dict(raw))
+            for c in raw.get("capabilities") or ():
+                caps.add(str(c))
+            try:
+                cap_set = frozenset(
+                    ModelCapability(c)
+                    if c in ModelCapability._value2member_map_
+                    else ModelCapability.TEXT
+                    for c in (raw.get("capabilities") or ("text",))
+                )
+                models.append(
+                    LocalModel(
+                        id=str(raw.get("id") or raw.get("name") or ""),
+                        name=str(raw.get("name") or raw.get("id") or ""),
+                        runtime=str(raw.get("runtime") or "ollama"),
+                        installed=bool(raw.get("installed", True)),
+                        capabilities=cap_set,
+                        parameter_size=raw.get("parameter_size"),
+                        metadata=dict(raw.get("metadata") or {}),
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                continue
+    selected = None
+    if models:
+        selection = select_model(models, local_enabled=True)
+        if selection.model is not None:
+            m = selection.model
+            selected = {
+                "id": m.id,
+                "name": m.name,
+                "runtime": m.runtime,
+                "capabilities": sorted(c.value for c in m.capabilities),
+                "parameter_size": m.parameter_size,
+                "installed": m.installed,
+            }
+    return {
+        "installed_models": installed,
+        "selected_model": selected,
+        "capabilities": sorted(caps),
+        "endpoint": endpoint,
+    }
+
+
+def _which(name: str) -> str | None:
+    return shutil.which(name)
+
+
+def _run(cmd: list[str], *, timeout: float = 5.0) -> str:
+    try:
+        completed = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return (completed.stdout or "") + (completed.stderr or "")
+
+
+def _cpu_info() -> CpuInfo:
+    logical = os.cpu_count() or 1
+    physical: int | None = None
+    name = platform.processor() or platform.machine() or "unknown"
+    system = platform.system().lower()
+    if system == "darwin":
+        brand = _run(["sysctl", "-n", "machdep.cpu.brand_string"]).strip()
+        if brand:
+            name = brand
+        phys = _run(["sysctl", "-n", "hw.physicalcpu"]).strip()
+        if phys.isdigit():
+            physical = int(phys)
+    elif system == "linux":
+        try:
+            text = Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="ignore")
+            models = re.findall(r"^model name\s*:\s*(.+)$", text, re.M)
+            if models:
+                name = models[0].strip()
+            physical_ids = set(re.findall(r"^physical id\s*:\s*(.+)$", text, re.M))
+            cores = re.findall(r"^cpu cores\s*:\s*(\d+)$", text, re.M)
+            if physical_ids and cores:
+                physical = len(physical_ids) * int(cores[0])
+        except OSError:
+            pass
+    elif system == "windows":
+        # Prefer modern CIM/PowerShell; fall back to deprecated wmic.
+        ps = _run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "(Get-CimInstance Win32_Processor | Select-Object -First 1 "
+                "| ForEach-Object { $_.Name + '|' + $_.NumberOfCores })",
+            ],
+            timeout=12.0,
+        ).strip()
+        if "|" in ps:
+            ps_name, ps_cores = ps.split("|", 1)
+            if ps_name.strip():
+                name = ps_name.strip()
+            if ps_cores.strip().isdigit():
+                physical = int(ps_cores.strip())
+        if not name or physical is None:
+            out = _run(
+                ["wmic", "cpu", "get", "Name,NumberOfCores", "/format:list"],
+                timeout=8.0,
+            )
+            match = re.search(r"Name=(.+)", out)
+            if match and not name:
+                name = match.group(1).strip()
+            cores = re.search(r"NumberOfCores=(\d+)", out)
+            if cores and physical is None:
+                physical = int(cores.group(1))
+    return CpuInfo(name=name, cores_logical=logical, cores_physical=physical)
+
+
+def _darwin_available_bytes() -> int | None:
+    """Best-effort free+inactive+purgeable pages via vm_stat (or None on failure)."""
+    out = _run(["vm_stat"])
+    if not out.strip():
+        return None
+    page_size = 4096
+    ps_match = re.search(r"page size of\s+(\d+)\s+bytes", out, re.I)
+    if ps_match:
+        page_size = int(ps_match.group(1))
+    else:
+        pagesize_raw = _run(["sysctl", "-n", "hw.pagesize"]).strip()
+        if pagesize_raw.isdigit():
+            page_size = int(pagesize_raw)
+
+    def _pages(label: str) -> int | None:
+        match = re.search(rf"^{re.escape(label)}:\s+([\d.]+)", out, re.M)
+        if not match:
+            return None
+        # vm_stat prints trailing periods on counts (e.g. "12345.")
+        return int(float(match.group(1)))
+
+    free_p = _pages("Pages free")
+    inactive_p = _pages("Pages inactive")
+    purgeable_p = _pages("Pages purgeable")
+    if free_p is None and inactive_p is None and purgeable_p is None:
+        return None
+    pages = (free_p or 0) + (inactive_p or 0) + (purgeable_p or 0)
+    return pages * page_size
+
+
+def _memory_info() -> MemoryInfo:
+    system = platform.system().lower()
+    total = 0
+    available: int | None = None
+    if system == "darwin":
+        raw = _run(["sysctl", "-n", "hw.memsize"]).strip()
+        if raw.isdigit():
+            total = int(raw)
+        available = _darwin_available_bytes()
+    elif system == "linux":
+        try:
+            text = Path("/proc/meminfo").read_text(encoding="utf-8", errors="ignore")
+            total_m = re.search(r"^MemTotal:\s+(\d+)\s+kB", text, re.M)
+            avail_m = re.search(r"^MemAvailable:\s+(\d+)\s+kB", text, re.M)
+            if total_m:
+                total = int(total_m.group(1)) * 1024
+            if avail_m:
+                available = int(avail_m.group(1)) * 1024
+        except OSError:
+            pass
+    elif system == "windows":
+        # Prefer CIM; wmic is deprecated/absent on modern Windows.
+        ps = _run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory",
+            ],
+            timeout=12.0,
+        ).strip()
+        if ps.isdigit():
+            total = int(ps)
+        if total <= 0:
+            out = _run(
+                ["wmic", "ComputerSystem", "get", "TotalPhysicalMemory", "/value"],
+                timeout=8.0,
+            )
+            match = re.search(r"TotalPhysicalMemory=(\d+)", out)
+            if match:
+                total = int(match.group(1))
+    if total <= 0:
+        # Last-resort: report 0 rather than inventing values.
+        total = 0
+    return MemoryInfo(total_bytes=total, available_bytes=available)
+
+
+def _disk_info(root: Path | None) -> tuple[DiskInfo, ...]:
+    targets: list[Path] = []
+    if root is not None:
+        targets.append(Path(root).resolve())
+    targets.append(Path.cwd().resolve())
+    home = Path.home()
+    if home.exists():
+        targets.append(home.resolve())
+    seen: set[str] = set()
+    disks: list[DiskInfo] = []
+    for path in targets:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            usage = shutil.disk_usage(path)
+        except OSError:
+            continue
+        disks.append(
+            DiskInfo(
+                path=str(path),
+                total_bytes=usage.total,
+                free_bytes=usage.free,
+            )
+        )
+    return tuple(disks)
+
+
+def _gpu_info() -> tuple[GpuInfo, ...]:
+    system = platform.system().lower()
+    gpus: list[GpuInfo] = []
+    if system == "darwin":
+        out = _run(["system_profiler", "SPDisplaysDataType", "-detailLevel", "mini"])
+        for chip in re.findall(r"Chipset Model:\s*(.+)", out):
+            name = chip.strip()
+            # Require Apple branding or an Mx SoC token — not any broad "M".
+            apple = bool(
+                re.search(r"\bApple\b", name, re.I)
+                or re.search(r"\bM\d+\b", name)
+            )
+            kind = "apple_silicon" if apple else "gpu"
+            vendor = "Apple" if apple else None
+            gpus.append(GpuInfo(name=name, vendor=vendor, accelerator_kind=kind))
+        if not gpus and platform.machine().lower() in {"arm64", "aarch64"}:
+            gpus.append(
+                GpuInfo(
+                    name="Apple Silicon GPU",
+                    vendor="Apple",
+                    accelerator_kind="apple_silicon",
+                )
+            )
+    elif system == "linux":
+        if _which("nvidia-smi"):
+            out = _run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=name,memory.total",
+                    "--format=csv,noheader,nounits",
+                ]
+            )
+            for line in out.splitlines():
+                parts = [p.strip() for p in line.split(",")]
+                if not parts or not parts[0]:
+                    continue
+                mem = None
+                if len(parts) > 1 and parts[1].isdigit():
+                    mem = int(parts[1]) * 1024 * 1024
+                gpus.append(
+                    GpuInfo(
+                        name=parts[0],
+                        vendor="NVIDIA",
+                        memory_bytes=mem,
+                        accelerator_kind="cuda",
+                    )
+                )
+        try:
+            drm = Path("/sys/class/drm")
+            if drm.is_dir():
+                for entry in sorted(drm.iterdir()):
+                    if not entry.name.startswith("card") or "-" in entry.name:
+                        continue
+                    vendor_path = entry / "device" / "vendor"
+                    if vendor_path.is_file():
+                        vendor = vendor_path.read_text(encoding="utf-8").strip()
+                        gpus.append(
+                            GpuInfo(
+                                name=f"drm:{entry.name}",
+                                vendor=vendor,
+                                accelerator_kind="drm",
+                            )
+                        )
+        except OSError:
+            pass
+    elif system == "windows":
+        ps = _run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_VideoController | "
+                "ForEach-Object { $_.Name }",
+            ],
+            timeout=12.0,
+        )
+        for line in ps.splitlines():
+            name = line.strip()
+            if name:
+                gpus.append(GpuInfo(name=name, accelerator_kind="gpu"))
+        if not gpus:
+            out = _run(
+                ["wmic", "path", "win32_VideoController", "get", "Name", "/value"]
+            )
+            for match in re.findall(r"Name=(.+)", out):
+                name = match.strip()
+                if name:
+                    gpus.append(GpuInfo(name=name, accelerator_kind="gpu"))
+    # Deduplicate by name
+    unique: dict[str, GpuInfo] = {g.name: g for g in gpus}
+    return tuple(unique.values())
+
+
+def _local_ai_stub() -> LocalAiStub:
+    return LocalAiStub(
+        ollama_on_path=_which("ollama") is not None,
+        opencode_on_path=_which("opencode") is not None,
+        local_enabled_default=False,
+    )
