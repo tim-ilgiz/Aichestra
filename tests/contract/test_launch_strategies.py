@@ -1306,7 +1306,14 @@ def test_prove_launch_invocation_is_structured_argv_not_shell_string():
     assert '"/Users/ilgiz/Aichestra Dev"' in rendered or "'/Users/ilgiz/Aichestra Dev'" in rendered
 
 
-def _bridge_run(handle: str, closed: list[str]):
+def _bridge_run(
+    handle: str,
+    closed: list[str],
+    *,
+    workers: list[dict] | None = None,
+    close_ok: bool = True,
+    list_ok: bool = True,
+):
     def run(argv, **_kwargs):
         if argv[1:3] == ["terminal", "create"]:
             return SimpleNamespace(
@@ -1322,7 +1329,18 @@ def _bridge_run(handle: str, closed: list[str]):
                 returncode=0,
                 stdout=json.dumps(_structured_terminal(handle)),
             )
+        if argv[1:3] == ["orchestration", "worker-list"]:
+            if not list_ok:
+                return SimpleNamespace(returncode=1, stdout="{}")
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {"ok": True, "result": {"workers": list(workers or [])}}
+                ),
+            )
         if argv[1:3] == ["terminal", "close"]:
+            if not close_ok:
+                return SimpleNamespace(returncode=1, stdout="{}")
             closed.append(argv[argv.index("--terminal") + 1])
             return SimpleNamespace(returncode=0, stdout="{}")
         raise AssertionError(argv)
@@ -1463,8 +1481,9 @@ def test_prove_launch_cleanup_lease_closes_stored_handle_only(tmp_path, monkeypa
 
 
 def test_abort_launch_after_dispatch_does_not_close(tmp_path, monkeypatch):
+    """T185: Orca Dispatch binding consumes the lease and must not close."""
     from aichestra.cli import main
-    from aichestra.execution.cleanup_leases import consume_cleanup_lease
+    from aichestra.execution.cleanup_leases import lease_dir
     from aichestra.execution.launch_strategies import prove_launch_by_candidate_id
 
     target = _opencode_target()
@@ -1496,16 +1515,143 @@ def test_abort_launch_after_dispatch_does_not_close(tmp_path, monkeypatch):
         targets=(resolved,),
     )
     lease = attestation["prepared_launch"]["cleanup"]["lease"]
-    assert consume_cleanup_lease(lease, repo_root=tmp_path) == "term_worker"
+    dispatched = _bridge_run(
+        "term_worker",
+        closed,
+        workers=[
+            {
+                "dispatchId": "d_inner",
+                "agentTerminalHandle": "term_worker",
+                "terminalState": "active",
+                "resource": {"terminalHandle": "term_worker", "ownerDispatchId": "d_inner"},
+            }
+        ],
+    )
     monkeypatch.setattr(
         "aichestra.execution.launch_strategies.subprocess.run",
-        _bridge_run("term_worker", closed),
+        dispatched,
+    )
+    code = main(
+        ["abort-launch", "--repo-root", str(tmp_path), "--token", lease, "--json"]
+    )
+    assert code == 0
+    assert closed == []
+    stored = lease_dir(tmp_path)
+    assert not (stored / lease).exists()
+    assert not (stored / f"{lease}.claimed").exists()
+    code = main(
+        ["abort-launch", "--repo-root", str(tmp_path), "--token", lease, "--json"]
+    )
+    assert code != 0
+    assert closed == []
+
+
+def test_abort_launch_close_failure_restores_lease(tmp_path, monkeypatch):
+    """T185: failed terminal close must not drop the lease."""
+    from aichestra.cli import main
+    from aichestra.execution.launch_strategies import prove_launch_by_candidate_id
+
+    target = _opencode_target()
+    monkeypatch.setattr(
+        "aichestra.execution.launch_strategies.load_orca_schema",
+        lambda binary=None: _schema(),
+    )
+    launches = discover_launches([target], binary="orca-test")
+    resolved = resolve_targets(
+        DiscoveryFacts(
+            runtimes=(target.runtime,),
+            providers=(target.provider,),
+            models=(target.model,),
+        ),
+        (Compatibility("opencode", "ollama", "qwen"),),
+        known_launches=launches,
+    )[0]
+    closed: list[str] = []
+    monkeypatch.setattr(
+        "aichestra.providers.orca.resolve_orca_binary",
+        lambda: "orca-test",
+    )
+    attestation = prove_launch_by_candidate_id(
+        resolved.id,
+        project_root=tmp_path,
+        repo_root=tmp_path,
+        binary="orca-test",
+        run=_bridge_run("term_retry", closed),
+        targets=(resolved,),
+    )
+    lease = attestation["prepared_launch"]["cleanup"]["lease"]
+    monkeypatch.setattr(
+        "aichestra.execution.launch_strategies.subprocess.run",
+        _bridge_run("term_retry", closed, close_ok=False),
     )
     code = main(
         ["abort-launch", "--repo-root", str(tmp_path), "--token", lease, "--json"]
     )
     assert code != 0
     assert closed == []
+    monkeypatch.setattr(
+        "aichestra.execution.launch_strategies.subprocess.run",
+        _bridge_run("term_retry", closed),
+    )
+    code = main(
+        ["abort-launch", "--repo-root", str(tmp_path), "--token", lease, "--json"]
+    )
+    assert code == 0
+    assert closed == ["term_retry"]
+
+
+def test_abort_launch_worker_list_failure_does_not_close(tmp_path, monkeypatch):
+    """T185: unstructured/failed Orca probe is not proof the terminal is unbound."""
+    from aichestra.cli import main
+    from aichestra.execution.launch_strategies import prove_launch_by_candidate_id
+
+    target = _opencode_target()
+    monkeypatch.setattr(
+        "aichestra.execution.launch_strategies.load_orca_schema",
+        lambda binary=None: _schema(),
+    )
+    launches = discover_launches([target], binary="orca-test")
+    resolved = resolve_targets(
+        DiscoveryFacts(
+            runtimes=(target.runtime,),
+            providers=(target.provider,),
+            models=(target.model,),
+        ),
+        (Compatibility("opencode", "ollama", "qwen"),),
+        known_launches=launches,
+    )[0]
+    closed: list[str] = []
+    monkeypatch.setattr(
+        "aichestra.providers.orca.resolve_orca_binary",
+        lambda: "orca-test",
+    )
+    attestation = prove_launch_by_candidate_id(
+        resolved.id,
+        project_root=tmp_path,
+        repo_root=tmp_path,
+        binary="orca-test",
+        run=_bridge_run("term_probe", closed),
+        targets=(resolved,),
+    )
+    lease = attestation["prepared_launch"]["cleanup"]["lease"]
+    monkeypatch.setattr(
+        "aichestra.execution.launch_strategies.subprocess.run",
+        _bridge_run("term_probe", closed, list_ok=False),
+    )
+    code = main(
+        ["abort-launch", "--repo-root", str(tmp_path), "--token", lease, "--json"]
+    )
+    assert code != 0
+    assert closed == []
+    monkeypatch.setattr(
+        "aichestra.execution.launch_strategies.subprocess.run",
+        _bridge_run("term_probe", closed),
+    )
+    code = main(
+        ["abort-launch", "--repo-root", str(tmp_path), "--token", lease, "--json"]
+    )
+    assert code == 0
+    assert closed == ["term_probe"]
 
 
 def test_existing_terminal_prepared_launch_has_no_cleanup_lease(tmp_path):

@@ -161,7 +161,8 @@ def build_parser() -> argparse.ArgumentParser:
         "abort-launch",
         help=(
             "Close an owned prove-launch bridge that was never Dispatched "
-            "(opaque cleanup lease from prove-launch; never a raw terminal handle)"
+            "(opaque cleanup lease from prove-launch; never a raw terminal handle). "
+            "A terminal already bound to an Orca Dispatch is left running."
         ),
     )
     abort_p.add_argument(
@@ -349,7 +350,11 @@ def _cmd_prove_launch(args: argparse.Namespace) -> int:
 
 
 def _cmd_abort_launch(args: argparse.Namespace) -> int:
-    """Owner-side cleanup for owned bridge terminals that never reached Dispatch."""
+    """Owner-side cleanup for owned bridge terminals that never reached Dispatch.
+
+    If Orca already bound the stored handle to a Dispatch, the lease is
+    consumed and the terminal is not closed.
+    """
     from aichestra.execution.launch_strategies import abort_launch_by_token
     from aichestra.execution.serialize import LAUNCH_ABORT_OPERATION
 

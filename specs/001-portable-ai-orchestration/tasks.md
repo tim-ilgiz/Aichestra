@@ -24,10 +24,11 @@ Review residual T182–T185: orchestrate/research config-root safety, structured
 and `abort-launch` owner-side cleanup.
 
 Validation: **T167** was green on `c3de84f` (GitHub Actions run #70), on
-`10831fc` (run #72), and on `85bde480` (run #74, Ubuntu + macOS + Windows)
-but is **reopened** by any subsequent production-code follow-up. The T185
-cleanup-lease ownership fix is a production-code change and requires a fresh
-matrix. **T168** live smoke on `run_3d12b2f31039` remains historical
+`10831fc` (run #72), on `85bde480` (run #74), and on `cbdf5a0` (run #76,
+Ubuntu + macOS + Windows) but is **reopened** by any subsequent
+production-code follow-up. The T185 dispatch/lease lifecycle fix is a
+production-code change and requires a fresh matrix. **T168** live smoke on
+`run_3d12b2f31039` remains historical
 evidence for the pre-T180 handshake. **T180** in-Run verification live smoke
 is ACCEPTED on `run_27377a46c199` (2026-09-10). Local-only live validation
 remains NOT VALIDATED. **Do not merge** until a fresh GitHub CI matrix is
@@ -852,12 +853,15 @@ security, deterministic gates and verification.
       `render_cli_invocation` is display-only.
 - [x] T184 HIGH: Windows bridge attestation proven end-to-end for PowerShell
       process argv (builder → argv → extract → binding match → prepare).
-- [x] T185 MEDIUM: Owner-side `aichestra abort-launch --token` consumes an
+- [x] T185 MEDIUM: Owner-side `aichestra abort-launch --token` claims an
       Aichestra-issued opaque cleanup lease, then closes only the stored
       owned bridge handle. Callers cannot pass a raw terminal handle
       (`--launch-ref` is rejected). `orca-existing-terminal` never receives
-      a lease. Successful Dispatch consumes the lease so a late abort cannot
-      kill a running worker.
+      a lease. Abort structurally asks Orca `worker-list` whether that
+      handle is bound to a Dispatch (inner coordinator `worker-start`
+      included); a structured binding consumes the lease and does not
+      close the terminal. Lease state is available → claimed → consumed;
+      probe or close failure restores available so abort is retriable.
 
 ### Validation gates (OPEN)
 
@@ -877,10 +881,11 @@ security, deterministic gates and verification.
       Docs-only / architecture-HEAD CI may be kept as intermediate sanity
       evidence, but does NOT close T167.
       <!-- Intermediate evidence: GitHub Actions run #70 succeeded on
-           c3de84f; run #72 on 10831fc; run #74 on 85bde480 (Ubuntu +
-           macOS + Windows). The T185 cleanup-lease ownership fix is a
-           production-code change and REOPENS T167. Do not reuse run #74
-           as close-out evidence. Local pytest alone is insufficient. -->
+           c3de84f; run #72 on 10831fc; run #74 on 85bde480; run #76 on
+           cbdf5a0 (Ubuntu + macOS + Windows). The T185 dispatch/lease
+           lifecycle fix is a production-code change and REOPENS T167.
+           Do not reuse run #76 as close-out evidence. Local pytest
+           alone is insufficient. -->
 
 - [x] T168 CRITICAL: Run at least one real Mode C integration smoke proving:
 
@@ -1048,5 +1053,5 @@ verification live smoke accepted on run_27377a46c199. Remaining open work is
 fresh CI (T167) after T177–T181. Local-only live validation remains NOT
 VALIDATED. OpenCode + Ollama is one possible example target only — not a
 mandatory architecture. Local pytest green does not close T167. GitHub Actions
-run #74 was green on `85bde480` and does not close T167 after the T185
-cleanup-lease ownership fix.
+run #76 was green on `cbdf5a0` and does not close T167 after the T185
+dispatch/lease lifecycle fix.

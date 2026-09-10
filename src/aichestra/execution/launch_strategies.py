@@ -147,6 +147,98 @@ def abort_prepared(prepared: PreparedLaunch, ctx: LaunchContext) -> dict[str, An
         return {"skipped": False, "handle": handle, "ok": False, "error": str(exc)}
 
 
+def _worker_rows(payload: Mapping[str, Any]) -> list[dict[str, Any]] | None:
+    """Missing/malformed worker lists are not evidence of an unbound terminal."""
+    data = payload.get("result", payload.get("value", payload))
+    if isinstance(data, dict):
+        data = data.get("workers")
+    if not isinstance(data, list) or any(not isinstance(row, dict) for row in data):
+        return None
+    return data
+
+
+def _row_terminal_handles(row: Mapping[str, Any]) -> set[str]:
+    handles: set[str] = set()
+    for key in ("agentTerminalHandle", "terminalHandle"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            handles.add(value.strip())
+    resource = row.get("resource")
+    if isinstance(resource, Mapping):
+        value = resource.get("terminalHandle")
+        if isinstance(value, str) and value.strip():
+            handles.add(value.strip())
+    return handles
+
+
+def _row_dispatch_id(row: Mapping[str, Any]) -> str | None:
+    for key in ("dispatchId", "dispatch_id"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    resource = row.get("resource")
+    if isinstance(resource, Mapping):
+        for key in ("ownerDispatchId", "originDispatchId"):
+            value = resource.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def _probe_terminal_dispatch(
+    handle: str,
+    *,
+    binary: str,
+    run: Callable[..., Any],
+) -> dict[str, Any]:
+    """Ask Orca whether ``handle`` is bound to a Dispatch/worker.
+
+    Fail closed: a failed or unstructured ``worker-list`` is not proof that
+    the terminal is unbound.
+    """
+    owned = handle.strip()
+    try:
+        result = run(
+            [binary, "orchestration", "worker-list", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"ok": False, "bound": False, "error": str(exc)}
+    if getattr(result, "returncode", 1) not in (0, None):
+        return {
+            "ok": False,
+            "bound": False,
+            "error": "orca orchestration worker-list failed",
+            "returncode": getattr(result, "returncode", None),
+        }
+    payload = _json_payload(result)
+    if payload.get("ok") is False:
+        return {"ok": False, "bound": False, "error": "orca worker-list returned ok=false"}
+    rows = _worker_rows(payload)
+    if rows is None:
+        return {"ok": False, "bound": False, "error": "orca worker-list receipt is unstructured"}
+    for row in rows:
+        if owned not in _row_terminal_handles(row):
+            continue
+        dispatch_id = _row_dispatch_id(row)
+        binding = {
+            "dispatchId": dispatch_id,
+            "agentTerminalHandle": owned,
+        }
+        state = row.get("terminalState")
+        if isinstance(state, str) and state.strip():
+            binding["terminalState"] = state.strip()
+        return {
+            "ok": True,
+            "bound": True,
+            "dispatch_id": dispatch_id,
+            "binding": binding,
+        }
+    return {"ok": True, "bound": False}
+
+
 def abort_launch_by_token(
     token: str,
     *,
@@ -157,15 +249,22 @@ def abort_launch_by_token(
     """Owner-side cleanup for a prove-launch bridge that never reached Dispatch.
 
     ``token`` is an opaque cleanup lease issued by Aichestra after an owned
-    bridge proof. Unknown, foreign, or already-consumed leases fail closed
-    without calling ``terminal close``.
+    bridge proof. Unknown or already-consumed leases fail closed without
+    calling ``terminal close``. Before closing, abort asks Orca whether the
+    stored handle is already bound to a Dispatch; a structured binding
+    consumes the lease and leaves the terminal running. Probe or close
+    failure restores the lease so abort can be retried.
     """
     from pathlib import Path
 
     from aichestra.providers.orca import resolve_orca_binary
     from aichestra.repo import resolve_aichestra_config_root
 
-    from .cleanup_leases import consume_cleanup_lease
+    from .cleanup_leases import (
+        claim_cleanup_lease,
+        consume_claimed_lease,
+        restore_cleanup_lease,
+    )
     from .serialize import LAUNCH_ABORT_OPERATION
 
     lease = str(token or "").strip()
@@ -185,31 +284,64 @@ def abort_launch_by_token(
             "operation": LAUNCH_ABORT_OPERATION,
             "error": str(exc),
         }
-    handle = consume_cleanup_lease(lease, repo_root=root)
+
+    def _fail(error: str, **extra: Any) -> dict[str, Any]:
+        restore_cleanup_lease(lease, repo_root=root)
+        payload: dict[str, Any] = {
+            "ok": False,
+            "operation": LAUNCH_ABORT_OPERATION,
+            "error": error,
+        }
+        payload.update(extra)
+        return payload
+
+    handle = claim_cleanup_lease(lease, repo_root=root)
     if not handle:
         return {
             "ok": False,
             "operation": LAUNCH_ABORT_OPERATION,
             "error": "unknown or already consumed cleanup lease",
         }
+    runner = run if run is not None else subprocess.run
     orca_binary = (binary or "").strip() or resolve_orca_binary() or ""
     if not orca_binary:
+        return _fail("Orca binary required for abort-launch")
+    probe = _probe_terminal_dispatch(handle, binary=orca_binary, run=runner)
+    if not probe.get("ok"):
+        return _fail(
+            "Orca dispatch probe failed; cleanup lease restored",
+            probe=probe,
+        )
+    if probe.get("bound"):
+        consume_claimed_lease(lease, repo_root=root)
         return {
-            "ok": False,
+            "ok": True,
             "operation": LAUNCH_ABORT_OPERATION,
-            "error": "Orca binary required for abort-launch",
-            "result": {"skipped": False, "handle": handle, "ok": False},
+            "result": {
+                "skipped": True,
+                "reason": "dispatched",
+                "handle": handle,
+                "ok": True,
+            },
+            "dispatch_id": probe.get("dispatch_id"),
+            "binding": probe.get("binding"),
         }
     result = abort_prepared(
         PreparedLaunch(arguments=[], terminal_handle=handle, owns_terminal=True),
         LaunchContext(
             binary=orca_binary,
             worktree="current",
-            run=run if run is not None else subprocess.run,
+            run=runner,
         ),
     )
+    if not (result.get("ok") and not result.get("skipped")):
+        return _fail(
+            "terminal close failed; cleanup lease restored",
+            result=result,
+        )
+    consume_claimed_lease(lease, repo_root=root)
     return {
-        "ok": bool(result.get("ok")) and not result.get("skipped"),
+        "ok": True,
         "operation": LAUNCH_ABORT_OPERATION,
         "result": result,
     }

@@ -567,32 +567,76 @@ def _request_aichestra_repo_root(request: ProviderTaskRequest) -> Path | None:
     return None
 
 
+def _prepared_cleanup_repo_root(
+    request: ProviderTaskRequest,
+    prepared_payload: Mapping[str, Any] | None,
+) -> Path | None:
+    from aichestra.execution.cleanup_leases import cleanup_repo_root_from_prepared
+
+    root = _request_aichestra_repo_root(request) or cleanup_repo_root_from_prepared(
+        prepared_payload
+    )
+    if root is not None:
+        return root
+    try:
+        from aichestra.repo import resolve_aichestra_config_root
+
+        return resolve_aichestra_config_root()
+    except ValueError:
+        return None
+
+
 def _consume_prepared_cleanup_lease(
     request: ProviderTaskRequest,
     prepared_payload: Mapping[str, Any] | None,
 ) -> str | None:
-    """Absorb a prove-launch cleanup lease. Never closes a terminal."""
+    """Absorb an available prove-launch cleanup lease. Never closes a terminal."""
     from aichestra.execution.cleanup_leases import (
         cleanup_lease_from_prepared,
-        cleanup_repo_root_from_prepared,
         consume_cleanup_lease,
     )
 
     lease = cleanup_lease_from_prepared(prepared_payload)
     if not lease:
         return None
-    root = (
-        _request_aichestra_repo_root(request)
-        or cleanup_repo_root_from_prepared(prepared_payload)
-    )
+    root = _prepared_cleanup_repo_root(request, prepared_payload)
     if root is None:
-        try:
-            from aichestra.repo import resolve_aichestra_config_root
-
-            root = resolve_aichestra_config_root()
-        except ValueError:
-            return None
+        return None
     return consume_cleanup_lease(lease, repo_root=root)
+
+
+def _close_prepared_cleanup_lease(
+    request: ProviderTaskRequest,
+    prepared_payload: Mapping[str, Any] | None,
+    launch_ctx: Any,
+) -> dict[str, Any] | None:
+    """Claim → close owned bridge; restore the lease if close fails."""
+    from aichestra.execution.cleanup_leases import (
+        claim_cleanup_lease,
+        cleanup_lease_from_prepared,
+        consume_claimed_lease,
+        restore_cleanup_lease,
+    )
+    from aichestra.execution.launch_strategies import PreparedLaunch, abort_prepared
+
+    lease = cleanup_lease_from_prepared(prepared_payload)
+    if not lease:
+        return None
+    root = _prepared_cleanup_repo_root(request, prepared_payload)
+    if root is None:
+        return None
+    handle = claim_cleanup_lease(lease, repo_root=root)
+    if not handle:
+        return None
+    result = abort_prepared(
+        PreparedLaunch(arguments=[], terminal_handle=handle, owns_terminal=True),
+        launch_ctx,
+    )
+    if result.get("ok") and not result.get("skipped"):
+        consume_claimed_lease(lease, repo_root=root)
+    else:
+        restore_cleanup_lease(lease, repo_root=root)
+    return result
 
 
 class OrcaProvider(ProviderAdapter):
@@ -1283,20 +1327,13 @@ class OrcaProvider(ProviderAdapter):
                 _, cleanup = self._release_worker(binary, session, request, dispatch_id, run_id)
                 cleanup_meta["cleanup"] = cleanup
             elif launch_ctx is not None:
-                from aichestra.execution.launch_strategies import PreparedLaunch
-
                 preflight_map = preflight if isinstance(preflight, Mapping) else None
-                leased = _consume_prepared_cleanup_lease(request, preflight_map)
-                if leased:
+                leased_close = _close_prepared_cleanup_lease(
+                    request, preflight_map, launch_ctx
+                )
+                if leased_close is not None:
                     # Close only the handle recorded in an Aichestra-issued lease.
-                    cleanup_meta["bridge_terminal_cleanup"] = abort_prepared(
-                        PreparedLaunch(
-                            arguments=[],
-                            terminal_handle=leased,
-                            owns_terminal=True,
-                        ),
-                        launch_ctx,
-                    )
+                    cleanup_meta["bridge_terminal_cleanup"] = leased_close
                 elif (
                     prepared is not None
                     and not used_preflight

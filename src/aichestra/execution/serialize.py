@@ -208,6 +208,8 @@ def abort_launch_invocation(
     """Structured cleanup for an owned bridge that was never Dispatched.
 
     Coordinator receives an opaque lease, never a raw Orca terminal handle.
+    Abort structurally refuses to close a terminal Orca already bound to a
+    Dispatch; failed close restores the lease.
     """
     args = ["abort-launch"]
     if repo_root:

@@ -188,9 +188,12 @@ proven process/contract binding. Create-receipt ``startupCommand`` echoes are
 not proof. Prompt text, discovery alone, and Aichestra-process environment
 variables are not proof. Bridge-owned terminals are closed on prepare/dispatch
 failure before attach; foreign existing terminals are never closed. Abort-launch
-closes a bridge only after consuming an Aichestra-issued opaque cleanup lease —
-callers cannot pass a raw terminal handle. After an
-exact ``dispatch_id`` exists, failure paths attempt bounded worker-release
+closes a bridge only after claiming an Aichestra-issued opaque cleanup lease
+and proving via Orca ``worker-list`` that the stored handle is not bound to a
+Dispatch — callers cannot pass a raw terminal handle. A structured Dispatch
+binding consumes the lease and leaves the terminal running. Failed close
+restores the lease. After an exact ``dispatch_id`` exists, failure paths
+attempt bounded worker-release
 cleanup. Local-only live acceptance remains NOT VALIDATED (no proven local
 ExecutionTarget on the current machine). Cloud/native Mode C live smoke passed via T168 (`run_3d12b2f31039`) for the
 pre-T180 handshake. In-Run `AICHESTRA_GATE:verification` live smoke passed via
