@@ -942,17 +942,22 @@ def deserialize_prepared_launch(payload: Mapping[str, Any]) -> PreparedLaunch:
     )
 
 
-def prove_bootstrap_launch(
+def prove_launch(
     target: ExecutionTarget,
     ctx: LaunchContext,
 ) -> tuple[ExecutionTarget, PreparedLaunch]:
-    """Prepare/attest before Orca Run creation.
+    """Deterministic launch proof: candidate/target → proven runnable + handle.
 
-    On success the returned target is ``launch_proven`` / runnable. On failure
-    no Run must be created; owned bridge terminals are closed by prepare().
+    Used for Mode C bootstrap preflight and for promoting inner-worker
+    ``execution_target_candidates``. On success the returned target is
+    ``launch_proven`` / runnable. On failure owned bridge terminals are closed
+    by prepare()/abort; callers must not create an Orca Run (bootstrap) or
+    Dispatch (inner worker) until this succeeds.
+
+    This is policy/binding verification — not worker selection or DAG building.
     """
     if not target.dispatchable:
-        raise ValueError("No dispatchable bootstrap ExecutionTarget")
+        raise ValueError("No dispatchable ExecutionTarget for launch proof")
 
     if target.runnable:
         try:
@@ -983,36 +988,18 @@ def prove_bootstrap_launch(
                 raise
         return target, prepared
 
-    # Provisionable bridge: must prepare/attest before any Orca Run exists.
+    # Provisionable bridge: must prepare/attest before Dispatch or Run create.
     adapter = adapter_for(target)
     prepared = adapter.prepare(target, ctx)
     if not structured_binding_matches(target, prepared.evidence):
         abort_prepared(prepared, ctx)
-        raise ValueError("Bootstrap launch did not prove the requested binding")
+        raise ValueError("Launch proof did not prove the requested binding")
     return mark_launch_proven(target), prepared
 
 
-def launch_recipe_for(target: ExecutionTarget) -> dict[str, Any] | None:
-    """Coordinator-facing recipe for provisionable bridge targets.
-
-    Inner workers remain coordinator-owned: they must prepare/attest via Orca
-    using this recipe (structured process evidence) before treating the target
-    as runnable. Screen/tail text is never sufficient proof.
-    """
-    if not target.provisionable:
-        return None
-    bridge = bridge_command_for(target)
-    if bridge is None:
-        return None
-    return {
-        "kind": LaunchStrategy.ORCA_TERMINAL_BRIDGE.value,
-        "proof": "structured_process_attestation",
-        "create_command": bridge.command,
-        "expected_binding": expected_binding(target),
-        "steps": [
-            "orca terminal create --command <create_command> --worktree <wt> --json",
-            "orca terminal show --terminal <handle> --json  # require process argv/effective",
-            "exact-compare expected_binding to structured process metadata",
-            "orca orchestration worker-start --terminal <handle> ...",
-        ],
-    }
+def prove_bootstrap_launch(
+    target: ExecutionTarget,
+    ctx: LaunchContext,
+) -> tuple[ExecutionTarget, PreparedLaunch]:
+    """Bootstrap alias for ``prove_launch`` (preflight before Orca Run create)."""
+    return prove_launch(target, ctx)

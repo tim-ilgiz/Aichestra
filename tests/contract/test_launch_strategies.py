@@ -506,3 +506,260 @@ def test_prove_bootstrap_launch_promotes_bridge_before_run(monkeypatch):
     assert prepared.owns_terminal is True
     assert expected_binding(proven)["model"] == "qwen"
     assert select_bootstrap([proven]) is proven
+
+
+def test_prove_launch_is_bootstrap_alias_and_promotes_candidate(monkeypatch):
+    from aichestra.execution.launch_strategies import prove_launch
+
+    target = _opencode_target()
+    monkeypatch.setattr(
+        "aichestra.execution.launch_strategies.load_orca_schema",
+        lambda binary=None: _schema(),
+    )
+    launches = discover_launches([target], binary="orca-test")
+    resolved = resolve_targets(
+        DiscoveryFacts(
+            runtimes=(target.runtime,),
+            providers=(target.provider,),
+            models=(target.model,),
+        ),
+        (Compatibility("opencode", "ollama", "qwen"),),
+        known_launches=launches,
+    )[0]
+    assert resolved.provisionable
+
+    def run(argv, **_kwargs):
+        if argv[1:3] == ["terminal", "create"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"ok": True, "result": {"terminal": {"handle": "term_inner"}}}),
+            )
+        if argv[1:3] == ["terminal", "wait"]:
+            return SimpleNamespace(returncode=0, stdout="{}")
+        if argv[1:3] in (["terminal", "show"], ["terminal", "read"]):
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(_structured_terminal("term_inner")),
+            )
+        raise AssertionError(argv)
+
+    proven, prepared = prove_launch(
+        resolved,
+        LaunchContext(binary="orca", worktree="current", run=run),
+    )
+    assert proven.runnable
+    assert prepared.terminal_handle == "term_inner"
+
+
+def _bridge_target_for_controller(monkeypatch):
+    target = _opencode_target()
+    monkeypatch.setattr(
+        "aichestra.execution.launch_strategies.load_orca_schema",
+        lambda binary=None: _schema(),
+    )
+    launches = discover_launches([target], binary="orca-test")
+    return resolve_targets(
+        DiscoveryFacts(
+            runtimes=(target.runtime,),
+            providers=(target.provider,),
+            models=(target.model,),
+        ),
+        (Compatibility("opencode", "ollama", "qwen"),),
+        known_launches=launches,
+    )[0]
+
+
+def _controller_bindings(tmp_path, *, orca, targets):
+    import sys
+
+    from aichestra.orchestration.workflow import WorkflowBindings
+
+    return WorkflowBindings(
+        orca=orca,
+        providers=[],
+        project_root=str(tmp_path),
+        task_prompt="bridge bootstrap",
+        maintenance_kwargs={"change_summary": "x", "touches_behavior": False},
+        verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
+        execution_targets=tuple(targets),
+    )
+
+
+def test_controller_bridge_proof_fail_zero_run_create(tmp_path, monkeypatch):
+    """T173/T174: bootstrap proof FAIL → zero Orca run-create."""
+    from aichestra.orchestration.modes import Mode
+    from aichestra.orchestration.workflow import ModeCRunController
+    from tests.fakes.providers import fake_orca
+
+    bridge = _bridge_target_for_controller(monkeypatch)
+    assert bridge.provisionable
+
+    monkeypatch.setattr(
+        "aichestra.execution.launch_strategies.prove_bootstrap_launch",
+        lambda *_a, **_k: (_ for _ in ()).throw(ValueError("binding proof failed")),
+    )
+    monkeypatch.setattr(
+        "aichestra.providers.orca.resolve_orca_binary",
+        lambda: "orca-test",
+    )
+    orca = fake_orca("success")
+    state = ModeCRunController(
+        mode=Mode.ORCHESTRATED,
+        bindings=_controller_bindings(tmp_path, orca=orca, targets=[bridge]),
+    ).run_all()
+    assert state.failed
+    assert orca.run_creates == 0
+    assert not any((r.role or "") == "ensure_run" for r in orca.sent)
+
+
+def test_controller_bridge_proof_success_one_terminal_one_run(tmp_path, monkeypatch):
+    """T173/T174: proof SUCCESS → exactly one owned terminal + one run-create."""
+    from aichestra.execution.launch_strategies import PreparedLaunch, mark_launch_proven
+    from aichestra.orchestration.modes import Mode
+    from aichestra.orchestration.workflow import MODE_C_HANDOFF_ROLE, ModeCRunController
+    from tests.fakes.providers import fake_orca
+
+    bridge = _bridge_target_for_controller(monkeypatch)
+    proves = []
+
+    def prove_ok(target, ctx):
+        proves.append(target.id)
+        return mark_launch_proven(target), PreparedLaunch(
+            arguments=["--terminal", "term_one"],
+            terminal_handle="term_one",
+            owns_terminal=True,
+            evidence={"process": {"argv": _process_argv()}},
+        )
+
+    monkeypatch.setattr(
+        "aichestra.execution.launch_strategies.prove_bootstrap_launch",
+        prove_ok,
+    )
+    monkeypatch.setattr(
+        "aichestra.providers.orca.resolve_orca_binary",
+        lambda: "orca-test",
+    )
+    orca = fake_orca("success")
+    state = ModeCRunController(
+        mode=Mode.ORCHESTRATED,
+        bindings=_controller_bindings(tmp_path, orca=orca, targets=[bridge]),
+    ).run_all()
+    assert not state.failed, state.failed
+    assert proves == [bridge.id]
+    assert orca.run_creates == 1
+    handoff = next(r for r in orca.sent if (r.role or "") == MODE_C_HANDOFF_ROLE)
+    prepared = (handoff.context or {}).get("prepared_bootstrap_launch")
+    assert prepared["terminal_handle"] == "term_one"
+    assert prepared["owns_terminal"] is True
+    # Promoted bootstrap appears in runnable execution_targets, not as candidate.
+    package = state.metadata["mode_c_policy_package"]
+    assert any(row["id"] == bridge.id and row["runnable"] for row in package["execution_targets"])
+    assert not any(row["id"] == bridge.id for row in package["execution_target_candidates"])
+
+
+def test_controller_run_create_fail_aborts_owned_terminal(tmp_path, monkeypatch):
+    """T174: run-create FAIL → owned bridge terminal closed via abort_prepared."""
+    from aichestra.execution.launch_strategies import PreparedLaunch, mark_launch_proven
+    from aichestra.orchestration.modes import Mode
+    from aichestra.orchestration.workflow import ModeCRunController
+    from aichestra.providers.base import FailureClass, ProviderTaskResult
+    from tests.fakes.providers import fake_orca
+
+    bridge = _bridge_target_for_controller(monkeypatch)
+    aborts: list = []
+
+    def prove_ok(target, ctx):
+        return mark_launch_proven(target), PreparedLaunch(
+            arguments=["--terminal", "term_abort"],
+            terminal_handle="term_abort",
+            owns_terminal=True,
+        )
+
+    def tracking_abort(prepared, ctx):
+        aborts.append(prepared.terminal_handle)
+        return {"ok": True, "closed": True}
+
+    monkeypatch.setattr(
+        "aichestra.execution.launch_strategies.prove_bootstrap_launch",
+        prove_ok,
+    )
+    monkeypatch.setattr(
+        "aichestra.execution.launch_strategies.abort_prepared",
+        tracking_abort,
+    )
+    monkeypatch.setattr(
+        "aichestra.providers.orca.resolve_orca_binary",
+        lambda: "orca-test",
+    )
+    orca = fake_orca("success")
+    real_send = orca.send
+
+    def send_fail_ensure(session, request):
+        role = (request.role or "").strip().lower()
+        if role == "ensure_run":
+            orca.sent.append(request)
+            orca.run_creates += 1
+            return ProviderTaskResult(
+                ok=False,
+                output="",
+                failure=FailureClass.ERROR,
+                detail="run-create failed",
+                session_id=session.session_id,
+                metadata={"fake": True},
+            )
+        return real_send(session, request)
+
+    orca.send = send_fail_ensure  # type: ignore[method-assign]
+    state = ModeCRunController(
+        mode=Mode.ORCHESTRATED,
+        bindings=_controller_bindings(tmp_path, orca=orca, targets=[bridge]),
+    ).run_all()
+    assert state.failed
+    assert orca.run_creates == 1
+    assert aborts == ["term_abort"]
+    assert not any((r.role or "") == "mode_c_handoff" for r in orca.sent)
+
+
+def test_controller_handoff_reuses_prepared_launch_no_second_prepare(
+    tmp_path, monkeypatch
+):
+    """T174: successful handoff reuses PreparedLaunch; no second prepare/create."""
+    from aichestra.execution.launch_strategies import PreparedLaunch, mark_launch_proven
+    from aichestra.orchestration.modes import Mode
+    from aichestra.orchestration.workflow import MODE_C_HANDOFF_ROLE, ModeCRunController
+    from tests.fakes.providers import fake_orca
+
+    bridge = _bridge_target_for_controller(monkeypatch)
+    prepare_calls = {"n": 0}
+
+    def prove_ok(target, ctx):
+        prepare_calls["n"] += 1
+        return mark_launch_proven(target), PreparedLaunch(
+            arguments=["--terminal", "term_reuse"],
+            terminal_handle="term_reuse",
+            owns_terminal=True,
+        )
+
+    monkeypatch.setattr(
+        "aichestra.execution.launch_strategies.prove_bootstrap_launch",
+        prove_ok,
+    )
+    monkeypatch.setattr(
+        "aichestra.providers.orca.resolve_orca_binary",
+        lambda: "orca-test",
+    )
+    # Fake Orca handoff does not call adapter prepare — assert controller passed
+    # the preflight payload exactly once and did not invoke prove again.
+    orca = fake_orca("success")
+    state = ModeCRunController(
+        mode=Mode.ORCHESTRATED,
+        bindings=_controller_bindings(tmp_path, orca=orca, targets=[bridge]),
+    ).run_all()
+    assert not state.failed, state.failed
+    assert prepare_calls["n"] == 1
+    assert orca.run_creates == 1
+    handoff = next(r for r in orca.sent if (r.role or "") == MODE_C_HANDOFF_ROLE)
+    assert (handoff.context or {})["prepared_bootstrap_launch"]["terminal_handle"] == (
+        "term_reuse"
+    )
+    assert state.metadata["bootstrap_prepared_launch"]["terminal_handle"] == "term_reuse"

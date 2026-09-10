@@ -175,6 +175,7 @@ def test_arbitrary_fake_runtime_serializes_without_product_branches() -> None:
         "launch_proven": False,
         "runnable": False,
         "provisionable": False,
+        "dispatchable": False,
         "reasons": [],
     }
 
@@ -263,6 +264,9 @@ def test_coordinator_context_receives_capabilities_locality_policy(
     assert "Do not infer workers from raw providers" in prompt
     assert "Do not impose product-name phase routing" in prompt
     assert "enabled, available, capable, allowed, and runnable" in prompt
+    assert "execution_target_candidates" in prompt
+    assert "aichestra.prove_launch" in prompt
+    assert "launch_recipe" not in prompt
     assert "Use only enabled, available cloud providers" not in prompt
     assert "OpenCode launch is unavailable" not in prompt
     assert "Orca owns workflow graph" not in prompt
@@ -277,6 +281,9 @@ def test_coordinator_context_receives_capabilities_locality_policy(
     assert "temporary legacy launch path" not in adapter_src
     assert "Unsupported targets MUST NOT be dispatched" in adapter_src
     assert "Target locality may be local, remote, or cloud" in adapter_src
+    assert "execution_target_candidates" in adapter_src
+    assert "aichestra.prove_launch" in adapter_src
+    assert "launch_recipe" not in adapter_src
 
 
 def test_product_id_change_does_not_require_workflow_branch(tmp_path: Path) -> None:
@@ -351,6 +358,7 @@ def test_legacy_fields_marked_secondary_compatibility(tmp_path: Path) -> None:
     assert package["legacy_compatibility_fields"] == list(LEGACY_COMPATIBILITY_FIELDS)
     assert "preferred_lead" in package["legacy_compatibility_fields"]
     assert "execution_targets" in package["canonical_execution_fields"]
+    assert "execution_target_candidates" in package["canonical_execution_fields"]
     assert package["preferred_lead"] == "codex"  # still present for back-compat
     assert package["local_model_ref"] == "legacy-model"
     handoff = next(r for r in orca.sent if (r.role or "") == MODE_C_HANDOFF_ROLE)
@@ -729,8 +737,86 @@ def test_production_resolver_discovers_native_launch_contract(monkeypatch):
 
 def test_unproven_candidates_not_exposed_to_coordinator(tmp_path):
     from tests.fakes.providers import fake_execution_targets
+
     orca = fake_orca("success")
+    # Unsupported + runnable native: only runnable enters execution_targets.
     targets = [*fake_execution_targets(), _target()]
     state = ModeCRunController(bindings=_bindings(tmp_path, orca=orca, targets=targets)).run_all()
     assert not state.failed
-    assert len(state.metadata["mode_c_policy_package"]["execution_targets"]) == 1
+    package = state.metadata["mode_c_policy_package"]
+    assert len(package["execution_targets"]) == 1
+    assert package["execution_targets"][0]["runnable"] is True
+    assert package["execution_target_candidates"] == []
+    assert "launch_recipe" not in package["execution_targets"][0]
+
+
+def test_provisionable_targets_are_candidates_not_dispatchable(tmp_path, monkeypatch):
+    """T163: provisionable bridges must not enter canonical execution_targets."""
+    from aichestra.execution.domain import Compatibility, LaunchCapability
+    from aichestra.execution.launch_strategies import PreparedLaunch, mark_launch_proven
+    from aichestra.execution.serialize import LAUNCH_PROOF_OPERATION
+    from tests.fakes.providers import fake_execution_targets
+
+    runtime = AgentRuntime("opencode", True, binary_path="/usr/bin/opencode")
+    provider = ModelProvider(
+        "ollama", True, endpoint="http://127.0.0.1:11434", locality=Locality.LOCAL
+    )
+    model = Model("qwen", "ollama", True, capabilities=Caps(frozenset({"code"})))
+    facts = DiscoveryFacts(runtimes=(runtime,), providers=(provider,), models=(model,))
+    bridge = resolve_targets(
+        facts,
+        (Compatibility("opencode", "ollama", "qwen"),),
+        known_launches=(
+            LaunchCapability(
+                "opencode",
+                "ollama",
+                "qwen",
+                endpoint="http://127.0.0.1:11434",
+                strategy=LaunchStrategy.ORCA_TERMINAL_BRIDGE,
+                proven=False,
+            ),
+        ),
+    )[0]
+    assert bridge.provisionable
+    assert not bridge.runnable
+
+    native = fake_execution_targets()[0]
+    assert native.runnable
+
+    def prove_ok(target, ctx):
+        proven = mark_launch_proven(target) if target.provisionable else target
+        handle = "term_boot" if target.provisionable else None
+        args = ["--terminal", handle] if handle else ["--agent", target.runtime.id]
+        return proven, PreparedLaunch(
+            arguments=args, terminal_handle=handle, owns_terminal=bool(handle)
+        )
+
+    monkeypatch.setattr(
+        "aichestra.execution.launch_strategies.prove_bootstrap_launch",
+        prove_ok,
+    )
+    monkeypatch.setattr(
+        "aichestra.providers.orca.resolve_orca_binary",
+        lambda: "orca-test",
+    )
+
+    orca = fake_orca("success")
+    state = ModeCRunController(
+        bindings=_bindings(tmp_path, orca=orca, targets=[native, bridge])
+    ).run_all()
+    assert not state.failed, state.failed
+    package = state.metadata["mode_c_policy_package"]
+    assert all(row["runnable"] for row in package["execution_targets"])
+    assert all(not row.get("provisionable") for row in package["execution_targets"])
+    assert "launch_recipe" not in str(package["execution_targets"])
+    candidates = package["execution_target_candidates"]
+    assert len(candidates) == 1
+    assert candidates[0]["id"] == bridge.id
+    assert candidates[0]["dispatchable"] is False
+    assert candidates[0]["proof_operation"] == LAUNCH_PROOF_OPERATION
+    assert "steps" not in candidates[0]
+    assert "launch_recipe" not in candidates[0]
+    assert candidates[0]["expected_binding"]["model"] == "qwen"
+    handoff = next(r for r in orca.sent if (r.role or "") == MODE_C_HANDOFF_ROLE)
+    assert (handoff.context or {}).get("execution_target_candidates")
+    assert LAUNCH_PROOF_OPERATION in (handoff.prompt or "")

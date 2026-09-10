@@ -23,8 +23,14 @@ from .domain import (
 from .model_providers import ProviderProbeRegistry, ModelProviderProbe
 from .targets import resolve_targets
 
-# Coordinator package contract version for execution_targets / execution_policy.
-EXECUTION_TARGET_CONTRACT_VERSION = 1
+# Coordinator package contract version for execution_targets / candidates / policy.
+# v2: only proven runnable targets in execution_targets; provisionable bridges
+# live in execution_target_candidates and require aichestra.prove_launch.
+EXECUTION_TARGET_CONTRACT_VERSION = 2
+
+# Deterministic promotion op: candidate → proven runnable ExecutionTarget.
+# Coordinator may request this; it must NOT DIY attestation from text recipes.
+LAUNCH_PROOF_OPERATION = "aichestra.prove_launch"
 
 LEGACY_COMPATIBILITY_FIELDS: tuple[str, ...] = (
     "preferred_lead",
@@ -39,6 +45,7 @@ LEGACY_COMPATIBILITY_FIELDS: tuple[str, ...] = (
 
 CANONICAL_EXECUTION_FIELDS: tuple[str, ...] = (
     "execution_targets",
+    "execution_target_candidates",
     "execution_policy",
 )
 
@@ -109,10 +116,13 @@ def safe_endpoint_for_context(endpoint: str | None) -> str | None:
 
 
 def serialize_execution_target(target: ExecutionTarget) -> dict[str, Any]:
-    """Neutral bounded representation for the generic coordinator."""
-    from .launch_strategies import launch_recipe_for
+    """Neutral bounded representation for a proven (or inspected) target.
 
-    payload = {
+    Canonical coordinator ``execution_targets`` must contain only ``runnable``
+    rows. Provisionable bridges use ``serialize_launch_candidate`` instead —
+    never a DIY ``launch_recipe`` for the LLM to follow.
+    """
+    return {
         "id": target.id,
         "runtime": target.runtime.id,
         "provider": target.provider.id if target.provider else None,
@@ -129,12 +139,39 @@ def serialize_execution_target(target: ExecutionTarget) -> dict[str, Any]:
         "launch_proven": target.launch_proven,
         "runnable": target.runnable,
         "provisionable": target.provisionable,
+        "dispatchable": target.runnable,
         "reasons": list(target.reasons),
     }
-    recipe = launch_recipe_for(target)
-    if recipe is not None:
-        # Coordinator may prepare provisionable bridges via Orca; screen text ≠ proof.
-        payload["launch_recipe"] = recipe
+
+
+def serialize_launch_candidate(target: ExecutionTarget) -> dict[str, Any]:
+    """Non-dispatchable provisionable bridge for coordinator awareness only.
+
+    Candidates are NOT ExecutionTargets for Dispatch. Promotion to runnable
+    requires the deterministic ``aichestra.prove_launch`` operation (structured
+    process attestation). Coordinator selects which candidate to promote and
+    later builds child Task/Dispatch via Orca — it does not perform binding
+    proof itself.
+    """
+    if not target.provisionable:
+        raise ValueError("launch candidates must be provisionable ExecutionTargets")
+
+    from .launch_strategies import bridge_command_for, expected_binding
+
+    bridge = bridge_command_for(target)
+    payload = serialize_execution_target(target)
+    payload.update(
+        {
+            "dispatchable": False,
+            "candidate_kind": "execution_target_candidate",
+            "proof_operation": LAUNCH_PROOF_OPERATION,
+            "expected_binding": expected_binding(target),
+            "prove_inputs": {
+                "strategy": target.launch_strategy.value,
+                "create_command": bridge.command if bridge is not None else None,
+            },
+        }
+    )
     return payload
 
 

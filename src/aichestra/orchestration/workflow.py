@@ -92,11 +92,13 @@ from aichestra.execution.domain import ExecutionPolicy, ExecutionTarget
 from aichestra.execution.serialize import (
     CANONICAL_EXECUTION_FIELDS,
     EXECUTION_TARGET_CONTRACT_VERSION,
+    LAUNCH_PROOF_OPERATION,
     LEGACY_COMPATIBILITY_FIELDS,
     OWNERSHIP_METADATA,
     safe_endpoint_for_context,
     serialize_execution_policy,
     serialize_execution_target,
+    serialize_launch_candidate,
 )
 from aichestra.security.sanitize import sanitize_mapping
 
@@ -292,7 +294,8 @@ class WorkflowBindings:
 class ModeCPolicyPackage:
     """Policy + ProjectContext package handed to Orca (not a worker schedule).
 
-    Canonical execution facts: ``execution_targets`` + ``execution_policy``.
+    Canonical execution facts: ``execution_targets`` (runnable only) +
+    ``execution_target_candidates`` (non-dispatchable) + ``execution_policy``.
     Legacy preferred_lead / local_* / provider_policy remain as secondary
     compatibility seams for existing Orca adapter bootstrap — not the source of
     truth for new inner-worker policy.
@@ -312,6 +315,7 @@ class ModeCPolicyPackage:
     installed_models: tuple[dict[str, Any], ...] = ()
     provider_policy: dict[str, Any] = field(default_factory=dict)
     execution_targets: tuple[dict[str, Any], ...] = ()
+    execution_target_candidates: tuple[dict[str, Any], ...] = ()
     execution_policy: dict[str, Any] = field(default_factory=dict)
     execution_target_contract_version: int = EXECUTION_TARGET_CONTRACT_VERSION
     speckit_scale: str = "small"
@@ -328,11 +332,15 @@ class ModeCPolicyPackage:
             "research_query": self.research_query,
             "project_root": self.project_root,
             "project_context": dict(self.project_context),
-            # Canonical ExecutionTarget contract (T172).
+            # Canonical ExecutionTarget contract (T172 / T163).
             "execution_target_contract_version": self.execution_target_contract_version,
             "execution_targets": [dict(t) for t in self.execution_targets],
+            "execution_target_candidates": [
+                dict(t) for t in self.execution_target_candidates
+            ],
             "execution_policy": dict(self.execution_policy),
             "canonical_execution_fields": list(CANONICAL_EXECUTION_FIELDS),
+            "launch_proof_operation": LAUNCH_PROOF_OPERATION,
             # Legacy compatibility seams — secondary; not inner-worker SoT.
             "preferred_lead": self.preferred_lead,
             "fallback_lead": self.fallback_lead,
@@ -797,6 +805,9 @@ class ModeCRunController:
                 "worktree": "current",
                 # Canonical ExecutionTarget facts for the coordinator (T172).
                 "execution_targets": list(package.execution_targets),
+                "execution_target_candidates": list(
+                    package.execution_target_candidates
+                ),
                 "bootstrap_execution_target": serialize_execution_target(self._bootstrap_target),
                 "prepared_bootstrap_launch": (
                     serialize_prepared_launch(self._prepared_bootstrap_launch)
@@ -807,9 +818,13 @@ class ModeCRunController:
                 "execution_target_contract_version": (
                     package.execution_target_contract_version
                 ),
+                "launch_proof_operation": LAUNCH_PROOF_OPERATION,
                 # Capability hints — ExecutionTargets are canonical; legacy secondary.
                 "capabilities": {
                     "execution_targets": list(package.execution_targets),
+                    "execution_target_candidates": list(
+                        package.execution_target_candidates
+                    ),
                     "execution_policy": dict(package.execution_policy),
                     "legacy_compatibility": {
                         "preferred_lead": package.preferred_lead,
@@ -844,12 +859,13 @@ class ModeCRunController:
                 "security, and deterministic gates/verification only. "
                 "Honor project-owned AGENTS/Spec Kit/Factory "
                 "instructions from project_context with stated precedence. "
-                "For inner workers, use only ExecutionTargets that are "
-                "enabled, available, capable, allowed, and runnable. "
-                "Provisionable terminal-bridge targets include launch_recipe; "
-                "they become runnable only after structured process attestation "
-                "(pid/argv/effective config) exact-matches expected_binding — "
-                "never screen/tail substring text. "
+                "For inner workers, Dispatch only ExecutionTargets listed in "
+                "execution_targets (enabled, available, capable, allowed, and "
+                "runnable). execution_target_candidates are NOT dispatchable; "
+                f"promote a candidate only via {LAUNCH_PROOF_OPERATION} "
+                "(deterministic structured process attestation) which returns a "
+                "proven runnable target/handle — never DIY terminal show/tail "
+                "recipes or screen substring matching. "
                 "Target locality may be local, remote, or cloud according to "
                 "ExecutionPolicy. "
                 "Do not infer workers from raw providers. "
@@ -1059,10 +1075,24 @@ class ModeCRunController:
         steps = tuple(
             (self.state.metadata.get("speckit_path") or {}).get("steps") or ()
         )
+        # Bootstrap prove may promote a provisionable binding to runnable without
+        # mutating bindings; prefer the proven bootstrap target for the package.
+        proven_by_id: dict[str, ExecutionTarget] = {}
+        if self._bootstrap_target is not None and self._bootstrap_target.runnable:
+            proven_by_id[self._bootstrap_target.id] = self._bootstrap_target
+
+        def _effective(target: ExecutionTarget) -> ExecutionTarget:
+            return proven_by_id.get(target.id, target)
+
         serialized_targets = tuple(
-            serialize_execution_target(t)
+            serialize_execution_target(_effective(t))
             for t in self.bindings.execution_targets
-            if t.runnable or t.provisionable
+            if _effective(t).runnable
+        )
+        serialized_candidates = tuple(
+            serialize_launch_candidate(t)
+            for t in self.bindings.execution_targets
+            if t.provisionable and t.id not in proven_by_id
         )
         serialized_policy = serialize_execution_policy(self.bindings.execution_policy)
         return ModeCPolicyPackage(
@@ -1082,6 +1112,7 @@ class ModeCRunController:
             installed_models=tuple(self.bindings.installed_models or ()),
             provider_policy=dict(self.state.metadata.get("provider_policy") or {}),
             execution_targets=serialized_targets,
+            execution_target_candidates=serialized_candidates,
             execution_policy=serialized_policy,
             execution_target_contract_version=EXECUTION_TARGET_CONTRACT_VERSION,
             speckit_scale=str(scale),

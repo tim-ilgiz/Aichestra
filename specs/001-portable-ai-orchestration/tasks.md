@@ -16,7 +16,9 @@ Aichestra owns discovery, ExecutionTarget resolution, policy, security,
 deterministic gates and verification. Phase 24: T169–T173 and T176 landed;
 **T174/T175** remain open for launch-proof/lifecycle reviewer acceptance
 (bootstrap prepare-before-Run + structured process attestation landed;
-substring screen proof removed — still pending reviewer re-acceptance);
+substring screen proof removed; provisionable targets moved out of
+canonical `execution_targets` into non-dispatchable candidates —
+still pending reviewer re-acceptance);
 umbrella **T163** plus validation gates **T167–T168** remain open.
 **Do not merge** until fresh GitHub CI matrix is green on current HEAD (T167)
 and live Mode C smoke (T168) passes.
@@ -702,14 +704,18 @@ security, deterministic gates and verification.
       builder, existing-terminal attestation via live handle
       (`ORCA_WORKER_TERMINAL_HANDLE` / `terminal_handle`), bridge-owned terminal
       cleanup on prepare/dispatch failure, and fail-closed unsupported bindings.
-      Bootstrap preflight: `prove_bootstrap_launch` prepare/attest runs before
-      any Orca Run create/resume; `PreparedLaunch` is reused at worker-start
-      (no second bridge terminal); Run-create failure aborts owned terminals.
-      `select_bootstrap` returns only runnable targets; provisionable bridges
-      are candidates for preflight only. Provisionable targets serialize a
-      `launch_recipe` (expected_binding + structured proof steps) for
-      coordinator inner-worker prepare. Remains open pending reviewer
-      re-acceptance of proof/lifecycle semantics.
+      Bootstrap preflight: `prove_launch` / `prove_bootstrap_launch` prepare/attest
+      runs before any Orca Run create/resume; `PreparedLaunch` is reused at
+      worker-start (no second bridge terminal); Run-create failure aborts owned
+      terminals. `select_bootstrap` returns only runnable targets; provisionable
+      bridges are preflight/candidate only. Coordinator package contract v2:
+      `execution_targets` exposes **only runnable** targets; provisionable
+      bridges are separate non-dispatchable `execution_target_candidates` that
+      require deterministic `aichestra.prove_launch` (no DIY `launch_recipe`).
+      Controller-level regressions cover proof-fail→0 run-create, proof-ok→1
+      terminal+1 run-create, run-create-fail→abort owned terminal, and prepared
+      launch reuse. Remains open pending reviewer re-acceptance of
+      proof/lifecycle semantics.
 
 - [ ] T175 CRITICAL: An ExecutionTarget may be advertised as runnable only when
       its launch strategy is proven to bind the actual agent process to the
@@ -734,13 +740,16 @@ security, deterministic gates and verification.
       (MODE-C-017–020; FR-005/047/050/051/065/066/069)
 
       Progress: native schema → `launch_proven` / runnable; terminal-bridge
-      schema+builder → provisionable only (not runnable) until prepare() proves
-      structured live process attestation (create-receipt `startupCommand` and
-      screen/tail substring tokens are ignored); existing-terminal requires
-      attested handle + structured process evidence to become runnable;
-      prompt/discovery/client-env alone cannot mark runnable. Exact compare of
-      runtime/provider/model/endpoint from process argv / effective config /
-      binding metadata; non-zero terminal show/read fails closed. Remains open
+      schema+builder → provisionable only (not runnable) until `prove_launch`
+      proves structured live process attestation (create-receipt
+      `startupCommand` and screen/tail substring tokens are ignored);
+      existing-terminal requires attested handle + structured process evidence
+      to become runnable; prompt/discovery/client-env alone cannot mark
+      runnable. Exact compare of runtime/provider/model/endpoint from process
+      argv / effective config / binding metadata; non-zero terminal show/read
+      fails closed. Provisionable bridges are advertised only as
+      `execution_target_candidates` (not in dispatchable `execution_targets`)
+      until deterministic `aichestra.prove_launch` promotes them. Remains open
       pending reviewer re-acceptance.
 
 - [x] T176 HIGH: Implement Orca worker-release recovery semantics.

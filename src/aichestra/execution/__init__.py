@@ -29,6 +29,7 @@ from .model_providers import (
 from .serialize import (
     CANONICAL_EXECUTION_FIELDS,
     EXECUTION_TARGET_CONTRACT_VERSION,
+    LAUNCH_PROOF_OPERATION,
     LEGACY_COMPATIBILITY_FIELDS,
     OWNERSHIP_METADATA,
     build_execution_policy,
@@ -36,6 +37,7 @@ from .serialize import (
     safe_endpoint_for_context,
     serialize_execution_policy,
     serialize_execution_target,
+    serialize_launch_candidate,
 )
 from .targets import combine_capabilities, expand_compatibility, resolve_targets
 
@@ -50,6 +52,7 @@ __all__ = [
     "ExecutionPolicy",
     "ExecutionTarget",
     "ExecutionTargetKey",
+    "LAUNCH_PROOF_OPERATION",
     "LEGACY_COMPATIBILITY_FIELDS",
     "LaunchBindingKey",
     "LaunchCapability",
@@ -76,5 +79,6 @@ __all__ = [
     "safe_endpoint_for_context",
     "serialize_execution_policy",
     "serialize_execution_target",
+    "serialize_launch_candidate",
     "unregister_provider_probe",
 ]
