@@ -17,8 +17,9 @@ deterministic gates and verification. Phase 24: T169–T173 and T176 landed;
 **T174/T175** remain open for launch-proof/lifecycle reviewer acceptance
 (bootstrap prepare-before-Run + structured process attestation landed;
 substring screen proof removed; provisionable targets moved out of
-canonical `execution_targets` into non-dispatchable candidates —
-still pending reviewer re-acceptance);
+canonical `execution_targets` into non-dispatchable candidates;
+callable `aichestra prove-launch` surface + candidate DIY recipe removal +
+`preparable`/`dispatchable` split landed — still pending reviewer re-acceptance);
 umbrella **T163** plus validation gates **T167–T168** remain open.
 **Do not merge** until fresh GitHub CI matrix is green on current HEAD (T167)
 and live Mode C smoke (T168) passes.
@@ -711,10 +712,14 @@ security, deterministic gates and verification.
       bridges are preflight/candidate only. Coordinator package contract v2:
       `execution_targets` exposes **only runnable** targets; provisionable
       bridges are separate non-dispatchable `execution_target_candidates` that
-      require deterministic `aichestra.prove_launch` (no DIY `launch_recipe`).
+      require deterministic `aichestra.prove_launch` via callable
+      `aichestra prove-launch --candidate-id` (trusted re-resolve; no DIY
+      `launch_recipe` / `create_command` in candidates). Domain split:
+      `preparable` (runnable|provisionable) vs `dispatchable` (runnable only).
       Controller-level regressions cover proof-fail→0 run-create, proof-ok→1
-      terminal+1 run-create, run-create-fail→abort owned terminal, and prepared
-      launch reuse. Remains open pending reviewer re-acceptance of
+      terminal+1 run-create, run-create-fail→abort owned terminal, prepared
+      launch reuse, and prove-launch surface → worker-start handle reuse.
+      Remains open pending reviewer re-acceptance of
       proof/lifecycle semantics.
 
 - [ ] T175 CRITICAL: An ExecutionTarget may be advertised as runnable only when
@@ -749,7 +754,8 @@ security, deterministic gates and verification.
       argv / effective config / binding metadata; non-zero terminal show/read
       fails closed. Provisionable bridges are advertised only as
       `execution_target_candidates` (not in dispatchable `execution_targets`)
-      until deterministic `aichestra.prove_launch` promotes them. Remains open
+      until deterministic `aichestra prove-launch` / `aichestra.prove_launch`
+      promotes them (`dispatchable` only after runnable). Remains open
       pending reviewer re-acceptance.
 
 - [x] T176 HIGH: Implement Orca worker-release recovery semantics.

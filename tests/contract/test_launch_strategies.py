@@ -155,10 +155,11 @@ def test_discover_launches_native_proven_bridge_only_provisionable(monkeypatch):
         (Compatibility("opencode", "ollama", "qwen"),),
         known_launches=(by_runtime["opencode"],),
     )[0]
-    # Schema+builder ⇒ provisionable / dispatchable, NOT runnable yet.
+    # Schema+builder ⇒ provisionable / preparable, NOT runnable / dispatchable.
     assert not resolved.runnable
     assert resolved.provisionable
-    assert resolved.dispatchable
+    assert resolved.preparable
+    assert not resolved.dispatchable
     assert resolved.launch_strategy is LaunchStrategy.ORCA_TERMINAL_BRIDGE
     # Bootstrap selection must not treat provisionable as selected-before-proof.
     assert select_bootstrap([resolved]) is None
@@ -763,3 +764,243 @@ def test_controller_handoff_reuses_prepared_launch_no_second_prepare(
         "term_reuse"
     )
     assert state.metadata["bootstrap_prepared_launch"]["terminal_handle"] == "term_reuse"
+
+
+def test_candidate_serialization_omits_diy_launch_recipe(monkeypatch):
+    from aichestra.execution.serialize import LAUNCH_PROOF_OPERATION, serialize_launch_candidate
+
+    target = _opencode_target()
+    monkeypatch.setattr(
+        "aichestra.execution.launch_strategies.load_orca_schema",
+        lambda binary=None: _schema(),
+    )
+    launches = discover_launches([target], binary="orca-test")
+    resolved = resolve_targets(
+        DiscoveryFacts(
+            runtimes=(target.runtime,),
+            providers=(target.provider,),
+            models=(target.model,),
+        ),
+        (Compatibility("opencode", "ollama", "qwen"),),
+        known_launches=launches,
+    )[0]
+    row = serialize_launch_candidate(resolved)
+
+    assert row["dispatchable"] is False
+    assert row["preparable"] is True
+    assert row["proof_operation"] == LAUNCH_PROOF_OPERATION
+    assert "create_command" not in row
+    assert "prove_inputs" not in row
+    assert "expected_binding" not in row
+    assert "launch_recipe" not in row
+    # Endpoint must be coordinator-safe (no raw internal spill via candidate extras).
+    assert row["endpoint"] == "http://127.0.0.1:11434"
+
+
+def test_prove_launch_surface_cli_and_worker_reuses_handle(tmp_path, monkeypatch):
+    """T174: candidate → prove-launch surface → attestation → worker-start reuses handle."""
+    from aichestra.cli import build_parser, main
+    from aichestra.execution.launch_strategies import (
+        abort_prepared,
+        deserialize_prepared_launch,
+        mark_launch_proven,
+        prove_launch_by_candidate_id,
+    )
+    from aichestra.execution.serialize import serialize_launch_candidate
+    from aichestra.providers.base import (
+        ProviderKind,
+        ProviderSession,
+        ProviderStatus,
+        ProviderTaskRequest,
+        ProviderTaskResult,
+    )
+    from aichestra.providers.orca import OrcaProvider
+
+    target = _opencode_target()
+    monkeypatch.setattr(
+        "aichestra.execution.launch_strategies.load_orca_schema",
+        lambda binary=None: _schema(),
+    )
+    launches = discover_launches([target], binary="orca-test")
+    resolved = resolve_targets(
+        DiscoveryFacts(
+            runtimes=(target.runtime,),
+            providers=(target.provider,),
+            models=(target.model,),
+        ),
+        (Compatibility("opencode", "ollama", "qwen"),),
+        known_launches=launches,
+    )[0]
+    assert resolved.provisionable
+    assert not resolved.dispatchable
+    candidate = serialize_launch_candidate(resolved)
+    assert candidate["dispatchable"] is False
+    assert "create_command" not in candidate
+
+    creates: list[list[str]] = []
+    closes: list[str] = []
+
+    def run(argv, **_kwargs):
+        if argv[1:3] == ["terminal", "create"]:
+            creates.append(list(argv))
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {"ok": True, "result": {"terminal": {"handle": "term_surface"}}}
+                ),
+            )
+        if argv[1:3] == ["terminal", "wait"]:
+            return SimpleNamespace(returncode=0, stdout="{}")
+        if argv[1:3] in (["terminal", "show"], ["terminal", "read"]):
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(_structured_terminal("term_surface")),
+            )
+        if argv[1:3] == ["terminal", "close"]:
+            closes.append(argv[argv.index("--terminal") + 1])
+            return SimpleNamespace(returncode=0, stdout="{}")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(
+        "aichestra.providers.orca.resolve_orca_binary",
+        lambda: "orca-test",
+    )
+    attestation = prove_launch_by_candidate_id(
+        resolved.id,
+        project_root=tmp_path,
+        worktree="current",
+        binary="orca-test",
+        run=run,
+        targets=(resolved,),
+    )
+    assert attestation["ok"] is True
+    assert attestation["candidate_id"] == resolved.id
+    assert attestation["execution_target"]["runnable"] is True
+    assert attestation["execution_target"]["launch_proven"] is True
+    assert attestation["execution_target"]["dispatchable"] is True
+    assert attestation["prepared_launch"]["terminal_handle"] == "term_surface"
+    assert attestation["prepared_launch"]["arguments"] == ["--terminal", "term_surface"]
+    assert "bridge_command" not in attestation["prepared_launch"].get("evidence", {})
+    assert "create_command" not in json.dumps(attestation)
+    assert len(creates) == 1
+    assert "prove-launch" in build_parser().format_help()
+
+    # Child worker-start must reuse prepared_launch — no second terminal create.
+    monkeypatch.setenv("ORCA_TERMINAL_HANDLE", "coord-live")
+    adapter = OrcaProvider()
+    monkeypatch.setattr(
+        adapter,
+        "probe",
+        lambda: ProviderStatus(kind=ProviderKind.ORCA, available=True, binary_path="orca"),
+    )
+    worker_calls: list[list[str]] = []
+    replied = {"ok": False}
+
+    def run_cli_task(**kwargs):
+        argv = kwargs["argv"]
+        worker_calls.append(list(argv))
+        command = argv[2] if len(argv) > 2 and argv[1] == "orchestration" else "status"
+        if command == "check":
+            if replied["ok"]:
+                event = {
+                    "type": "worker_done",
+                    "id": "done1",
+                    "payload": json.dumps(
+                        {"dispatchId": "d_inner", "outcome": "succeeded"}
+                    ),
+                }
+            else:
+                event = {
+                    "type": "question",
+                    "id": "q1",
+                    "from_handle": "term_surface",
+                    "subject": "AICHESTRA_GATE:maintenance",
+                }
+            data = {"deliveryId": "delivery1", "messages": [event]}
+        elif command == "reply":
+            replied["ok"] = True
+            data = {}
+        else:
+            receipts = {
+                "status": {},
+                "run-use": {"run": {"id": "r1"}},
+                "task-create": {"task": {"id": "t_inner"}},
+                "worker-start": {
+                    "dispatchId": "d_inner",
+                    "agentTerminalHandle": "term_surface",
+                    "launch": {"effective": {"agent": "opencode"}},
+                },
+                "worker-release": {"state": "released"},
+                "worker-list": {"workers": []},
+                "task-list": {"tasks": [{"id": "t_inner", "status": "completed"}]},
+                "run-show": {"run": {"id": "r1", "state": "active"}},
+            }
+            data = receipts.get(command, {})
+        return ProviderTaskResult(ok=True, output=json.dumps({"result": data}))
+
+    monkeypatch.setattr("aichestra.providers.orca.run_cli_task", run_cli_task)
+
+    proven = mark_launch_proven(resolved)
+    assert proven.dispatchable
+    result = adapter.send(
+        ProviderSession(session_id="s1", kind=ProviderKind.ORCA),
+        ProviderTaskRequest(
+            prompt="inner worker",
+            role="mode_c_handoff",
+            execution_target=proven,
+            cwd=str(tmp_path),
+            gate_handler=lambda gate: {"ok": True, "gate": gate},
+            context={
+                "run_id": "r1",
+                "worktree": "current",
+                "prepared_launch": attestation["prepared_launch"],
+                "provider_policy": {
+                    "preferred_lead": "codex",
+                    "fallback_lead": "cursor",
+                    "local_enabled": False,
+                },
+            },
+        ),
+    )
+    assert result.ok, result.detail
+    worker = next(c for c in worker_calls if "worker-start" in c)
+    assert worker[worker.index("--terminal") + 1] == "term_surface"
+    assert "--agent" not in worker
+    assert len(creates) == 1  # no second bridge terminal
+
+    # Provisionable (not yet proven) must not be dispatched.
+    denied = adapter.send(
+        ProviderSession(session_id="s2", kind=ProviderKind.ORCA),
+        ProviderTaskRequest(
+            prompt="deny",
+            role="mode_c_handoff",
+            execution_target=resolved,
+            cwd=str(tmp_path),
+            context={"run_id": "r1", "worktree": "current"},
+        ),
+    )
+    assert not denied.ok
+    assert "proven" in (denied.detail or "").lower() or "dispatchable" in (
+        denied.detail or ""
+    ).lower()
+
+    # Cleanup owned terminal from attestation.
+    prepared = deserialize_prepared_launch(attestation["prepared_launch"])
+    abort_prepared(
+        prepared,
+        LaunchContext(binary="orca-test", worktree="current", run=run),
+    )
+    assert closes == ["term_surface"]
+
+    # CLI main path rejects unknown id without inventing a target.
+    code = main(
+        [
+            "prove-launch",
+            "--project-root",
+            str(tmp_path),
+            "--candidate-id",
+            "missing-candidate",
+            "--json",
+        ]
+    )
+    assert code == 1

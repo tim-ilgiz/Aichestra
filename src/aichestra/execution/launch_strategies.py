@@ -882,8 +882,8 @@ def discover_launches(
 
 
 def adapter_for(target: ExecutionTarget) -> LaunchAdapter:
-    if not target.dispatchable:
-        raise ValueError("No dispatchable bootstrap ExecutionTarget")
+    if not target.preparable:
+        raise ValueError("No preparable ExecutionTarget")
     for adapter in LAUNCH_ADAPTERS:
         if adapter.strategy == target.launch_strategy and adapter.accepts(target):
             return adapter
@@ -950,14 +950,16 @@ def prove_launch(
 
     Used for Mode C bootstrap preflight and for promoting inner-worker
     ``execution_target_candidates``. On success the returned target is
-    ``launch_proven`` / runnable. On failure owned bridge terminals are closed
-    by prepare()/abort; callers must not create an Orca Run (bootstrap) or
-    Dispatch (inner worker) until this succeeds.
+    ``launch_proven`` / runnable / dispatchable. On failure owned bridge
+    terminals are closed by prepare()/abort; callers must not create an Orca
+    Run (bootstrap) or Dispatch (inner worker) until this succeeds.
 
     This is policy/binding verification — not worker selection or DAG building.
+    Invoke via ``aichestra prove-launch`` (or ``prove_launch_by_candidate_id``);
+    do not treat serialized candidate fields as a DIY recipe.
     """
-    if not target.dispatchable:
-        raise ValueError("No dispatchable ExecutionTarget for launch proof")
+    if not target.preparable:
+        raise ValueError("No preparable ExecutionTarget for launch proof")
 
     if target.runnable:
         try:
@@ -1003,3 +1005,127 @@ def prove_bootstrap_launch(
 ) -> tuple[ExecutionTarget, PreparedLaunch]:
     """Bootstrap alias for ``prove_launch`` (preflight before Orca Run create)."""
     return prove_launch(target, ctx)
+
+
+def prove_launch_by_candidate_id(
+    candidate_id: str,
+    *,
+    project_root: str | os.PathLike[str],
+    repo_root: str | os.PathLike[str] | None = None,
+    worktree: str = "current",
+    binary: str | None = None,
+    run: Callable[..., Any] | None = None,
+    config: Mapping[str, Any] | None = None,
+    targets: tuple[ExecutionTarget, ...] | None = None,
+) -> dict[str, Any]:
+    """Trusted production surface for ``aichestra.prove_launch`` / CLI.
+
+    Coordinator supplies only ``candidate_id`` (+ project/worktree). Aichestra
+    reloads layered config, discovery, and binding from trusted state — never
+    treats caller-supplied runtime/provider/model/command as authoritative.
+    """
+    from pathlib import Path
+
+    from aichestra.config.layering import resolve_config
+    from aichestra.providers.orca import resolve_orca_binary
+
+    from .serialize import (
+        LAUNCH_PROOF_OPERATION,
+        resolve_mode_c_execution,
+        serialize_execution_target,
+    )
+
+    cid = str(candidate_id or "").strip()
+    if not cid:
+        return {
+            "ok": False,
+            "operation": LAUNCH_PROOF_OPERATION,
+            "error": "candidate_id is required",
+        }
+
+    root = Path(project_root).resolve()
+    if not root.is_dir():
+        return {
+            "ok": False,
+            "operation": LAUNCH_PROOF_OPERATION,
+            "candidate_id": cid,
+            "error": f"project_root is not a directory: {root}",
+        }
+
+    if targets is None:
+        cfg = (
+            dict(config)
+            if config is not None
+            else resolve_config(
+                repo_root=Path(repo_root).resolve() if repo_root else None,
+                project_root=root,
+            )
+        )
+        targets, _policy, _facts = resolve_mode_c_execution(cfg)
+
+    match = next((t for t in targets if t.id == cid), None)
+    if match is None:
+        return {
+            "ok": False,
+            "operation": LAUNCH_PROOF_OPERATION,
+            "candidate_id": cid,
+            "error": f"unknown candidate_id: {cid}",
+        }
+    if not match.preparable:
+        return {
+            "ok": False,
+            "operation": LAUNCH_PROOF_OPERATION,
+            "candidate_id": cid,
+            "error": "candidate is not preparable",
+            "execution_target": serialize_execution_target(match),
+        }
+
+    orca_binary = (binary or "").strip() or resolve_orca_binary() or ""
+    if not orca_binary:
+        return {
+            "ok": False,
+            "operation": LAUNCH_PROOF_OPERATION,
+            "candidate_id": cid,
+            "error": "Orca binary required for launch proof",
+        }
+
+    launch_ctx = LaunchContext(
+        binary=orca_binary,
+        worktree=str(worktree or "current").strip() or "current",
+        terminal_handle=(
+            str(os.environ.get("ORCA_WORKER_TERMINAL_HANDLE") or "").strip() or None
+        ),
+        run=run if run is not None else subprocess.run,
+    )
+    try:
+        proven, prepared = prove_launch(match, launch_ctx)
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "operation": LAUNCH_PROOF_OPERATION,
+            "candidate_id": cid,
+            "error": str(exc),
+        }
+
+    return {
+        "ok": True,
+        "operation": LAUNCH_PROOF_OPERATION,
+        "candidate_id": cid,
+        "execution_target": serialize_execution_target(proven),
+        "prepared_launch": _coordinator_prepared_launch(prepared),
+    }
+
+
+def _coordinator_prepared_launch(prepared: PreparedLaunch) -> dict[str, Any]:
+    """Attestation for coordinator: handle + argv fragment; no DIY bridge command."""
+    evidence = {
+        key: value
+        for key, value in dict(prepared.evidence).items()
+        if key != "bridge_command"
+    }
+    return {
+        "arguments": list(prepared.arguments),
+        "terminal_handle": prepared.terminal_handle,
+        "evidence": evidence,
+        "owns_terminal": prepared.owns_terminal,
+    }

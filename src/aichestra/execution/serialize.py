@@ -139,7 +139,8 @@ def serialize_execution_target(target: ExecutionTarget) -> dict[str, Any]:
         "launch_proven": target.launch_proven,
         "runnable": target.runnable,
         "provisionable": target.provisionable,
-        "dispatchable": target.runnable,
+        "preparable": target.preparable,
+        "dispatchable": target.dispatchable,
         "reasons": list(target.reasons),
     }
 
@@ -148,28 +149,21 @@ def serialize_launch_candidate(target: ExecutionTarget) -> dict[str, Any]:
     """Non-dispatchable provisionable bridge for coordinator awareness only.
 
     Candidates are NOT ExecutionTargets for Dispatch. Promotion to runnable
-    requires the deterministic ``aichestra.prove_launch`` operation (structured
-    process attestation). Coordinator selects which candidate to promote and
-    later builds child Task/Dispatch via Orca — it does not perform binding
-    proof itself.
+    requires the deterministic ``aichestra prove-launch`` CLI / ``aichestra.prove_launch``
+    operation (structured process attestation). Coordinator passes only the
+    candidate id; Aichestra re-resolves binding, command, and endpoint from
+    trusted layered config. Do NOT embed DIY ``launch_recipe``,
+    ``create_command``, binary paths, or exact internal endpoints here.
     """
     if not target.provisionable:
         raise ValueError("launch candidates must be provisionable ExecutionTargets")
 
-    from .launch_strategies import bridge_command_for, expected_binding
-
-    bridge = bridge_command_for(target)
     payload = serialize_execution_target(target)
     payload.update(
         {
             "dispatchable": False,
             "candidate_kind": "execution_target_candidate",
             "proof_operation": LAUNCH_PROOF_OPERATION,
-            "expected_binding": expected_binding(target),
-            "prove_inputs": {
-                "strategy": target.launch_strategy.value,
-                "create_command": bridge.command if bridge is not None else None,
-            },
         }
     )
     return payload

@@ -1,4 +1,4 @@
-"""Aichestra CLI — doctor / profile / bootstrap / update / handoff / orchestrate."""
+"""Aichestra CLI — doctor / profile / bootstrap / update / handoff / prove-launch / orchestrate."""
 
 from __future__ import annotations
 
@@ -125,6 +125,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="Only emit the bounded packet / suggested command (do not run Orca)",
     )
     handoff_p.add_argument("--json", action="store_true", default=True)
+
+    prove_p = sub.add_parser(
+        "prove-launch",
+        help=(
+            "Deterministic launch proof for an execution_target_candidate id "
+            "(trusted re-resolve; returns runnable target + prepared_launch)"
+        ),
+    )
+    prove_p.add_argument(
+        "--project-root",
+        type=Path,
+        required=True,
+        help="Target project root (layered config + discovery)",
+    )
+    prove_p.add_argument(
+        "--candidate-id",
+        required=True,
+        help="Coordinator-visible candidate id (no DIY runtime/command input)",
+    )
+    prove_p.add_argument(
+        "--worktree",
+        default="current",
+        help="Orca worktree context for bridge prepare (default: current)",
+    )
+    prove_p.add_argument(
+        "--repo-root",
+        type=Path,
+        default=None,
+        help="Aichestra repository root (machine-local + tracked policies)",
+    )
+    prove_p.add_argument("--json", action="store_true", default=True)
 
     orch_p = sub.add_parser(
         "orchestrate",
@@ -256,11 +287,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "handoff":
         return _cmd_handoff(args)
 
+    if args.command == "prove-launch":
+        return _cmd_prove_launch(args)
+
     if args.command == "orchestrate":
         return _cmd_orchestrate(args)
 
     parser.error(f"unknown command: {args.command}")
     return 2
+
+
+def _cmd_prove_launch(args: argparse.Namespace) -> int:
+    """Callable surface for LAUNCH_PROOF_OPERATION — coordinator passes id only."""
+    from aichestra.execution.launch_strategies import prove_launch_by_candidate_id
+
+    project_root = Path(args.project_root).resolve()
+    repo_root = Path(args.repo_root).resolve() if args.repo_root else None
+    payload = prove_launch_by_candidate_id(
+        str(args.candidate_id),
+        project_root=project_root,
+        repo_root=repo_root,
+        worktree=str(getattr(args, "worktree", "current") or "current"),
+    )
+    sys.stdout.write(json.dumps(payload, indent=2, default=str) + "\n")
+    return 0 if payload.get("ok") else 1
 
 
 def _cmd_handoff(args: argparse.Namespace) -> int:

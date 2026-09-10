@@ -236,9 +236,14 @@ class ExecutionTarget:
         )
 
     @property
-    def dispatchable(self) -> bool:
-        """May attempt prepare/dispatch (proven runnable or provisionable bridge)."""
+    def preparable(self) -> bool:
+        """May attempt deterministic prepare/attest (runnable or provisionable)."""
         return self.runnable or self.provisionable
+
+    @property
+    def dispatchable(self) -> bool:
+        """May Dispatch / worker-start — proven runnable only (not provisionable)."""
+        return self.runnable
 
 
 @dataclass(frozen=True)

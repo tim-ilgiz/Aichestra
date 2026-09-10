@@ -175,6 +175,7 @@ def test_arbitrary_fake_runtime_serializes_without_product_branches() -> None:
         "launch_proven": False,
         "runnable": False,
         "provisionable": False,
+        "preparable": False,
         "dispatchable": False,
         "reasons": [],
     }
@@ -283,7 +284,9 @@ def test_coordinator_context_receives_capabilities_locality_policy(
     assert "Target locality may be local, remote, or cloud" in adapter_src
     assert "execution_target_candidates" in adapter_src
     assert "aichestra.prove_launch" in adapter_src
+    assert "prove-launch" in adapter_src
     assert "launch_recipe" not in adapter_src
+    assert "create_command" not in adapter_src
 
 
 def test_product_id_change_does_not_require_workflow_branch(tmp_path: Path) -> None:
@@ -816,7 +819,10 @@ def test_provisionable_targets_are_candidates_not_dispatchable(tmp_path, monkeyp
     assert candidates[0]["proof_operation"] == LAUNCH_PROOF_OPERATION
     assert "steps" not in candidates[0]
     assert "launch_recipe" not in candidates[0]
-    assert candidates[0]["expected_binding"]["model"] == "qwen"
+    assert "create_command" not in candidates[0]
+    assert "prove_inputs" not in candidates[0]
+    assert "expected_binding" not in candidates[0]
     handoff = next(r for r in orca.sent if (r.role or "") == MODE_C_HANDOFF_ROLE)
     assert (handoff.context or {}).get("execution_target_candidates")
     assert LAUNCH_PROOF_OPERATION in (handoff.prompt or "")
+    assert "prove-launch" in (handoff.prompt or "")

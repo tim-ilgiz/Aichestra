@@ -499,9 +499,14 @@ class OrcaProvider(ProviderAdapter):
                 "and execution_policy (execution_target_contract_version). "
                 "For inner workers, Dispatch only targets listed in execution_targets "
                 "(enabled, available, capable, allowed, and runnable). "
-                "Candidates require aichestra.prove_launch (deterministic structured "
-                "process attestation) before they become runnable — never DIY "
-                "terminal show/tail recipes or screen substring matching. "
+                "Candidates require aichestra.prove_launch via "
+                "`aichestra prove-launch --project-root <root> "
+                "--candidate-id <id> --json` (deterministic structured process "
+                "attestation; Aichestra re-resolves binding from trusted config) "
+                "before they become runnable — never DIY terminal show/tail "
+                "recipes, embedded shell launch strings, or screen substring matching. "
+                "Use the returned prepared_launch.terminal_handle exactly; "
+                "do not create a second bridge terminal. "
                 "Target locality may be local, remote, or cloud according to ExecutionPolicy. "
                 "Do not infer workers from raw providers. "
                 "Do not impose product-name phase routing. "
@@ -878,21 +883,44 @@ class OrcaProvider(ProviderAdapter):
                 deserialize_prepared_launch,
             )
 
+            # worker-start / Dispatch only for proven runnable targets.
+            if not request.execution_target.dispatchable:
+                return ProviderTaskResult(
+                    ok=False,
+                    failure=FailureClass.ERROR,
+                    detail=(
+                        "ExecutionTarget is not dispatchable; promote via "
+                        "aichestra prove-launch first"
+                    ),
+                    session_id=session.session_id,
+                    metadata={"steps": steps},
+                )
+
+            prepared_ctx = request.context.get("prepared_launch")
+            prepared_handle = None
+            if isinstance(prepared_ctx, Mapping):
+                raw_handle = prepared_ctx.get("terminal_handle")
+                if isinstance(raw_handle, str) and raw_handle.strip():
+                    prepared_handle = raw_handle.strip()
+            handle = (
+                str(request.context.get("terminal_handle") or "").strip()
+                or prepared_handle
+                or str(os.environ.get("ORCA_WORKER_TERMINAL_HANDLE") or "").strip()
+                or None
+            )
             launch_ctx = LaunchContext(
                 binary=binary,
                 worktree=worktree,
-                terminal_handle=str(
-                    request.context.get("terminal_handle")
-                    or os.environ.get("ORCA_WORKER_TERMINAL_HANDLE")
-                    or ""
-                ).strip()
-                or None,
+                terminal_handle=handle,
                 run=subprocess.run,
             )
-            preflight = request.context.get("prepared_bootstrap_launch")
+            preflight = (
+                request.context.get("prepared_bootstrap_launch")
+                or request.context.get("prepared_launch")
+            )
             try:
                 if isinstance(preflight, Mapping) and preflight.get("arguments") is not None:
-                    # Bootstrap already prepared/attested before Run creation —
+                    # Already prepared/attested (bootstrap or prove-launch) —
                     # reuse exact launch; do not create a second bridge terminal.
                     prepared = deserialize_prepared_launch(preflight)
                     try:
