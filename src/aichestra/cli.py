@@ -72,6 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Research focus query (participates in local-worker and filesystem scan)",
     )
+    research_p.add_argument("--repo-root", type=Path, default=None)
     research_p.add_argument("--json", action="store_true", default=True)
 
     handoff_p = sub.add_parser(
@@ -241,9 +242,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0 if result.ok or args.dry_run else 1
 
     if args.command == "research":
+        from aichestra.config.layering import resolve_config
         from aichestra.orchestration.research_compact import research_paths
 
-        summary = research_paths(args.project_root, query=args.query)
+        project_root = Path(args.project_root).resolve()
+        repo_root = Path(args.repo_root).resolve() if args.repo_root else find_repo_root()
+        cfg = resolve_config(repo_root=repo_root, project_root=project_root)
+        summary = research_paths(project_root, query=args.query, config=cfg)
         payload = summary.to_dict()
         sys.stdout.write(json.dumps(payload, indent=2, default=str) + "\n")
         return 0
@@ -378,6 +383,7 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         local_enabled=enabled_local,
         ollama_host=str(ollama_host) if ollama_host else None,
         enabled=enabled,
+        config=cfg,
     )
     if use_fakes:
         from aichestra.providers.fakes import fake_execution_targets

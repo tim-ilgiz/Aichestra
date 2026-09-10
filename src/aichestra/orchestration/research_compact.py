@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
 
 from aichestra.providers.base import (
     ProviderAdapter,
@@ -83,12 +83,17 @@ def research_paths(
     local_worker_available: bool | None = None,
     local_worker: ProviderAdapter | None = None,
     local_research_runner: LocalResearchRunner | None = None,
+    config: Mapping[str, Any] | None = None,
 ) -> ResearchSummary:
     """Read-only repository research (FR-021/053).
 
     Labels ``PROVIDER=local-worker`` only when a local worker is actually
     invoked and returns successfully. Otherwise uses ``filesystem``.
     ``query`` participates in both local-worker and filesystem research.
+
+    Prefer passing the caller's already-layered ``config`` so local-worker
+    discovery matches Mode C / CLI effective policy. When omitted, fallback
+    resolution uses ``project_root`` (never ambient cwd alone).
     """
     root = Path(project_root)
     q = (query or "").strip()
@@ -100,6 +105,7 @@ def research_paths(
             local_worker=local_worker,
             local_worker_available=local_worker_available,
             local_research_runner=local_research_runner,
+            config=config,
         )
         if worker_result is not None and worker_result.ok:
             return compact_research(
@@ -126,6 +132,7 @@ def _try_local_worker_research(
     local_worker: ProviderAdapter | None,
     local_worker_available: bool | None,
     local_research_runner: LocalResearchRunner | None,
+    config: Mapping[str, Any] | None = None,
 ) -> ProviderTaskResult | None:
     if local_research_runner is not None:
         return local_research_runner(root, query)
@@ -160,7 +167,7 @@ def _try_local_worker_research(
             from aichestra.config.layering import local_enabled, resolve_config
             from aichestra.providers.local_worker import LocalWorkerProvider
 
-            cfg = resolve_config()
+            cfg = config if config is not None else resolve_config(project_root=root)
             worker = LocalWorkerProvider(
                 local_enabled=local_enabled(cfg),
                 config=cfg,
@@ -173,6 +180,7 @@ def _try_local_worker_research(
                 local_worker=worker,
                 local_worker_available=True,
                 local_research_runner=None,
+                config=cfg,
             )
         except Exception:
             return None

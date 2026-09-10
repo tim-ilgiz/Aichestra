@@ -191,6 +191,7 @@ def _enrich_after_config(
     providers = discover_providers(
         local_enabled=local_enabled,
         ollama_host=str(ollama_host) if ollama_host else None,
+        config=cfg,
     )
     provider_summary: dict[str, Any] = {}
     for status in providers:

@@ -159,6 +159,8 @@ def select_model(
             )
         else:
             reason = f"installed models lack capability {required.value}"
+    elif capable and allowed is not None and not allowed_models:
+        reason = "no capable model allowed by policy"
     return ModelSelection(
         model=None,
         axes=axes,
