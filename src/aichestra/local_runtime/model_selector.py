@@ -147,7 +147,18 @@ def select_model(
 
     reason = "no capable installed model"
     if available and not capable:
-        reason = f"installed models lack capability {required.value}"
+        oversized = [
+            m
+            for m in installed
+            if m.has_capability(required) and not _within_size(m, max_parameter_billions)
+        ]
+        if oversized and max_parameter_billions is not None:
+            reason = (
+                f"installed capable models exceed max_parameter_billions="
+                f"{max_parameter_billions}"
+            )
+        else:
+            reason = f"installed models lack capability {required.value}"
     return ModelSelection(
         model=None,
         axes=axes,

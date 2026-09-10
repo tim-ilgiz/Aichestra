@@ -132,6 +132,7 @@ def run_doctor(
     providers = discover_providers_report(
         local_enabled=enabled,
         enabled=enabled_map_from_config(cfg),
+        config=cfg,
     )
     by_kind = providers.get("providers") if isinstance(providers.get("providers"), dict) else {}
     for kind_name, label in (

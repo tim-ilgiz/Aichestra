@@ -161,7 +161,10 @@ def _try_local_worker_research(
             from aichestra.providers.local_worker import LocalWorkerProvider
 
             cfg = resolve_config()
-            worker = LocalWorkerProvider(local_enabled=local_enabled(cfg))
+            worker = LocalWorkerProvider(
+                local_enabled=local_enabled(cfg),
+                config=cfg,
+            )
             if not worker.probe().available:
                 return None
             return _try_local_worker_research(

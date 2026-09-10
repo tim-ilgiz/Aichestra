@@ -28,6 +28,7 @@ def discover_providers(
     ollama_host: str | None = None,
     force_real: bool = False,
     enabled: Mapping[str, bool] | None = None,
+    config: Mapping[str, Any] | None = None,
 ) -> list[ProviderStatus]:
     """Probe Orca/Codex/Cursor/local-worker without intercepting native CLIs.
 
@@ -36,15 +37,30 @@ def discover_providers(
 
     ``enabled`` maps kind names (``orca``, ``codex``, ``cursor``, ``local-worker``)
     to booleans; disabled kinds are returned as unavailable without probing.
+
+    ``config`` is forwarded to ``LocalWorkerProvider`` so machine-local
+    preferred/allowed models and size caps are honored during discovery.
     """
     if _fake_providers_forced() and not force_real:
         statuses = _inline_fake_statuses(local_enabled=local_enabled)
     else:
+        cfg = config
+        if cfg is None:
+            try:
+                from aichestra.config.layering import resolve_config
+
+                cfg = resolve_config()
+            except Exception:
+                cfg = None
         adapters = [
             OrcaProvider(),
             CodexProvider(),
             CursorProvider(),
-            LocalWorkerProvider(local_enabled=local_enabled, ollama_host=ollama_host),
+            LocalWorkerProvider(
+                local_enabled=local_enabled,
+                ollama_host=ollama_host,
+                config=cfg,
+            ),
         ]
         statuses = [adapter.probe() for adapter in adapters]
     return [_apply_enable(s, enabled) for s in statuses]
@@ -109,12 +125,14 @@ def discover_providers_report(
     ollama_host: str | None = None,
     force_real: bool = False,
     enabled: Mapping[str, bool] | None = None,
+    config: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     statuses = discover_providers(
         local_enabled=local_enabled,
         ollama_host=ollama_host,
         force_real=force_real,
         enabled=enabled,
+        config=config,
     )
     by_kind = {s.kind.value: s.to_dict() for s in statuses}
     return {
