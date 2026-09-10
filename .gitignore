@@ -1,0 +1,49 @@
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa
+id_ed25519
+
+# Machine-local / runtime
+*.local.json
+machine.local.json
+*.local.yml
+*.local.yaml
+.local/
+sessions/
+caches/
+logs/
+*.log
+models/
+*.gguf
+*.bin
+weights/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Mode C / Spec Kit runtime under target projects (never commit from fixtures)
+**/.aichestra/attachments/
+**/.aichestra/speckit/
+**/.aichestra/last_mode_c_run.json
+
+# Do NOT ignore Spec Kit / agent integration skill files:
+# .cursor/skills, .cursor/rules, .agents/skills, .opencode/commands are tracked.

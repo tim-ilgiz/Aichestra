@@ -1,0 +1,39 @@
+---
+description: Mandatory implementation workflow for Aichestra
+alwaysApply: true
+---
+
+Before implementation:
+
+1. Read @AGENTS.md.
+2. Read the Spec Kit constitution.
+3. Read the active feature spec.
+4. Read its plan and tasks.
+5. Inspect the current repository before making assumptions.
+
+Do not merely tell the user which commands to run when you can safely execute
+them yourself.
+
+During implementation:
+
+- follow tasks in dependency order
+- execute real commands
+- run relevant tests after each meaningful batch
+- fix failures
+- continue until acceptance criteria are satisfied or a genuine external
+  blocker exists
+
+Do not create extra documentation or tests merely to make the task look more
+complete.
+
+Respect maintenance-reviewer decisions.
+
+Do not silently weaken an acceptance criterion because implementation is
+difficult.
+
+If validation cannot be executed:
+
+mark it explicitly as NOT VALIDATED
+and state the concrete blocker.
+
+Do not claim Windows or Linux live validation from macOS-only execution.

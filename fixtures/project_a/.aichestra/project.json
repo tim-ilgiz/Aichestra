@@ -1,0 +1,5 @@
+{
+  "project_id": "fixture-project-a",
+  "stack": "python",
+  "verify": ["python", "-m", "pytest", "-q"]
+}
