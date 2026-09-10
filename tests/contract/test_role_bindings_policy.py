@@ -73,6 +73,26 @@ def test_fallback_receipt_requires_auto_exact_target_and_prior_quota():
         audit()
 
 
+def test_coordinator_receipt_cannot_use_implement_quota_fallback():
+    primary = fake_execution_targets()[0]
+    fallback = fake_execution_targets("cursor")[0]
+    task, first, p1 = receipt(role="mode_c_handoff")
+    _, second, p2 = receipt(dispatch="d2", role="mode_c_handoff", runtime="cursor")
+    first.update(failure="quota", completed_at="2026-01-01T00:00:00Z")
+    second["created_at"] = "2026-01-01T00:00:01Z"
+    with pytest.raises(ValueError, match="violates binding"):
+        validate_role_receipts(
+            "r1",
+            [task],
+            [first, second],
+            {"d1": p1, "d2": p2},
+            {"implement": primary},
+            bootstrap_target=primary,
+            quota_target=fallback,
+            quota_mode="auto",
+        )
+
+
 def test_installed_orca_worker_shape_fails_without_effective_launch_evidence():
     target = fake_execution_targets()[0]
     task = {"id": "t", "run_id": "r", "task_title": "tests"}

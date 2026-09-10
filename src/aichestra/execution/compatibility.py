@@ -57,8 +57,15 @@ def load_compatibility_bindings(
             bindings.append(Compatibility(runtime))
     # Role declarations are exact compatibility requests. Existing restrictions
     # on the same pair remain authoritative; never overwrite disabled bindings.
-    from aichestra.config.roles import load_role_bindings, load_quota_policy
+    from aichestra.config.roles import (
+        load_coordinator_binding,
+        load_quota_policy,
+        load_role_bindings,
+    )
     roles = list(load_role_bindings(config).values()) if "roles" in config else []
+    orch = config.get("orchestration")
+    if isinstance(orch, Mapping) and "coordinator" in orch:
+        roles.append(load_coordinator_binding(config))
     if "quota" in config and load_quota_policy(config).mode == "auto":
         roles.append(load_quota_policy(config).implement_fallback)
     from dataclasses import replace

@@ -77,7 +77,10 @@ def package_defaults() -> dict[str, Any]:
             "preferred_lead": "codex",
             "fallback_lead": "cursor",
         },
-        "orchestration": {"mode_default": "native"},
+        "orchestration": {
+            "mode_default": "native",
+            "coordinator": {"runtime": "codex"},
+        },
         "roles": {
             "implement": {"runtime": "codex"},
             "research": {"runtime": "cursor"},
@@ -86,7 +89,7 @@ def package_defaults() -> dict[str, Any]:
         },
         "quota": {
             "mode": "manual",
-            "implement_fallback": {"runtime": "cursor"},
+            "roles": {"implement": {"runtime": "cursor"}},
         },
     }
 

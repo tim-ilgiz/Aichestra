@@ -60,6 +60,8 @@ OWNERSHIP_METADATA: dict[str, str] = {
     "workflow_dag_owner": "coordinator_under_orca",
     "canonical_lifecycle_owner": "orca",
     "inner_worker_selection_owner": "coordinator_under_orca",
+    "role_dispatch_contract_owner": "aichestra_policy",
+    "role_dispatch_enforcer": "orca",
     "aichestra_role": "policy_context_gates",
 }
 

@@ -14,6 +14,7 @@ from aichestra.config.project_settings import (
     show_settings,
 )
 from aichestra.config.roles import (
+    load_coordinator_binding,
     load_quota_policy,
     load_role_bindings,
     normalize_runtime_id,
@@ -48,6 +49,7 @@ def test_load_role_bindings_and_quota() -> None:
             "tests": {"runtime": "opencode", "model": "llama3.2"},
         },
         "quota": {"mode": "auto", "implement_fallback": "cursor"},
+        "orchestration": {"coordinator": "cursor"},
     }
     roles = load_role_bindings(cfg)
     assert roles["implement"].runtime == "codex"
@@ -56,6 +58,12 @@ def test_load_role_bindings_and_quota() -> None:
     quota = load_quota_policy(cfg)
     assert quota.mode == "auto"
     assert quota.implement_fallback.runtime == "cursor"
+    assert load_quota_policy(
+        {"quota": {"mode": "auto", "roles": {"implement": {"runtime": "gemini"}}}}
+    ).implement_fallback.runtime == "gemini"
+    assert load_coordinator_binding(cfg).runtime == "cursor"
+    with pytest.raises(ValueError, match="orchestration.coordinator"):
+        load_role_bindings({"roles": {"coordinator": "codex"}})
 
 
 def test_verification_enabled_toggle() -> None:
@@ -86,19 +94,26 @@ def test_init_and_settings_roundtrip(tmp_path: Path) -> None:
     assert path.is_file()
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["roles"]["implement"]["runtime"] == "codex"
+    assert data["orchestration"]["coordinator"]["runtime"] == "codex"
+    assert data["quota"]["roles"]["implement"]["runtime"] == "cursor"
 
     shown = settings_set(
         project,
         [
+            "orchestration.coordinator=cursor",
             "roles.research=cursor",
             "roles.tests.runtime=opencode",
             "roles.tests.model=qwen2.5-coder:14b",
             "quota.mode=auto",
+            "quota.roles.implement=gemini",
         ],
     )
+    assert shown["orchestration"]["coordinator"]["runtime"] == "cursor"
+    assert shown["roles"]["implement"]["runtime"] == "codex"
     assert shown["roles"]["tests"]["runtime"] == "opencode"
     assert shown["roles"]["tests"]["model"] == "qwen2.5-coder:14b"
     assert shown["quota"]["mode"] == "auto"
+    assert shown["quota"]["roles"]["implement"]["runtime"] == "gemini"
     again = show_settings(project)
     assert again["roles"]["research"]["runtime"] == "cursor"
 
@@ -132,12 +147,12 @@ def test_settings_menu_uses_discovery_and_preserves_cancel(tmp_path, monkeypatch
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr("aichestra.execution.discovery.discover_execution_facts",
                         lambda _: DiscoveryFacts(runtimes=(AgentRuntime("cursor", available=True),)))
-    replies = iter(["1", "1", "1", "7"])
+    replies = iter(["2", "1", "1", "8"])
     monkeypatch.setattr("builtins.input", lambda _: next(replies))
     interactive_settings(tmp_path)
     assert load_project_config(tmp_path)["roles"]["implement"] == {"runtime": "cursor"}
     before = load_project_config(tmp_path)
-    replies = iter(["5", "2", "1", "1", "0"])
+    replies = iter(["6", "2", "1", "1", "0"])
     interactive_settings(tmp_path)
     assert load_project_config(tmp_path) == before
 

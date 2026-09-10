@@ -13,7 +13,8 @@
   "orchestration": {
     "mode_default": "native",
     "automatic_quota_fallback_reliable": false,
-    "handoff": "manual_one_action"
+    "handoff": "manual_one_action",
+    "coordinator": { "runtime": "codex" }
   },
   "security": {
     "staging_only": true,
@@ -30,7 +31,9 @@
   },
   "quota": {
     "mode": "manual",
-    "implement_fallback": { "runtime": "cursor" }
+    "roles": {
+      "implement": { "runtime": "cursor" }
+    }
   },
   "verification": {
     "enabled": false

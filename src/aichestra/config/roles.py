@@ -1,4 +1,8 @@
-"""Project role bindings: runtime (+ optional provider/model) per work role."""
+"""Project role bindings: runtime (+ optional provider/model) per work role.
+
+Worker roles live under ``roles.*``. The Mode C coordinator LLM is
+``orchestration.coordinator`` and MUST NOT be read from ``roles.implement``.
+"""
 
 from __future__ import annotations
 
@@ -6,14 +10,17 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 ROLE_KEYS: tuple[str, ...] = ("implement", "research", "tests", "docs")
+QUOTA_ROLE_KEYS: tuple[str, ...] = ("implement",)
 
 # Product ids are identifiers, not enum cases for dispatch logic — validation set.
 from aichestra.execution.runtimes import DEFAULT_RUNTIME_BINARIES
 
 KNOWN_RUNTIMES = frozenset(DEFAULT_RUNTIME_BINARIES)
 
+
 def configured_runtimes(config):
     return KNOWN_RUNTIMES | set((config or {}).get("execution", {}).get("runtimes", {}))
+
 
 _RUNTIME_ALIASES: dict[str, str] = {
     "local": "opencode",
@@ -40,12 +47,17 @@ class RoleBinding:
 @dataclass(frozen=True)
 class QuotaPolicy:
     mode: str  # manual | auto
-    implement_fallback: RoleBinding
+    role_fallbacks: dict[str, RoleBinding]
+
+    @property
+    def implement_fallback(self) -> RoleBinding:
+        """Coding-worker fallback. Not a coordinator replacement."""
+        return self.role_fallbacks["implement"]
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "mode": self.mode,
-            "implement_fallback": self.implement_fallback.to_dict(),
+            "roles": {role: binding.to_dict() for role, binding in self.role_fallbacks.items()},
         }
 
 
@@ -89,10 +101,14 @@ def default_role_bindings() -> dict[str, RoleBinding]:
     }
 
 
+def default_coordinator_binding() -> RoleBinding:
+    return RoleBinding(runtime="codex")
+
+
 def default_quota_policy() -> QuotaPolicy:
     return QuotaPolicy(
         mode="manual",
-        implement_fallback=RoleBinding(runtime="cursor"),
+        role_fallbacks={"implement": RoleBinding(runtime="cursor")},
     )
 
 
@@ -103,11 +119,37 @@ def load_role_bindings(config: Mapping[str, Any] | None) -> dict[str, RoleBindin
     raw_roles = config.get("roles")
     if not isinstance(raw_roles, Mapping):
         return base
+    if "coordinator" in raw_roles:
+        raise ValueError(
+            "roles.coordinator is invalid; the Mode C coordinator LLM is "
+            "orchestration.coordinator. roles.* are worker roles only"
+        )
+    unknown = [key for key in raw_roles if key not in ROLE_KEYS]
+    if unknown:
+        raise ValueError(
+            f"unknown worker role(s) {unknown}; expected {list(ROLE_KEYS)}. "
+            "Use orchestration.coordinator for the Mode C coordinator LLM"
+        )
     out = dict(base)
+    known = configured_runtimes(config)
     for key in ROLE_KEYS:
         if key in raw_roles:
-            out[key] = parse_role_binding(raw_roles[key], field=f"roles.{key}", known=configured_runtimes(config))
+            out[key] = parse_role_binding(raw_roles[key], field=f"roles.{key}", known=known)
     return out
+
+
+def load_coordinator_binding(config: Mapping[str, Any] | None) -> RoleBinding:
+    base = default_coordinator_binding()
+    if not config:
+        return base
+    raw = config.get("orchestration")
+    if not isinstance(raw, Mapping) or "coordinator" not in raw:
+        return base
+    return parse_role_binding(
+        raw["coordinator"],
+        field="orchestration.coordinator",
+        known=configured_runtimes(config),
+    )
 
 
 def load_quota_policy(config: Mapping[str, Any] | None) -> QuotaPolicy:
@@ -120,13 +162,34 @@ def load_quota_policy(config: Mapping[str, Any] | None) -> QuotaPolicy:
     mode = str(raw.get("mode") or base.mode).strip().lower()
     if mode not in {"manual", "auto"}:
         raise ValueError("quota.mode must be 'manual' or 'auto'")
-    fb_raw = raw.get("implement_fallback", base.implement_fallback.to_dict())
-    fallback = parse_role_binding(fb_raw, field="quota.implement_fallback", known=configured_runtimes(config))
-    return QuotaPolicy(mode=mode, implement_fallback=fallback)
+    known = configured_runtimes(config)
+    fallbacks = dict(base.role_fallbacks)
+    roles_raw = raw.get("roles")
+    if isinstance(roles_raw, Mapping):
+        unknown = [key for key in roles_raw if key not in QUOTA_ROLE_KEYS]
+        if unknown:
+            raise ValueError(
+                f"unknown quota role(s) {unknown}; quota auto/manual currently "
+                f"applies to {list(QUOTA_ROLE_KEYS)} (coding workers), not the coordinator"
+            )
+        for key in QUOTA_ROLE_KEYS:
+            if key in roles_raw:
+                fallbacks[key] = parse_role_binding(
+                    roles_raw[key], field=f"quota.roles.{key}", known=known
+                )
+    elif "implement_fallback" in raw:
+        fallbacks["implement"] = parse_role_binding(
+            raw["implement_fallback"], field="quota.implement_fallback", known=known
+        )
+    return QuotaPolicy(mode=mode, role_fallbacks=fallbacks)
 
 
 def role_bindings_to_dict(bindings: Mapping[str, RoleBinding]) -> dict[str, Any]:
     return {key: bindings[key].to_dict() for key in ROLE_KEYS if key in bindings}
+
+
+def coordinator_binding_to_dict(binding: RoleBinding) -> dict[str, Any]:
+    return binding.to_dict()
 
 
 def binding_runtime_disabled(

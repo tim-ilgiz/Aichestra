@@ -268,10 +268,10 @@ def test_infer_signals_latest_py_is_behavior_not_test() -> None:
     assert signals["existing_tests_cover"] is False
 
 
-@pytest.mark.parametrize("mode, fallback_runtime, fallback_failure", [
-    ("manual", "cursor", False), ("auto", "gemini", False), ("auto", "cursor", True),
+@pytest.mark.parametrize("mode, fallback_runtime", [
+    ("manual", "cursor"), ("auto", "gemini"),
 ])
-def test_quota_policy_continues_exact_target_in_one_run(tmp_path, mode, fallback_runtime, fallback_failure):
+def test_quota_policy_does_not_replace_coordinator(tmp_path, mode, fallback_runtime):
     from aichestra.providers.base import FailureClass, ProviderTaskResult
     orca = fake_orca()
     original = orca.execute_task
@@ -279,33 +279,59 @@ def test_quota_policy_continues_exact_target_in_one_run(tmp_path, mode, fallback
     def execute(request):
         if request.role == MODE_C_HANDOFF_ROLE:
             attempts.append(request)
-            if len(attempts) == 1 or fallback_failure:
-                return ProviderTaskResult(ok=False, failure=FailureClass.QUOTA, detail="quota exhausted")
+            return ProviderTaskResult(ok=False, failure=FailureClass.QUOTA, detail="quota exhausted")
         return original(request)
     orca.execute_task = execute
-    targets = fake_execution_targets() + fake_execution_targets(fallback_runtime)
+    targets = fake_execution_targets() + fake_execution_targets(fallback_runtime) + fake_execution_targets("cursor")
     ctl = ModeCRunController(bindings=WorkflowBindings(
         orca=orca, project_root=str(tmp_path), task_prompt="fix typo",
         execution_targets=targets, verification_enabled=True,
         verification_commands=[[sys.executable, "-c", "pass"]],
+        coordinator_binding={"runtime": "codex"},
         role_bindings={r: {"runtime": "codex"} for r in ("implement", "research", "tests", "docs")},
-        quota_policy={"mode": mode, "implement_fallback": {"runtime": fallback_runtime}},
+        quota_policy={"mode": mode, "roles": {"implement": {"runtime": fallback_runtime}}},
     ))
     state = ctl.run_all()
     assert orca.run_creates == 1
-    assert len({r.context["run_id"] for r in attempts}) == 1
-    if mode == "manual":
-        assert len(attempts) == 1 and state.failed
-        assert state.metadata["manual_handoff"]
-    else:
-        assert len(attempts) == 2
-        assert attempts[1].execution_target.runtime.id == fallback_runtime
-        assert attempts[1].context["role_bindings"]["implement"]["runtime"] == fallback_runtime
-        assert attempts[0].context["role_bindings"]["implement"]["runtime"] == "codex"
-        assert "quota exhausted" in attempts[1].prompt
-        assert attempts[1].context["prepared_bootstrap_launch"] != attempts[0].context["prepared_bootstrap_launch"]
-        assert bool(state.failed) == fallback_failure
-        assert "manual_handoff" not in state.metadata
+    assert len(attempts) == 1
+    assert attempts[0].execution_target.runtime.id == "codex"
+    assert state.failed
+    assert state.metadata["manual_handoff"]
+    package = state.metadata.get("mode_c_policy_package") or {}
+    assert package["coordinator_binding"]["runtime"] == "codex"
+    assert package["role_dispatch_contract"]["bindings"]["implement"]["runtime"] == "codex"
+    assert package["quota_policy"]["roles"]["implement"]["runtime"] == fallback_runtime
+    if mode == "auto":
+        assert package["role_dispatch_contract"]["quota"]["roles"]["implement"]["runtime"] == fallback_runtime
+        assert "execution_target_id" in package["role_dispatch_contract"]["quota"]["roles"]["implement"]
+
+
+def test_bootstrap_uses_coordinator_not_implement(tmp_path):
+    orca = fake_orca()
+    targets = fake_execution_targets() + fake_execution_targets("cursor")
+    ctl = ModeCRunController(bindings=WorkflowBindings(
+        orca=orca, project_root=str(tmp_path), task_prompt="fix typo",
+        execution_targets=targets, verification_enabled=True,
+        verification_commands=[[sys.executable, "-c", "pass"]],
+        coordinator_binding={"runtime": "cursor"},
+        role_bindings={
+            "implement": {"runtime": "codex"},
+            "research": {"runtime": "cursor"},
+            "tests": {"runtime": "cursor"},
+            "docs": {"runtime": "cursor"},
+        },
+        quota_policy={"mode": "auto", "roles": {"implement": {"runtime": "cursor"}}},
+    ))
+    state = ctl.run_all()
+    assert not state.failed, state.failed
+    handoff = next(r for r in orca.sent if (r.role or "") == MODE_C_HANDOFF_ROLE)
+    assert handoff.execution_target.runtime.id == "cursor"
+    package = state.metadata["mode_c_policy_package"]
+    assert package["coordinator_binding"]["runtime"] == "cursor"
+    assert package["role_bindings"]["implement"]["runtime"] == "codex"
+    assert package["role_dispatch_contract"]["bindings"]["implement"]["runtime"] == "codex"
+    assert package["role_dispatch_contract"]["bindings"]["implement"]["execution_target_id"]
+    assert package["quota_policy"]["roles"]["implement"]["runtime"] == "cursor"
 
 
 def test_production_run_status_audits_effective_role_receipts(monkeypatch, tmp_path):

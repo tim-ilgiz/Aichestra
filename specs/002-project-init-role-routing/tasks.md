@@ -39,7 +39,28 @@
 - [x] T020 Remove machine-local IDE workspace and account metadata; ignore .idea
 - [x] T021 Complete regression tests and local installed-wheel smoke
 - [ ] T022 BLOCKED: installed Orca workerShow returns dispatch/worker/startOptions
-  but no durable effective launch binding. Do not substitute requested options
-  for execution evidence. Exact-role and automatic quota live acceptance require
-  an Orca receipt contract that persists effective runtime/provider/model/endpoint
-  and structured quota outcomes. Fake CI is not live evidence.
+  but no durable effective launch binding, and Orca does not pin inner Dispatch
+  to Aichestra `execution_target_id`. Do not substitute requested options for
+  execution evidence. Exact-role and automatic quota live acceptance require
+  that upstream contract. Fake CI is not live evidence. Do not mark this
+  feature implemented while T022 is open.
+
+
+## PR #2 REQUEST CHANGES (coordinator ≠ implement)
+
+- [x] T023 Split `orchestration.coordinator` from `roles.implement`. Bootstrap
+  uses the coordinator target only. `roles.*` remain worker roles.
+  `roles.coordinator` is invalid.
+- [x] T024 Quota auto/manual applies to `quota.roles.implement` (coding
+  worker). Coordinator quota MUST NOT consume implement fallback or relaunch
+  the coordinator on a different LLM. Accept legacy `quota.implement_fallback`
+  on load.
+- [x] T025 Emit typed `role_dispatch_contract` (role → exact
+  `execution_target_id`). Coordinator owns which Tasks to create and when;
+  Orca MUST Dispatch the bound target. Do not claim pre-dispatch enforcement
+  while T022 is blocked.
+- [x] T026 Settings/init UI and README: Coordinator vs Coding; honest blocker
+  that live exact Dispatch pinning is not available on current Orca.
+- [x] T027 Behavioural tests: distinct coordinator vs implement bootstrap;
+  disabled coordinator vs disabled implement; auto quota does not replace
+  coordinator; contract carries exact worker target ids.

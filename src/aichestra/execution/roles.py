@@ -14,9 +14,10 @@ class RoleBindingResolver:
                    (t.runtime.id, t.provider.id if t.provider else None,
                     t.model.id if t.model else None) ==
                    (binding.runtime, binding.provider, binding.model)]
+        field = role if "." in role else f"roles.{role}"
         if len(matches) != 1 or not matches[0].preparable:
             raise ValueError(
-                f"roles.{role}: exact target {binding.to_dict()} is unavailable, "
+                f"{field}: exact target {binding.to_dict()} is unavailable, "
                 "disabled, incompatible or has no supported Orca launch; configure "
                 "execution.runtimes/model_providers and launch support before running"
             )
@@ -24,6 +25,15 @@ class RoleBindingResolver:
 
     def resolve_all(self, bindings):
         return {role: self.resolve(role, binding) for role, binding in bindings.items()}
+
+
+def target_contract_entry(target: ExecutionTarget) -> dict:
+    return {
+        "execution_target_id": target.id,
+        "runtime": target.runtime.id,
+        "provider": target.provider.id if target.provider else None,
+        "model": target.model.id if target.model else None,
+    }
 
 
 def _worker_record(payload):
@@ -98,15 +108,14 @@ def validate_role_receipts(run_id, tasks, workers, receipts, role_targets,
                 prior_task_id = w.get("task_id") or w.get("taskId")
                 prior_task = task_map.get(prior_task_id, {})
                 same_work = prior_task_id == task_id or (
-                    role in {"implement", "mode_c_handoff"}
-                    and _task_role(prior_task) in {"implement", "mode_c_handoff"})
+                    role == "implement" and _task_role(prior_task) == "implement")
                 try:
                     ordered = datetime.fromisoformat(w["completed_at"]) <= datetime.fromisoformat(row["created_at"])
                 except (KeyError, TypeError, ValueError):
                     return False
                 return (same_work and (w.get("run_id") or w.get("runId")) == run_id
                         and w.get("failure") == "quota" and ordered)
-            if not (role in {"implement", "mode_c_handoff"} and quota_mode == "auto"
+            if not (role == "implement" and quota_mode == "auto"
                     and quota_target is not None and matches(quota_target)
                     and any(quota_before(p) for p in prior)):
                 raise ValueError(f"Dispatch {dispatch} violates binding for role {role}")

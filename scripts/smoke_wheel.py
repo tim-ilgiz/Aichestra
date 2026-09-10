@@ -29,10 +29,13 @@ def main():
         run(python, "-m", "pip", "install", "--no-deps", wheel)
         print(run(cli, "--version").strip())
         run(cli, "init", "--yes")
-        run(cli, "settings", "set", "roles.implement=cursor", "quota.mode=auto")
+        run(cli, "settings", "set", "orchestration.coordinator=codex",
+            "roles.implement=cursor", "quota.mode=auto", "quota.roles.implement=cursor")
         settings = json.loads(run(cli, "settings", "show"))
+        assert settings["orchestration"]["coordinator"]["runtime"] == "codex"
         assert settings["roles"]["implement"]["runtime"] == "cursor"
         assert settings["quota"]["mode"] == "auto"
+        assert settings["quota"]["roles"]["implement"]["runtime"] == "cursor"
         location = run(python, "-c", "import aichestra; print(aichestra.__file__)").strip()
         assert Path(location).resolve().is_relative_to(env_dir.resolve())
         print("Wheel installed and CLI verified outside checkout")

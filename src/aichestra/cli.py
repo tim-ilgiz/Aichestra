@@ -106,7 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
         "pairs",
         nargs="+",
         metavar="KEY=VALUE",
-        help="e.g. roles.implement=codex quota.mode=auto",
+        help="e.g. orchestration.coordinator=cursor roles.implement=codex quota.mode=auto",
     )
     settings_set_p.add_argument("--project-root", type=Path, default=None)
     settings_set_p.add_argument("--json", action="store_true", default=True)
@@ -602,6 +602,8 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
     enabled = enabled_map_from_config(cfg)
 
     from aichestra.config.roles import (
+        coordinator_binding_to_dict,
+        load_coordinator_binding,
         load_quota_policy,
         load_role_bindings,
         role_bindings_to_dict,
@@ -610,25 +612,37 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
     try:
         role_bindings_map = load_role_bindings(cfg)
         quota_policy_obj = load_quota_policy(cfg)
+        coordinator_binding = load_coordinator_binding(cfg)
     except ValueError as exc:
-        sys.stderr.write(f"Invalid project role/quota config: {exc}\n")
+        sys.stderr.write(f"Invalid project role/quota/coordinator config: {exc}\n")
         return 2
 
     preferred = preferred_lead_name(cfg)
     fallback = fallback_lead_name(cfg)
     disabled = frozenset(execution_policy.disabled_runtimes or ())
+    disabled_hits = []
+    if coordinator_binding.runtime in disabled:
+        disabled_hits.append(
+            f"orchestration.coordinator runtime {coordinator_binding.runtime!r}"
+        )
     implement = role_bindings_map["implement"]
     if implement.runtime in disabled:
-        sys.stderr.write(f"Mode C fail closed: roles.implement runtime {implement.runtime!r} is disabled; change settings or remove the disable flag.\n")
+        disabled_hits.append(f"roles.implement runtime {implement.runtime!r}")
+    if quota_policy_obj.mode == "auto" and quota_policy_obj.implement_fallback.runtime in disabled:
+        disabled_hits.append(
+            f"quota.roles.implement runtime {quota_policy_obj.implement_fallback.runtime!r}"
+        )
+    if disabled_hits:
+        sys.stderr.write(
+            "Mode C fail closed: "
+            + "; ".join(disabled_hits)
+            + " is disabled; change settings or remove the disable flag.\n"
+        )
         return 2
-    preferred = implement.runtime
-    fallback = (
-        quota_policy_obj.implement_fallback.runtime
-        if quota_policy_obj.implement_fallback.runtime not in disabled
-        else fallback
-    )
+    preferred = coordinator_binding.runtime
     role_bindings_dict = role_bindings_to_dict(role_bindings_map)
     quota_policy_dict = quota_policy_obj.to_dict()
+    coordinator_dict = coordinator_binding_to_dict(coordinator_binding)
 
     providers = discover_providers(
         local_enabled=enabled_local,
@@ -643,14 +657,19 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
     from aichestra.execution.roles import RoleBindingResolver
     try:
         resolver = RoleBindingResolver(execution_targets)
-        resolved_roles = resolver.resolve_all(role_bindings_map)
+        resolver.resolve_all(role_bindings_map)
+        coordinator_target = resolver.resolve(
+            "orchestration.coordinator", coordinator_binding
+        )
         if quota_policy_obj.mode == "auto":
-            resolver.resolve("implement_fallback", quota_policy_obj.implement_fallback)
+            resolver.resolve("quota.roles.implement", quota_policy_obj.implement_fallback)
     except ValueError as exc:
         sys.stderr.write(str(exc) + "\n")
         return 2
     from dataclasses import replace
-    execution_targets = tuple(replace(t, preferred=t.id == resolved_roles["implement"].id) for t in execution_targets)
+    execution_targets = tuple(
+        replace(t, preferred=t.id == coordinator_target.id) for t in execution_targets
+    )
     attachments = tuple(str(Path(p).expanduser().resolve()) for p in (args.attach or []))
 
     orca = (fake_orca() if use_fakes else OrcaProvider()) if enabled.get("orca", True) else None
@@ -737,6 +756,7 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         aichestra_repo_root=str(repo_root),
         role_bindings=role_bindings_dict,
         quota_policy=quota_policy_dict,
+        coordinator_binding=coordinator_dict,
     )
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
@@ -764,6 +784,7 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         "execution_target_contract_version": EXECUTION_TARGET_CONTRACT_VERSION,
         "role_bindings": role_bindings_dict,
         "quota_policy": quota_policy_dict,
+        "coordinator_binding": coordinator_dict,
     }
     sys.stdout.write(json.dumps(payload, indent=2, default=str) + "\n")
     return 0 if not state.failed and not state.stopped else 1

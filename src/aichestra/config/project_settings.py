@@ -12,8 +12,11 @@ from typing import Any, Mapping
 from aichestra.config.roles import (
     ROLE_KEYS,
     configured_runtimes,
+    coordinator_binding_to_dict,
+    default_coordinator_binding,
     default_quota_policy,
     default_role_bindings,
+    load_coordinator_binding,
     load_quota_policy,
     load_role_bindings,
     parse_role_binding,
@@ -39,6 +42,9 @@ def default_project_config(*, project_root: Path | str | None = None) -> dict[st
     """Default project.json — roles/quota; verification off (fail-closed) until enabled."""
     _ = project_root
     return {
+        "orchestration": {
+            "coordinator": coordinator_binding_to_dict(default_coordinator_binding()),
+        },
         "roles": role_bindings_to_dict(default_role_bindings()),
         "quota": default_quota_policy().to_dict(),
         "verification": {"enabled": False},
@@ -108,9 +114,11 @@ def show_settings(project_root: Path | str) -> dict[str, Any]:
     raw = load_project_config(project_root)
     bindings = load_role_bindings(raw)
     quota = load_quota_policy(raw)
+    coordinator = load_coordinator_binding(raw)
     return {
         "project_root": str(Path(project_root).resolve()),
         "path": str(project_config_path(project_root)),
+        "orchestration": {"coordinator": coordinator_binding_to_dict(coordinator)},
         "roles": role_bindings_to_dict(bindings),
         "quota": quota.to_dict(),
         "verification": {
@@ -131,7 +139,8 @@ def apply_settings_sets(config: dict[str, Any], pairs: list[str]) -> dict[str, A
         value_raw = match.group(2)
         value = _parse_value(value_raw)
         _assign_dotted(out, key, value)
-    # Re-validate roles/quota after mutation.
+    # Re-validate coordinator/worker/quota after mutation.
+    load_coordinator_binding(out)
     load_role_bindings(out)
     load_quota_policy(out)
     return out
@@ -176,6 +185,10 @@ def _assign_dotted(target: dict[str, Any], dotted: str, value: Any) -> None:
     if not parts:
         raise ValueError("empty settings key")
     # Convenience: roles.implement=codex → roles.implement object
+    if len(parts) == 2 and parts[0] == "roles" and parts[1] == "coordinator":
+        raise ValueError(
+            "roles.coordinator is invalid; set orchestration.coordinator"
+        )
     if (
         len(parts) == 2
         and parts[0] == "roles"
@@ -190,15 +203,39 @@ def _assign_dotted(target: dict[str, Any], dotted: str, value: Any) -> None:
         return
     if (
         len(parts) == 2
-        and parts[0] == "quota"
-        and parts[1] == "implement_fallback"
+        and parts[0] == "orchestration"
+        and parts[1] == "coordinator"
         and isinstance(value, str)
     ):
         binding = parse_role_binding(value, field=dotted, known=configured_runtimes(target))
+        orch = target.setdefault("orchestration", {})
+        if not isinstance(orch, dict):
+            raise ValueError("orchestration must be an object")
+        orch["coordinator"] = binding.to_dict()
+        return
+    if (
+        len(parts) == 2
+        and parts[0] == "quota"
+        and parts[1] == "implement_fallback"
+        and isinstance(value, str)
+    ) or (
+        len(parts) == 3
+        and parts[0] == "quota"
+        and parts[1] == "roles"
+        and parts[2] == "implement"
+        and isinstance(value, str)
+    ):
+        binding = parse_role_binding(
+            value, field="quota.roles.implement", known=configured_runtimes(target)
+        )
         quota = target.setdefault("quota", {})
         if not isinstance(quota, dict):
             raise ValueError("quota must be an object")
-        quota["implement_fallback"] = binding.to_dict()
+        roles = quota.setdefault("roles", {})
+        if not isinstance(roles, dict):
+            raise ValueError("quota.roles must be an object")
+        roles["implement"] = binding.to_dict()
+        quota.pop("implement_fallback", None)
         return
 
     cur: Any = target
@@ -283,29 +320,42 @@ def interactive_settings(project_root, *, config=None, save=True):
         return choose("Models", options)
 
     while True:
-        print("\n1. Coding  2. Research  3. Tests  4. Documentation  5. Quota fallback  6. Verification  7. Save  0. Cancel")
+        print(
+            "\n1. Coordinator  2. Coding  3. Research  4. Tests  "
+            "5. Documentation  6. Quota fallback  7. Verification  8. Save  0. Cancel"
+        )
         action = input("Settings: ").strip()
         if action == "0":
             return config if config is not None else load_project_config(root)
-        if action == "7":
+        if action == "8":
+            load_coordinator_binding(cfg)
             load_role_bindings(cfg)
             load_quota_policy(cfg)
             if save:
                 save_project_config(root, cfg)
             return cfg
-        if action in {"1", "2", "3", "4"}:
+        if action == "1":
             value = binding()
             if value:
-                cfg.setdefault("roles", {})[ROLE_KEYS[int(action) - 1]] = value
-        elif action == "5":
+                cfg.setdefault("orchestration", {})["coordinator"] = value
+        elif action in {"2", "3", "4", "5"}:
+            value = binding()
+            if value:
+                cfg.setdefault("roles", {})[ROLE_KEYS[int(action) - 2]] = value
+        elif action == "6":
             mode = choose("Quota mode", [("Manual: stop and notify", "manual"), ("Auto: continue same Run", "auto")])
             if mode:
-                cfg.setdefault("quota", {})["mode"] = mode
+                quota = cfg.setdefault("quota", {})
+                quota["mode"] = mode
                 if mode == "auto":
                     value = binding()
                     if value:
-                        cfg["quota"]["implement_fallback"] = value
-        elif action == "6":
+                        roles = quota.setdefault("roles", {})
+                        if not isinstance(roles, dict):
+                            raise ValueError("quota.roles must be an object")
+                        roles["implement"] = value
+                        quota.pop("implement_fallback", None)
+        elif action == "7":
             raw = input('Verification argv JSON (e.g. [["python", "-m", "pytest"]]): ').strip()
             if raw:
                 value = json.loads(raw)

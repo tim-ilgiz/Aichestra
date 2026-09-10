@@ -197,6 +197,53 @@ def test_orchestrate_honors_preferred_lead_and_no_codex(
     assert not output.out
 
 
+def test_orchestrate_no_codex_fails_coordinator_independently_of_implement(
+    fake_aichestra_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("AICHESTRA_FAKE_PROVIDERS", "1")
+    project = tmp_path / "app"
+    project.mkdir()
+    (project / ".aichestra").mkdir()
+    (project / ".aichestra" / "project.json").write_text(
+        json.dumps(
+            {
+                "orchestration": {"coordinator": {"runtime": "codex"}},
+                "roles": {
+                    "implement": {"runtime": "cursor"},
+                    "research": {"runtime": "cursor"},
+                    "tests": {"runtime": "cursor"},
+                    "docs": {"runtime": "cursor"},
+                },
+                "verification": {"enabled": True},
+                "verify": [sys.executable, "-c", "import sys; sys.exit(0)"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    code = main(
+        [
+            "orchestrate",
+            "--repo-root",
+            str(fake_aichestra_root),
+            "--project-root",
+            str(project),
+            "--prompt",
+            "noop typo",
+            "--no-research",
+            "--no-codex",
+        ]
+    )
+    output = capsys.readouterr()
+    assert code == 2
+    assert "orchestration.coordinator" in output.err and "disabled" in output.err
+    assert "roles.implement" not in output.err
+    assert not output.out
+
+
 def test_orchestrate_infers_project_root_and_preflights_verification(
     fake_aichestra_root, tmp_path, monkeypatch, capsys,
 ):

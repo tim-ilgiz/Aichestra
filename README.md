@@ -82,7 +82,10 @@ aichestra settings show
 All `aichestra settings set` keys:
 
 ```bash
-# Roles (implement | research | tests | docs)
+# Coordinator LLM (Mode C bootstrap) — independent of coding workers
+aichestra settings set orchestration.coordinator=cursor
+
+# Worker roles (implement | research | tests | docs)
 aichestra settings set roles.implement=codex
 aichestra settings set roles.research=cursor
 aichestra settings set roles.tests=cursor
@@ -92,10 +95,11 @@ aichestra settings set roles.tests.model=qwen2.5-coder:14b
 aichestra settings set roles.tests.provider=ollama
 aichestra settings set 'roles.tests={"runtime":"opencode","model":"qwen2.5-coder:14b"}'
 
-# Quota (manual | auto)
+# Quota (manual | auto) — coding-worker fallback only
 aichestra settings set quota.mode=manual
 aichestra settings set quota.mode=auto
-aichestra settings set quota.implement_fallback=cursor
+aichestra settings set quota.roles.implement=cursor
+aichestra settings set quota.implement_fallback=cursor   # alias for quota.roles.implement
 
 # Verification gate (fail-closed when disabled)
 aichestra settings set verification.enabled=false
@@ -108,33 +112,45 @@ aichestra settings set verify=null
 Works in **any** target project directory (not tied to a specific app). Role
 values are AgentRuntime ids (`codex`, `cursor`, `gemini`, `claude`, `opencode`)
 with optional `provider` / `model` (OpenCode + local/Ollama). Aliases `local` /
-`local-worker` map to `opencode`. Config lives in `.aichestra/project.json`.
+`local-worker` map to `opencode`. `roles.*` are worker roles only.
+`orchestration.coordinator` is the Mode C coordinator LLM and is independent
+of `roles.implement`. Config lives in `.aichestra/project.json`.
 `verify` is separate from the toggle. Init sets `verification.enabled=false`;
 until enabled with non-empty verify commands, orchestration stops at preflight
 before creating a Run. The verification gate also remains fail-closed.
 Machine-local prefs for a global install use the portable user config home
 (`AICHESTRA_CONFIG_HOME` override supported).
 
-Mode C resolves each role into an exact supported ExecutionTarget before
-creating a Run. `execution.runtimes` can register additional runtime ids.
+Mode C resolves the coordinator and each worker role into exact supported
+ExecutionTargets before creating a Run. Bootstrap uses
+`orchestration.coordinator`, never `roles.implement`. `execution.runtimes`
+can register additional runtime ids.
 Disabled or unresolved bindings fail with a settings error. Orca owns task
-creation; canonical task/worker receipts are audited for role, Run and effective
+creation; Aichestra emits a typed `role_dispatch_contract`
+(`role → execution_target_id`) that Orca MUST honor on Dispatch. Canonical
+task/worker receipts are audited for role, Run and effective
 runtime/provider/model/endpoint. Missing or mismatched evidence fails the Run.
 This audit happens after dispatch and does not prevent earlier worker edits.
-An Orca version that omits required evidence cannot pass this contract. The
+An Orca version that omits required evidence, or that cannot pin inner
+Dispatch to `execution_target_id`, cannot pass this contract. The
 installed version inspected during this change exposes `dispatch`, `worker` and
 `startOptions` from worker-show, but no durable effective launch binding. Full
-live role/quota acceptance is blocked on that upstream receipt capability.
+live role/quota acceptance is blocked on that upstream receipt and Dispatch
+pinning capability. Do not treat this feature as fully implemented until that
+exists.
 
-`quota.mode=manual` stops and asks the operator to change settings. `auto`
-retries the coordinator once through Orca with `quota.implement_fallback` in
-the same Run; another quota stops. Inner-task fallback must have a prior
-structured quota receipt. Live quota recovery remains NOT VALIDATED.
+`quota.mode=manual` stops and asks the operator to change settings.
+`quota.roles.implement` is the coding-worker fallback. Auto mode does **not**
+replace the coordinator LLM; coordinator quota is a separate failure
+(`orchestration.coordinator`). Inner-task implement fallback must have a prior
+structured quota receipt. Live inner Dispatch pinning and live quota recovery
+remain NOT VALIDATED.
 
 From a project or subdirectory, use `aichestra orchestrate --prompt "..."`.
 The nearest ancestor `.aichestra/project.json` selects the project root, with
 cwd as the fallback; `--project-root` overrides this. `aichestra init` opens
 the settings editor on a terminal; `--yes` accepts defaults for automation.
+The editor includes Coordinator separately from Coding.
 
 ### Modes in practice
 
@@ -247,11 +263,13 @@ Fixture projects under `fixtures/project_a` (Python) and `fixtures/project_b`
 (Node) prove isolation. CI sets `AICHESTRA_FAKE_PROVIDERS=1` and
 `AICHESTRA_NO_REAL_QUOTA=1`.
 
-Mode C bootstraps one explicit coordinator in the current Orca checkout using
-one runnable ExecutionTarget. Legacy provider fields do not select the coordinator. The coordinator reads project context,
-including scoped nested AGENTS.md, owns child Tasks/Dispatches and worktree
-placement in the same Run, waits for their outcomes and converges their results
-before completing. At the implementation boundary it calls
+Mode C bootstraps one explicit coordinator from `orchestration.coordinator`
+(independent of `roles.implement`) using one runnable ExecutionTarget. Legacy
+provider fields do not select the coordinator. The coordinator reads project
+context, including scoped nested AGENTS.md, owns which Tasks to create and
+when, and must Dispatch each worker role through
+`role_dispatch_contract` exact `execution_target_id`s. It waits for outcomes
+and converges results before completing. At the implementation boundary it calls
 `orchestration ask --question AICHESTRA_GATE:maintenance`; Aichestra replies with
 TEST/DOC/ADR/SPEC decisions before Orca dispatches required writers. The
 coordinator releases settled child workers; Aichestra releases the coordinator
