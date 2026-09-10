@@ -47,17 +47,24 @@ def resolve_targets(
         provider = (
             providers.get(binding.provider) if binding.provider else None
         )
-        model = (
-            models.get((binding.provider, binding.model))
-            if binding.model
-            else None
-        )
         if runtime is None or (
             binding.provider is not None and provider is None
         ):
             continue
-        if binding.model is not None and model is None:
-            continue
+        if binding.provider is None and binding.model is not None:
+            # Opaque native --model preference; not a ModelProvider backend.
+            model = Model(
+                binding.model,
+                provider=binding.runtime,
+                available=True,
+                enabled=True,
+            )
+        elif binding.model is not None:
+            model = models.get((binding.provider, binding.model))
+            if model is None:
+                continue
+        else:
+            model = None
         endpoint = provider.endpoint if provider else None
         target_key = ExecutionTargetKey(
             runtime.id, binding.provider, binding.model

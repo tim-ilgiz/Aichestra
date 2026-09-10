@@ -13,6 +13,7 @@ import json
 import re
 import shlex
 import os
+import subprocess
 from dataclasses import replace
 import time
 from pathlib import Path
@@ -859,15 +860,45 @@ class OrcaProvider(ProviderAdapter):
             *attach_flags,
             "--json",
         ]
+        launch_adapter = None
+        launch_evidence: dict[str, Any] = {}
         if request.execution_target is not None:
-            from aichestra.execution.launch_strategies import adapter_for
-            launch_adapter = adapter_for(request.execution_target)
+            from aichestra.execution.launch_strategies import (
+                LaunchContext,
+                adapter_for,
+            )
+
+            try:
+                launch_adapter = adapter_for(request.execution_target)
+                prepared = launch_adapter.prepare(
+                    request.execution_target,
+                    LaunchContext(
+                        binary=binary,
+                        worktree=worktree,
+                        terminal_handle=str(
+                            request.context.get("terminal_handle")
+                            or os.environ.get("ORCA_WORKER_TERMINAL_HANDLE")
+                            or ""
+                        ).strip()
+                        or None,
+                        run=subprocess.run,
+                    ),
+                )
+            except ValueError as exc:
+                return ProviderTaskResult(
+                    ok=False,
+                    failure=FailureClass.ERROR,
+                    detail=f"ExecutionTarget launch prepare failed: {exc}",
+                    session_id=session.session_id,
+                    metadata={"steps": steps},
+                )
+            launch_evidence = dict(prepared.evidence)
             index = worker_argv.index("--agent")
-            worker_argv[index:index + 2] = launch_adapter.arguments(request.execution_target)
+            worker_argv[index : index + 2] = list(prepared.arguments)
         if worktree not in {"new-child", "new-top-level"}:
             for flag in ("--name", "--setup"):
                 index = worker_argv.index(flag)
-                del worker_argv[index:index + 2]
+                del worker_argv[index : index + 2]
         worker_result = run_cli_task(
             binary=binary,
             argv=worker_argv,
@@ -876,6 +907,11 @@ class OrcaProvider(ProviderAdapter):
             unavailable_detail="Orca binary unavailable",
         )
         worker_payload = _parse_orca_json(worker_result.output)
+        if launch_evidence:
+            worker_payload = {
+                **worker_payload,
+                "aichestra_terminal_evidence": launch_evidence,
+            }
         dispatch_id = (
             _dig_id(worker_payload, "result", "dispatchId")
             or _dig_id(worker_payload, "result", "id")
@@ -886,6 +922,7 @@ class OrcaProvider(ProviderAdapter):
             or _dig_id(worker_payload, "result", "terminalHandle")
             or _dig_id(worker_payload, "result", "effects", "terminal", "handle")
             or _dig_id(worker_payload, "result", "worker", "terminalHandle")
+            or (launch_evidence.get("handle") if isinstance(launch_evidence.get("handle"), str) else None)
         )
         locator = extract_worktree_locator(worker_payload)
         steps.append(
@@ -908,7 +945,7 @@ class OrcaProvider(ProviderAdapter):
                 failed = replace(failed, metadata={**failed.metadata, "cleanup": cleanup})
             return failed
 
-        if request.execution_target is not None and not launch_adapter.confirms(
+        if request.execution_target is not None and launch_adapter is not None and not launch_adapter.confirms(
             request.execution_target, worker_payload
         ):
             # Worker already started under a mismatched effective launch —

@@ -8,14 +8,15 @@ description: "Task list for portable Aichestra platform implementation"
 
 **Prerequisites**: plan.md (required), spec.md (required)
 
-**Architecture contract status (2026-09-09)**: Spec/plan are source of truth for
+**Architecture contract status (2026-09-10)**: Spec/plan are source of truth for
 **single-Orca-Run Mode C** with provider/runtime/model-agnostic
 **ExecutionTargets**. Coordinator under Orca owns the concrete workflow/DAG;
 Orca owns canonical Run/Task/Dispatch/worker/terminal/worktree lifecycle;
 Aichestra owns discovery, ExecutionTarget resolution, policy, security,
-deterministic gates and verification. Phase 24 production realignment
-(T163, T169–T176, T167–T168) remains open. **Do not merge** until fresh GitHub
-CI matrix is green on current HEAD (T167) and live Mode C smoke (T168) passes.
+deterministic gates and verification. Phase 24: T169–T176 landed; umbrella
+**T163** plus validation gates **T167–T168** remain open. **Do not merge** until
+fresh GitHub CI matrix is green on current HEAD (T167) and live Mode C smoke
+(T168) passes.
 
 **Tests**: Included where required by success criteria (SC-001–SC-016) and
 architecture contract tests (MODE-C-001–010, MODE-C-017–020). Prefer minimal
@@ -673,7 +674,7 @@ security, deterministic gates and verification.
       Adapter tests launch an arbitrary registered native runtime with no legacy
       providers, assert one Run, and reject a mismatched launch receipt.
 
-- [ ] T174 CRITICAL: Implement launch-strategy abstraction for ExecutionTargets.
+- [x] T174 CRITICAL: Implement launch-strategy abstraction for ExecutionTargets.
 
       Supported strategy types:
 
@@ -692,12 +693,13 @@ security, deterministic gates and verification.
       The bridge must not create an Aichestra-owned agent loop.
       (MODE-C-017–020; FR-005/047/050/051/065/066/069)
 
-      Partial production implementation: launch adapter protocol/registry,
-      installed Orca schema probing, runtime-managed native launches, and
-      fail-closed unsupported bindings. Proven existing-terminal/terminal-bridge
-      backend bindings are still missing; this task remains open.
+      Implemented: launch adapter protocol/registry with prepare/confirm,
+      Orca schema probing, native runtime-managed launches, native opaque
+      `--model` when `launch.effective.model` can confirm, terminal-bridge for
+      explicit provider/model/endpoint (OpenCode builder as adapter data),
+      attested existing-terminal attach, and fail-closed unsupported bindings.
 
-- [ ] T175 CRITICAL: An ExecutionTarget may be advertised as runnable only when
+- [x] T175 CRITICAL: An ExecutionTarget may be advertised as runnable only when
       its launch strategy is proven to bind the actual agent process to the
       intended runtime + provider/model/endpoint where applicable.
 
@@ -719,9 +721,10 @@ security, deterministic gates and verification.
       and Mode C must not select the target.
       (MODE-C-017–020; FR-005/047/050/051/065/066/069)
 
-      Partial evidence: native worker-start effective runtime receipt checked
-      on every bootstrap launch. Explicit provider/model/endpoint combinations
-      remain unsupported; terminal process binding proof is not implemented.
+      Implemented: native worker-start effective agent/model receipt checked on
+      dispatch; terminal-bridge proves binding via Orca `terminal read` process
+      evidence before `--terminal` attach; existing-terminal requires attested
+      handle evidence; prompt/discovery/client-env alone cannot mark runnable.
 
 - [x] T176 HIGH: Implement Orca worker-release recovery semantics.
 
@@ -846,8 +849,8 @@ are complete.
 - Phase 21 (T125–T137) closes dual-orchestrator / fail-closed gaps
 - Phase 22 (T138–T144) closes architect REQUEST CHANGES residuals
 - Phase 23 (T145–T153) closes corrective alignment follow-up
-- Phase 24 workflow-ownership slice (T158–T162, T164–T166) landed; open gate is
-  ExecutionTarget work (T163, T169–T175; T173/T176 landed),
+- Phase 24 workflow-ownership slice (T158–T162, T164–T166) and ExecutionTarget
+  launch work (T169–T176) landed; open gate is umbrella T163 acceptance,
   fresh CI (T167), and live smoke (T168)
 - T108–T124 depend on T103–T107; T167 gates merge on current HEAD CI
 - Converge / “feature complete” only after Phase 24 T163 + T167–T176
@@ -926,9 +929,7 @@ are complete.
 Review follow-up: maintenance uses an in-dispatch ask/reply callback; canonical
 Run/task confirmation gates success. Task specs use explicit Target, Change,
 Constraints, Ownership and Observable acceptance sections. Mutating adapter
-routes require live authority. Remaining open work is provider/runtime/
-model-agnostic ExecutionTarget discovery/resolution with proven Orca launch
-strategies (T163, T169–T175; T173 bootstrap selection and T176 worker-release
-recovery are landed), fresh CI (T167), and live Mode C smoke (T168). OpenCode +
-Ollama is one possible example target only — not a mandatory architecture.
-Local pytest green does not close T167/T168.
+routes require live authority. Remaining open work is umbrella T163 acceptance
+of the landed T169–T176 ExecutionTarget/launch stack, fresh CI (T167), and live
+Mode C smoke (T168). OpenCode + Ollama is one possible example target only —
+not a mandatory architecture. Local pytest green does not close T167/T168.

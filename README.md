@@ -176,10 +176,14 @@ coordinator launch must return the matching `launch.effective.agent`; missing
 or mismatched binding receipts fail closed. Runtime-specific launch adapters
 can be registered without adding workflow product branches.
 
-Explicit provider/model/endpoint combinations remain `unsupported` unless an
-adapter can prove all requested dimensions. A native `--agent` flag does not
-prove a backend binding. Production terminal reuse/bridge adapters with such
-proof remain open under T174/T175; local-only live acceptance is NOT VALIDATED.
+Explicit provider/model/endpoint combinations become runnable only through a
+proven launch adapter. Native ``--agent`` alone does not prove a backend
+binding; native ``--model`` covers opaque runtime model preferences when Orca
+returns matching ``launch.effective.model``. Backend bindings use
+``orca-terminal-bridge`` (create → wait → read proof → ``worker-start
+--terminal``) or an attested ``orca-existing-terminal`` handle. Prompt text,
+discovery alone, and Aichestra-process environment variables are not proof.
+Local-only live acceptance remains NOT VALIDATED until T168.
 
 Worker release distinguishes `released`, `already_released`, `release_pending`
 and `release_unknown`. Recovery executes only exact-dispatch allowlisted
