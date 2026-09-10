@@ -13,16 +13,14 @@ description: "Task list for portable Aichestra platform implementation"
 **ExecutionTargets**. Coordinator under Orca owns the concrete workflow/DAG;
 Orca owns canonical Run/Task/Dispatch/worker/terminal/worktree lifecycle;
 Aichestra owns discovery, ExecutionTarget resolution, policy, security,
-deterministic gates and verification. Phase 24: T169–T173 and T176 landed;
-**T174/T175** remain open for launch-proof/lifecycle reviewer acceptance
-(bootstrap prepare-before-Run + structured process attestation landed;
-substring screen proof removed; provisionable targets moved out of
-canonical `execution_targets` into non-dispatchable candidates;
-callable `aichestra prove-launch` surface + candidate DIY recipe removal +
-`preparable`/`dispatchable` split landed — still pending reviewer re-acceptance);
-umbrella **T163** plus validation gates **T167–T168** remain open.
-**Do not merge** until fresh GitHub CI matrix is green on current HEAD (T167)
-and live Mode C smoke (T168) passes.
+deterministic gates and verification. Phase 24 T163/T169–T176 is accepted:
+launch proof is callable through `aichestra prove-launch`, candidate payloads
+contain no DIY launch recipe, `preparable` and `dispatchable` are distinct, and
+only proven runnable targets reach canonical `execution_targets`. Validation
+gate **T167** (fresh CI matrix) remains open; **T168** live Mode C smoke
+passed on 2026-09-10 (`run_3d12b2f31039`). Local-only live validation remains
+NOT VALIDATED. **Do not merge** until fresh GitHub CI matrix is green on
+current HEAD (T167).
 
 **Tests**: Included where required by success criteria (SC-001–SC-016) and
 architecture contract tests (MODE-C-001–010, MODE-C-017–020). Prefer minimal
@@ -568,9 +566,9 @@ security, deterministic gates and verification.
 - [x] T166 HIGH: Add contract tests proving target-project instructions are
       discovered, passed to Orca and remain authoritative.
 
-### Production realignment — ExecutionTarget / launch proof (OPEN)
+### Production realignment — ExecutionTarget / launch proof (COMPLETE)
 
-- [ ] T163 CRITICAL TRACKING:
+- [x] T163 CRITICAL TRACKING:
       Complete provider/runtime/model-agnostic ExecutionTarget support.
 
       T163 is an umbrella acceptance task and MUST NOT cause a second duplicate
@@ -680,7 +678,7 @@ security, deterministic gates and verification.
       Adapter tests launch an arbitrary registered native runtime with no legacy
       providers, assert one Run, and reject a mismatched launch receipt.
 
-- [ ] T174 CRITICAL: Implement launch-strategy abstraction for ExecutionTargets.
+- [x] T174 CRITICAL: Implement launch-strategy abstraction for ExecutionTargets.
 
       Supported strategy types:
 
@@ -719,10 +717,12 @@ security, deterministic gates and verification.
       Controller-level regressions cover proof-fail→0 run-create, proof-ok→1
       terminal+1 run-create, run-create-fail→abort owned terminal, prepared
       launch reuse, and prove-launch surface → worker-start handle reuse.
-      Remains open pending reviewer re-acceptance of
-      proof/lifecycle semantics.
+      Reviewer re-accepted the proof/lifecycle semantics on 2026-09-10 after
+      the callable proof surface, trusted candidate re-resolution, exact
+      prepared-handle reuse, and failure cleanup passed the production adapter
+      and controller-level regressions.
 
-- [ ] T175 CRITICAL: An ExecutionTarget may be advertised as runnable only when
+- [x] T175 CRITICAL: An ExecutionTarget may be advertised as runnable only when
       its launch strategy is proven to bind the actual agent process to the
       intended runtime + provider/model/endpoint where applicable.
 
@@ -755,8 +755,9 @@ security, deterministic gates and verification.
       fails closed. Provisionable bridges are advertised only as
       `execution_target_candidates` (not in dispatchable `execution_targets`)
       until deterministic `aichestra prove-launch` / `aichestra.prove_launch`
-      promotes them (`dispatchable` only after runnable). Remains open
-      pending reviewer re-acceptance.
+      promotes them (`dispatchable` only after runnable). Reviewer re-accepted
+      the runnable/proof boundary on 2026-09-10; the focused contracts and full
+      local suite (308 tests) passed.
 
 - [x] T176 HIGH: Implement Orca worker-release recovery semantics.
 
@@ -809,7 +810,7 @@ security, deterministic gates and verification.
            T163/T169–T176. Update this comment only after that green run.
            Local pytest alone is insufficient. Docs-only CI does not close. -->
 
-- [ ] T168 CRITICAL: Run at least one real Mode C integration smoke proving:
+- [x] T168 CRITICAL: Run at least one real Mode C integration smoke proving:
 
       ```text
       real Aichestra CLI
@@ -848,19 +849,21 @@ security, deterministic gates and verification.
       If no suitable local target is available on the current machine, keep
       local-only live validation explicitly NOT VALIDATED rather than silently
       passing it.
-      <!-- NOT VALIDATED (2026-09-10): real CLI in isolated Orca worktree
-           created run_644b49cc1a2d and coordinator ctx_0ea2d3fc56ef with
-           launch.effective.agent=codex. Orca worker-start failed at
-           dispatch_input: agent_prompt_stalled; terminal showed
-           zsh: parse error near `)'. No child Dispatch or canonical success.
-           Exact failed worker released and worker-list confirmed released.
-           Second real CLI invocation with --no-codex selected Gemini:
-           run_38ad790d2947 / ctx_adcb7abb14df, launch.effective.agent=gemini.
-           Gemini required interactive Code Assist login; no child/success.
-           Production adapter released the failed worker; canonical worker-list
-           confirmed released. No live acceptance claim for either invocation.
-           Local-only Mode C live validation: NOT VALIDATED; no proven
-           provider/model/endpoint launch adapter on this machine. -->
+      <!-- ACCEPTED (2026-09-10): real `aichestra orchestrate` from a live Orca
+           terminal (`ORCA_TERMINAL_HANDLE`) against the isolated acceptance
+           fixture created exactly one Run `run_3d12b2f31039`. Bootstrap
+           ExecutionTarget was cursor (`--no-codex --no-local`). Coordinator
+           Dispatch `ctx_b871e527c75f` / task_0750fab8d84a bound the Run with
+           run-use and dynamically created child task_1692c2579ac6 /
+           Dispatch `ctx_682974cd5eed` which wrote `result.txt`=`accepted`.
+           Maintenance ask/reply completed; both workers succeeded and were
+           released; deterministic verification passed; canonical
+           orca_run_status ok. Gates completed:
+           project_context, policy, attachments, maintenance, orca_handoff,
+           verification. No Aichestra-owned research→implement→writers→review
+           Python pipeline. Local-only Mode C live validation: NOT VALIDATED;
+           no proven local provider/model/endpoint launch adapter on this
+           machine. -->
 
 Do not mark T163/T169–T176 complete merely because documentation describes the
 architecture. Coordinator bootstrap, project-context, and workflow-ownership
@@ -882,10 +885,8 @@ are complete.
 - Phase 22 (T138–T144) closes architect REQUEST CHANGES residuals
 - Phase 23 (T145–T153) closes corrective alignment follow-up
 - Phase 24 workflow-ownership slice (T158–T162, T164–T166) and ExecutionTarget
-  foundation (T169–T173, T176) landed; **T174/T175** open for launch-proof
-  reviewer acceptance (prepare-before-Run + structured attestation in tree);
-  umbrella T163, fresh CI (T167), and live smoke (T168)
-  remain open
+  foundation and launch-proof stack (T163, T169–T176) accepted; live Mode C
+  smoke (T168) accepted; fresh CI (T167) remains open
 - T108–T124 depend on T103–T107; T167 gates merge on current HEAD CI
 - Converge / “feature complete” only after Phase 24 T163 + T167–T176
 - Phase 24 supersedes any earlier interpretation of T108/T125/T139 that allows
@@ -914,7 +915,7 @@ are complete.
   (T173 requires a runnable bootstrap ExecutionTarget; runnable requires
   proven launch strategy/proof from T174/T175);
   T176 can proceed in parallel with T169–T175 once Orca adapter seams exist
-- T167/T168 remain after production ExecutionTarget/launch work lands
+- T167 remains after production ExecutionTarget/launch work lands
 
 ---
 
@@ -963,8 +964,8 @@ are complete.
 Review follow-up: maintenance uses an in-dispatch ask/reply callback; canonical
 Run/task confirmation gates success. Task specs use explicit Target, Change,
 Constraints, Ownership and Observable acceptance sections. Mutating adapter
-routes require live authority. Remaining open work is T174/T175 launch-proof
-acceptance, umbrella T163 of the ExecutionTarget/launch stack, fresh CI (T167),
-and live Mode C smoke (T168). OpenCode + Ollama is one possible example target
-only — not a mandatory architecture. Local pytest green does not close
-T167/T168.
+routes require live authority. T174/T175 and umbrella T163 are accepted; live
+Mode C smoke (T168) accepted on run_3d12b2f31039. Remaining open work is fresh
+CI (T167). Local-only live validation remains NOT VALIDATED. OpenCode + Ollama
+is one possible example target only — not a mandatory architecture. Local
+pytest green does not close T167.

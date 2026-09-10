@@ -189,7 +189,9 @@ not proof. Prompt text, discovery alone, and Aichestra-process environment
 variables are not proof. Bridge-owned terminals are closed on prepare/dispatch
 failure before attach; foreign existing terminals are never closed. After an
 exact ``dispatch_id`` exists, failure paths attempt bounded worker-release
-cleanup. Local-only live acceptance remains NOT VALIDATED until T168.
+cleanup. Local-only live acceptance remains NOT VALIDATED (no proven local
+ExecutionTarget on the current machine). Cloud/native Mode C live smoke
+passed via T168 (`run_3d12b2f31039`).
 
 Worker release distinguishes `released`, `already_released`, `release_pending`
 and `release_unknown`. Recovery executes only exact-dispatch allowlisted
@@ -203,4 +205,5 @@ worker-start never produced a dispatch.
 An ordinary headless shell without Orca terminal authority is unsupported and
 fails before Run creation. Do not invent or reuse a stale terminal handle.
 Adapter contract tests validate launch construction and receipts, not a live DAG.
-See the active tasks' T167/T168 entries for current CI and live acceptance evidence.
+See the active tasks' T167 entry for fresh CI matrix evidence and T168 for live
+Mode C acceptance evidence.

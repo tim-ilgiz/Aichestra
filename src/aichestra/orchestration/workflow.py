@@ -1160,7 +1160,10 @@ class ModeCRunController:
                 context={},
                 cwd=root,
                 timeout_seconds=60.0,
-                read_only=True,
+                # Run creation is control-plane bookkeeping, not a read-only
+                # worker. Appending a read-only constraint here contradicts
+                # implementation objectives later executed in this same Run.
+                read_only=False,
             )
         )
         self.state.metadata["orca_ensure_run"] = result.to_dict()
@@ -1281,7 +1284,7 @@ class ModeCRunController:
                 role=role,
                 context=ctx,
                 cwd=root,
-                timeout_seconds=300.0,
+                timeout_seconds=600.0,
                 read_only=read_only,
                 attachments=tuple(self.bindings.attachments or ()),
                 execution_target=self._bootstrap_target if role == MODE_C_HANDOFF_ROLE else None,

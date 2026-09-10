@@ -69,14 +69,27 @@ def _release_recovery_args(action, dispatch_id: str, binary: str) -> list[str] |
 
 
 def resolve_orca_binary() -> str | None:
-    """Resolve Orca CLI from PATH or well-known install locations (no user hard-code)."""
+    """Resolve a usable Orca CLI without assuming one operating-system path."""
     found = which_binary(_ORCA_BINARIES)
-    if found:
+    if found and _usable_cli_candidate(Path(found)):
         return found
     for candidate in _platform_cli_candidates():
-        if candidate.is_file():
+        if _usable_cli_candidate(candidate):
             return str(candidate)
     return None
+
+
+def _usable_cli_candidate(candidate: Path) -> bool:
+    """Reject stale or unreadable PATH links before trying OS-specific fallbacks."""
+    try:
+        resolved = candidate.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return False
+    if not resolved.is_file():
+        return False
+    if detect_os() == OperatingSystem.WINDOWS:
+        return True
+    return os.access(resolved, os.X_OK)
 
 
 def _platform_cli_candidates() -> list[Path]:
@@ -217,6 +230,26 @@ def _parse_orca_json(output: str) -> dict[str, Any]:
     text = (output or "").strip()
     if not text:
         return {}
+
+    # ``orchestration check --wait --json`` writes keepalive JSON lines to
+    # stderr. ``run_cli_task`` preserves stderr after stdout for diagnostics,
+    # so remove only those documented transport records before parsing the
+    # authoritative stdout receipt. A keepalive is never lifecycle evidence.
+    meaningful_lines: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if line.startswith("{"):
+            try:
+                candidate = json.loads(line)
+            except json.JSONDecodeError:
+                candidate = None
+            if isinstance(candidate, dict) and candidate.get("_keepalive") is True:
+                continue
+        meaningful_lines.append(raw_line)
+    text = "\n".join(meaningful_lines).strip()
+    if not text:
+        return {}
+
     try:
         data = json.loads(text)
         return data if isinstance(data, dict) else {"value": data}
@@ -271,18 +304,75 @@ def _dig_id(payload: dict[str, Any], *keys: str) -> str | None:
     return None
 
 
+def _extract_agent_terminal_handle(payload: dict[str, Any]) -> str | None:
+    """Read the documented agent handle across create/show receipt envelopes."""
+    paths = (
+        ("result", "agentTerminalHandle"),
+        ("result", "terminalHandle"),
+        ("result", "effects", "terminal", "handle"),
+        ("result", "worker", "terminalHandle"),
+        ("result", "worker", "agentTerminalHandle"),
+        ("result", "worker", "agent_terminal_handle"),
+        ("result", "dispatch", "assignee_handle"),
+        ("result", "terminal", "handle"),
+        ("agentTerminalHandle",),
+        ("terminalHandle",),
+        ("worker", "terminalHandle"),
+        ("worker", "agentTerminalHandle"),
+        ("worker", "agent_terminal_handle"),
+        ("dispatch", "assignee_handle"),
+        ("terminal", "handle"),
+    )
+    for path in paths:
+        handle = _dig_id(payload, *path)
+        if handle:
+            return handle
+    return None
+
+
+def _empty_wait_poll_meta(
+    data: dict[str, Any],
+    *,
+    dispatch_id: str | None,
+    ack_delivery_id: str | None,
+) -> dict[str, Any]:
+    """Metadata for a bounded poll that observed no lifecycle events yet."""
+    envelope = data.get("result", data)
+    timed_out = bool(isinstance(envelope, dict) and envelope.get("timedOut"))
+    return {
+        "event_type": None,
+        "event_dispatch_id": None,
+        "expected_dispatch_id": dispatch_id,
+        "event": envelope if isinstance(envelope, dict) else data,
+        "ack_delivery_id": ack_delivery_id,
+        "retryable_unrelated": False,
+        "retryable_poll": True,
+        "empty_poll": True,
+        "timed_out": timed_out,
+    }
+
+
 def interpret_orca_wait_event(
     payload: dict[str, Any] | None,
     *,
     dispatch_id: str | None,
     terminal_handle: str | None = None,
+    ignore_message_ids: frozenset[str] | set[str] | None = None,
 ) -> tuple[bool, str, dict[str, Any]]:
     """Interpret ``orca orchestration check --wait`` receipt.
 
     Only ``worker_done`` for the launched dispatch counts as success.
     ``question`` / ``escalation`` and mismatched dispatch ids leave work incomplete.
+    Empty / timed-out polls are retryable until the caller's overall deadline.
+    Already-answered question ids (non-consuming peek) are skipped so a later
+    ``worker_done`` in the same batch remains visible.
     """
     data = payload if isinstance(payload, dict) else {}
+    ignored = {
+        str(item).strip()
+        for item in (ignore_message_ids or ())
+        if isinstance(item, str) and item.strip()
+    }
     ack_delivery_id = (
         _dig_id(data, "deliveryId")
         or _dig_id(data, "delivery_id")
@@ -290,8 +380,24 @@ def interpret_orca_wait_event(
         or _dig_id(data, "result", "delivery_id")
     )
     events = _extract_wait_events(data)
+    if not events:
+        return (
+            False,
+            "wait poll empty",
+            _empty_wait_poll_meta(
+                data, dispatch_id=dispatch_id, ack_delivery_id=ack_delivery_id
+            ),
+        )
     unrelated: list[dict[str, Any]] = []
+    skipped_answered = 0
     for event in events:
+        message_id = event.get("messageId") or event.get("id")
+        if (
+            isinstance(message_id, str)
+            and message_id.strip() in ignored
+        ):
+            skipped_answered += 1
+            continue
         event_type = str(
             event.get("type")
             or event.get("eventType")
@@ -309,6 +415,20 @@ def interpret_orca_wait_event(
         if (not event_dispatch and event_type == "question" and terminal_handle
                 and event.get("from_handle") == terminal_handle):
             event_dispatch = dispatch_id
+        elif (
+            not event_dispatch
+            and event_type == "question"
+            and terminal_handle
+            and event.get("from_handle")
+        ):
+            unrelated.append(
+                {
+                    "event_type": event_type,
+                    "event_dispatch_id": None,
+                    "from_handle": event.get("from_handle"),
+                }
+            )
+            continue
         if dispatch_id and event_dispatch and event_dispatch != dispatch_id:
             unrelated.append(
                 {
@@ -324,6 +444,7 @@ def interpret_orca_wait_event(
             "event": event,
             "ack_delivery_id": ack_delivery_id,
             "retryable_unrelated": False,
+            "skipped_answered_questions": skipped_answered,
         }
         if event_type in {"question", "escalation"}:
             return (
@@ -349,6 +470,15 @@ def interpret_orca_wait_event(
             return False, f"worker_done with failure status: {status}", meta
         return True, "worker_done", meta
 
+    if skipped_answered and not unrelated:
+        # Peek still shows only already-answered questions. Keep polling until
+        # worker_done appears or the overall deadline expires.
+        meta = _empty_wait_poll_meta(
+            data, dispatch_id=dispatch_id, ack_delivery_id=ack_delivery_id
+        )
+        meta["skipped_answered_questions"] = skipped_answered
+        return False, "wait poll has only already-answered questions", meta
+
     return (
         False,
         "wait delivery contained only unrelated dispatch events",
@@ -360,8 +490,14 @@ def interpret_orca_wait_event(
             "unrelated_events": unrelated,
             "ack_delivery_id": ack_delivery_id,
             "retryable_unrelated": bool(dispatch_id and unrelated),
+            "skipped_answered_questions": skipped_answered,
         },
     )
+
+
+def _is_check_envelope(payload: dict[str, Any]) -> bool:
+    """True for ``orchestration check`` receipts, not lifecycle event bodies."""
+    return any(key in payload for key in ("messages", "events", "timedOut", "count"))
 
 
 def _extract_wait_events(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -377,7 +513,9 @@ def _extract_wait_events(payload: dict[str, Any]) -> list[dict[str, Any]]:
             inner = nested.get("event")
             if isinstance(inner, dict):
                 events.append(inner)
-            if any(k in nested for k in ("type", "eventType", "kind", "dispatchId")):
+            # Check envelopes often carry dispatchId/runId without being events.
+            # Only treat a nested object as an event when it names an event type.
+            if any(k in nested for k in ("type", "eventType", "kind")):
                 events.append(nested)
             rows = nested.get("messages", nested.get("events"))
             if isinstance(rows, list):
@@ -392,7 +530,13 @@ def _extract_wait_events(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 detail = _parse_orca_json(detail)
             normalized.append({**(detail if isinstance(detail, dict) else {}), **event})
         return normalized
-    return [payload]
+    # Legacy single-event receipts place type/kind at the top level. Empty
+    # check polls must remain empty so the wait loop can reopen until deadline.
+    if _is_check_envelope(payload):
+        return []
+    if any(k in payload for k in ("type", "eventType", "kind")):
+        return [payload]
+    return []
 
 
 def _extract_wait_event(payload: dict[str, Any]) -> dict[str, Any]:
@@ -490,7 +634,9 @@ class OrcaProvider(ProviderAdapter):
                 "Read applicable project instructions; nested AGENTS.md applies to its subtree.\n"
                 "Change:\nComplete the original objective below.\n"
                 "Constraints:\nLoad the Orca orchestration skill using " + binary + ". "
-                "Bind the existing Run with run-use; NEVER create another Run. "
+                "Bind the supplied existing Run exactly once with run-use; NEVER call "
+                "run-create. Aichestra observes this coordinator terminal's mailbox "
+                "non-consumingly for deterministic ask/reply gates. "
                 "Honor project instruction precedence and security constraints.\n"
                 "ExecutionTargets:\n"
                 "The coordinator owns inner worker selection. "
@@ -517,8 +663,15 @@ class OrcaProvider(ProviderAdapter):
                 "At the implementation boundary, converge edits into the coordinator checkout, "
                 "settle implementation workers, then call orchestration ask --question "
                 "AICHESTRA_GATE:maintenance --json. Wait for the authoritative reply before "
-                "dispatching test/doc/spec/ADR writers. Required writer work MUST be dispatched "
-                "through Orca in this Run. If implementation changes again, repeat the gate. "
+                "dispatching test/doc/spec/ADR writers. Aichestra replies only to that exact "
+                "maintenance question. Child workers must not ask the maintenance question; "
+                "only this coordinator crosses that boundary after their implementation "
+                "Dispatches are settled. State that prohibition explicitly in child Task "
+                "specs. For any other launch, policy, or capability blocker, "
+                "settle affected Tasks and report this coordinator Dispatch with worker_done "
+                "outcome failed; do not leave an operator question pending. Required writer "
+                "work MUST be dispatched through Orca in this Run. If implementation changes "
+                "again, repeat the gate. "
                 "Even a no-implementation task must request the gate before completion.\n"
                 "Observable acceptance:\nAll required gate handshakes completed; required writer "
                 "Dispatches completed; all child Dispatches settled; changes converged into "
@@ -527,9 +680,60 @@ class OrcaProvider(ProviderAdapter):
                 "Only then send worker_done with explicit outcome succeeded; unresolved work "
                 "requires outcome failed. Aichestra verifies commands and canonical Run state.\n"
             )
-            full_prompt = contract + "POLICY_PACKAGE: " + json.dumps(request.context) + "\n" + request.prompt
-            request = replace(request, prompt=full_prompt, context={**request.context, "worktree": "current"},
-                              max_prompt_chars=len(full_prompt) + 5000)
+            package = request.context.get("policy_package")
+            if isinstance(package, Mapping):
+                coordinator_package = dict(package)
+            else:
+                # Compatibility for direct adapter callers. Keep one bounded,
+                # canonical copy instead of recursively echoing the entire
+                # operational context into the agent prompt.
+                coordinator_package = {
+                    key: request.context.get(key)
+                    for key in (
+                        "run_id",
+                        "task_prompt",
+                        "project_root",
+                        "project_context",
+                        "execution_targets",
+                        "execution_target_candidates",
+                        "execution_policy",
+                        "execution_target_contract_version",
+                        "launch_proof_operation",
+                        "attachments",
+                        "classify",
+                        "speckit_scale",
+                        "speckit_steps",
+                        "provider_policy",
+                    )
+                    if request.context.get(key) is not None
+                }
+            objective = str(
+                coordinator_package.get("task_prompt") or request.prompt
+            ).strip()
+            full_prompt = (
+                contract
+                + "POLICY_PACKAGE: "
+                + json.dumps(coordinator_package)
+                + "\nObjective:\n"
+                + objective
+            )
+            operational_context = {
+                key: request.context.get(key)
+                for key in (
+                    "run_id",
+                    "terminal_handle",
+                    "prepared_bootstrap_launch",
+                    "prepared_launch",
+                )
+                if request.context.get(key) is not None
+            }
+            operational_context["worktree"] = "current"
+            request = replace(
+                request,
+                prompt=full_prompt,
+                context=operational_context,
+                max_prompt_chars=len(full_prompt) + 2_000,
+            )
 
         if role == "run_status":
             result = run_cli_task(binary=binary,
@@ -966,12 +1170,10 @@ class OrcaProvider(ProviderAdapter):
             or _dig_id(worker_payload, "result", "id")
             or _dig_id(worker_payload, "dispatchId")
         )
-        terminal_handle = (
-            _dig_id(worker_payload, "result", "agentTerminalHandle")
-            or _dig_id(worker_payload, "result", "terminalHandle")
-            or _dig_id(worker_payload, "result", "effects", "terminal", "handle")
-            or _dig_id(worker_payload, "result", "worker", "terminalHandle")
-            or (launch_evidence.get("handle") if isinstance(launch_evidence.get("handle"), str) else None)
+        terminal_handle = _extract_agent_terminal_handle(worker_payload) or (
+            launch_evidence.get("handle")
+            if isinstance(launch_evidence.get("handle"), str)
+            else None
         )
         locator = extract_worktree_locator(worker_payload)
         steps.append(
@@ -1012,6 +1214,50 @@ class OrcaProvider(ProviderAdapter):
             return replace(failed, metadata={**failed.metadata, "cleanup": cleanup,
                 "dispatch_id": dispatch_id})
 
+        if not terminal_handle:
+            show_result = run_cli_task(
+                binary=binary,
+                argv=[
+                    binary,
+                    "orchestration",
+                    "worker-show",
+                    "--dispatch",
+                    dispatch_id,
+                    "--json",
+                ],
+                session=session,
+                request=request,
+                unavailable_detail="Orca unavailable",
+            )
+            show_payload = _parse_orca_json(show_result.output)
+            terminal_handle = _extract_agent_terminal_handle(show_payload)
+            steps.append(
+                {
+                    "step": "worker-handle-resolve",
+                    "ok": bool(show_result.ok and terminal_handle),
+                    "dispatch_id": dispatch_id,
+                    "terminal_handle": terminal_handle,
+                }
+            )
+        if request.role == "mode_c_handoff" and not terminal_handle:
+            failed = self._failed_dispatch(
+                replace(
+                    worker_result,
+                    ok=False,
+                    failure=FailureClass.ERROR,
+                    detail=(
+                        "Orca coordinator terminal handle unavailable after exact "
+                        f"worker-show for dispatch {dispatch_id}; refusing Run-scoped wait"
+                    ),
+                ),
+                steps,
+                session.session_id,
+            )
+            return replace(
+                failed,
+                metadata={**failed.metadata, "dispatch_id": dispatch_id},
+            )
+
         timeout_ms = max(1_000, int(float(request.timeout_seconds) * 1000))
         deadline = time.monotonic() + (timeout_ms / 1000.0)
         wait_result: ProviderTaskResult | None = None
@@ -1023,23 +1269,35 @@ class OrcaProvider(ProviderAdapter):
         attempts = 0
         gate_answered = False
         gate_replies: dict[str, dict[str, Any]] = {}
+        monitor_coordinator = bool(
+            request.role == "mode_c_handoff" and terminal_handle
+        )
         while time.monotonic() < deadline:
             attempts += 1
             remaining_ms = max(1_000, int((deadline - time.monotonic()) * 1000))
-            wait_argv = [
-                binary,
-                "orchestration",
-                "check",
-                "--run",
-                run_id,
-                "--wait",
-                "--types",
-                "worker_done,escalation,question",
-                "--timeout-ms",
-                str(remaining_ms),
-                "--json",
-            ]
-            if ack_delivery_id:
+            # Orca may not wake an already-open terminal-scoped peek when the
+            # coordinator later asks a Run-addressed question. Keep the global
+            # deadline, but periodically reopen the non-consuming observation.
+            poll_timeout_ms = min(remaining_ms, 15_000)
+            wait_argv = [binary, "orchestration", "check"]
+            if monitor_coordinator:
+                # The generic coordinator must bind the Run to own its DAG.
+                # Observe its mailbox by exact terminal without replacing that
+                # consumer or consuming child lifecycle mail before it does.
+                wait_argv.extend(["--terminal", str(terminal_handle), "--peek"])
+            else:
+                wait_argv.extend(["--run", run_id])
+            wait_argv.extend(
+                [
+                    "--wait",
+                    "--types",
+                    "worker_done,escalation,question",
+                    "--timeout-ms",
+                    str(poll_timeout_ms),
+                    "--json",
+                ]
+            )
+            if ack_delivery_id and not monitor_coordinator:
                 wait_argv[3:3] = ["--ack", ack_delivery_id]
                 ack_delivery_id = None
             wait_result = run_cli_task(
@@ -1051,7 +1309,10 @@ class OrcaProvider(ProviderAdapter):
             )
             wait_payload = _parse_orca_json(wait_result.output)
             done_ok, done_detail, done_meta = interpret_orca_wait_event(
-                wait_payload, dispatch_id=dispatch_id, terminal_handle=terminal_handle
+                wait_payload,
+                dispatch_id=dispatch_id,
+                terminal_handle=terminal_handle,
+                ignore_message_ids=frozenset(gate_replies),
             )
             if not wait_result.ok:
                 break
@@ -1065,28 +1326,55 @@ class OrcaProvider(ProviderAdapter):
                     done_detail = "Maintenance question missing message id"
                     break
                 try:
-                    if message_id not in gate_replies:
-                        gate_replies[message_id] = request.gate_handler("maintenance")
+                    gate_replies[message_id] = request.gate_handler("maintenance")
                     answer = gate_replies[message_id]
                 except Exception as exc:
                     done_detail = f"Maintenance gate failed: {exc}"
                     break
+                reply_argv = [
+                    binary,
+                    "orchestration",
+                    "reply",
+                    "--id",
+                    str(message_id),
+                ]
+                if monitor_coordinator:
+                    # run-use intentionally transfers Run ownership to the
+                    # generic coordinator. Orca's supported --from route lets
+                    # the deterministic gate answer that exact coordinator's
+                    # question without taking the Run back and fencing it.
+                    reply_argv.extend(["--from", str(terminal_handle)])
+                reply_argv.extend(["--body", json.dumps(answer), "--json"])
                 reply = run_cli_task(binary=binary,
-                    argv=[binary, "orchestration", "reply", "--id", str(message_id),
-                          "--body", json.dumps(answer), "--json"],
+                    argv=reply_argv,
                     session=session, request=request, unavailable_detail="Orca unavailable")
-                if not reply.ok or not answer.get("ok"):
+                reply_payload = _parse_orca_json(reply.output)
+                already_answered = (
+                    isinstance(reply_payload.get("error"), dict)
+                    and str(reply_payload["error"].get("code") or "") == "answer_conflict"
+                )
+                if (not reply.ok and not already_answered) or not answer.get("ok"):
                     done_detail = "Maintenance gate reply failed or gate rejected"
                     break
                 gate_answered = True
-                ack_delivery_id = done_meta.get("ack_delivery_id")
+                if not monitor_coordinator:
+                    ack_delivery_id = done_meta.get("ack_delivery_id")
                 continue
             if done_ok:
                 break
-            retryable = bool(done_meta.get("retryable_unrelated"))
-            ack = done_meta.get("ack_delivery_id")
-            if retryable and isinstance(ack, str) and ack.strip():
-                ack_delivery_id = ack.strip()
+            retryable = bool(
+                done_meta.get("retryable_unrelated") or done_meta.get("retryable_poll")
+            )
+            if retryable:
+                ack = done_meta.get("ack_delivery_id")
+                if monitor_coordinator:
+                    # The coordinator owns this Run's FIFO mailbox. Peeking
+                    # must never acknowledge a child lifecycle event on its
+                    # behalf; it will consume that event itself. Empty polls
+                    # also reopen under the same non-consuming observation.
+                    time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+                elif isinstance(ack, str) and ack.strip():
+                    ack_delivery_id = ack.strip()
                 continue
             break
         if wait_result is None:
@@ -1098,7 +1386,10 @@ class OrcaProvider(ProviderAdapter):
             )
         if (
             not done_ok
-            and done_meta.get("retryable_unrelated")
+            and (
+                done_meta.get("retryable_unrelated")
+                or done_meta.get("retryable_poll")
+            )
             and time.monotonic() >= deadline
         ):
             done_detail = "timed out waiting for expected dispatch completion"

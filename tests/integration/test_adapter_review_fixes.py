@@ -32,7 +32,7 @@ from aichestra.providers.local_worker import (
     build_local_opencode_argv,
     build_local_opencode_config,
 )
-from aichestra.providers.orca import build_orca_argv
+from aichestra.providers.orca import build_orca_argv, resolve_orca_binary
 from tests.fakes.providers import fake_codex, fake_orca
 
 
@@ -42,6 +42,24 @@ def test_orca_argv_uses_orchestration_not_run() -> None:
     assert argv[1:3] == ["orchestration", "run-create"]
     assert "run" not in argv[1:3]
     assert "--session" not in argv
+
+
+def test_orca_binary_skips_broken_path_link_for_platform_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    broken = tmp_path / "path-orca"
+    broken.symlink_to(tmp_path / "missing-orca")
+    bundled = tmp_path / "bundled-orca"
+    bundled.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    bundled.chmod(0o755)
+    monkeypatch.setattr(
+        "aichestra.providers.orca.which_binary", lambda _names: str(broken)
+    )
+    monkeypatch.setattr(
+        "aichestra.providers.orca._platform_cli_candidates", lambda: [bundled]
+    )
+
+    assert resolve_orca_binary() == str(bundled)
 
 
 def test_orca_write_argv_uses_worker_start() -> None:
@@ -284,7 +302,9 @@ def test_real_adapter_coordinator_contract(monkeypatch, tmp_path, provider, loca
         command = argv[2] if argv[1] == "orchestration" else "status"
         receipts = {
             "status": {}, "run-use": {}, "task-create": {"id": "t1"},
-            "worker-start": {"dispatchId": "d1", "worktreePath": str(tmp_path), "launch": {"effective": {"agent": expected}}},
+            "worker-start": {"dispatchId": "d1", "worktreePath": str(tmp_path),
+                             "launch": {"effective": {"agent": expected}}},
+            "worker-show": {"worker": {"agent_terminal_handle": "worker1"}},
             "check": {"type": "worker_done", "dispatchId": "d1", "outcome": "succeeded"},
             "run-show": {"id": "r1", "state": "active"},
             "reply": {}, "worker-release": {"state": "released"}, "worker-list": {"workers": []},
@@ -308,9 +328,15 @@ def test_real_adapter_coordinator_contract(monkeypatch, tmp_path, provider, loca
     task = next(c for c in calls if "task-create" in c)
     spec = task[task.index("--spec") + 1]
     assert "explicit Mode C coordinator" in spec
-    assert "CONTEXT_END" in spec
-    assert "NEVER create another Run" in spec
+    assert spec.count("CONTEXT_END") == 1
+    assert "Bind the supplied existing Run exactly once with run-use" in spec
+    assert "NEVER call run-create" in spec
+    assert "non-consumingly" in spec
+    assert "replies only to that exact maintenance question" in spec
+    assert "Child workers must not ask the maintenance question" in spec
+    assert "worker_done outcome failed" in spec
     assert "arbitrary Tasks/Dispatches" in spec
+    assert spec.count("POLICY_PACKAGE:") == 1
     worker = next(c for c in calls if "worker-start" in c)
     assert worker[worker.index("--agent") + 1] == expected
     assert worker[worker.index("--worktree") + 1] == "current"
@@ -319,6 +345,15 @@ def test_real_adapter_coordinator_contract(monkeypatch, tmp_path, provider, loca
     assert result.metadata["attachment_delivery"]["staged"] == []
     assert sum("task-create" in c for c in calls) == 1
     assert not any("run-create" in c for c in calls)
+    assert any("worker-show" in c for c in calls)
+    wait = next(c for c in calls if "check" in c)
+    assert wait[wait.index("--terminal") + 1] == "worker1"
+    assert "--peek" in wait
+    assert "--run" not in wait
+    assert int(wait[wait.index("--timeout-ms") + 1]) <= 15_000
+    assert not any("--ack" in call for call in calls if "check" in call)
+    reply = next(c for c in calls if "reply" in c)
+    assert reply[reply.index("--from") + 1] == "worker1"
     state = adapter.send(ProviderSession(session_id="s", kind=ProviderKind.ORCA),
         ProviderTaskRequest(prompt="state", role="run_status", context={"run_id": "r1"}, read_only=True))
     assert state.metadata["receipt"] == {"id": "r1", "state": "active"}
@@ -410,6 +445,125 @@ def test_production_gate_reply_precedes_completion_and_cleanup(coordinator_rpc, 
     assert answer["run_id"] == "r1"
     assert answer["decision"] == state.decision.to_dict()
     assert state.metadata["orca_run_status"]["ok"] is True
+    run_create = next(c for c in calls if "run-create" in c)
+    objective = run_create[run_create.index("--objective") + 1]
+    assert "CONSTRAINT: read-only" not in objective
+
+
+def test_wait_json_parser_ignores_documented_stderr_keepalives():
+    from aichestra.providers.orca import _parse_orca_json
+
+    output = (
+        '{"result":{"deliveryId":"delivery1","messages":'
+        '[{"type":"worker_done","dispatchId":"d1","outcome":"succeeded"}]}}\n'
+        '{"_keepalive":true,"_heartbeat":true,"elapsedMs":15003,"deadlineMs":300000}\n'
+        '{"_keepalive":true,"_heartbeat":true,"elapsedMs":30004,"deadlineMs":300000}'
+    )
+
+    parsed = _parse_orca_json(output)
+
+    assert parsed["result"]["deliveryId"] == "delivery1"
+    assert parsed["result"]["messages"][0]["type"] == "worker_done"
+
+
+def test_empty_check_polls_reopen_until_maintenance_question(monkeypatch, tmp_path):
+    """A timed-out peek must not abort the overall Mode C wait deadline."""
+    from aichestra.providers.orca import OrcaProvider
+    from aichestra.providers.base import ProviderSession
+
+    monkeypatch.setenv("ORCA_TERMINAL_HANDLE", "live-test")
+    adapter = OrcaProvider()
+    monkeypatch.setattr(
+        adapter,
+        "probe",
+        lambda: ProviderStatus(kind=ProviderKind.ORCA, available=True, binary_path="orca"),
+    )
+    calls: list[list[str]] = []
+    check_calls = 0
+    replied = False
+
+    def run(**kwargs):
+        nonlocal check_calls, replied
+        argv = kwargs["argv"]
+        calls.append(argv)
+        command = argv[2] if len(argv) > 2 and argv[1] == "orchestration" else "status"
+        if command == "check":
+            check_calls += 1
+            if not replied and check_calls < 3:
+                body = {
+                    "result": {
+                        "runId": "r1",
+                        "dispatchId": "d1",
+                        "messages": [],
+                        "count": 0,
+                        "timedOut": True,
+                    }
+                }
+            elif not replied:
+                body = {
+                    "result": {
+                        "deliveryId": "delivery1",
+                        "messages": [
+                            {
+                                "type": "question",
+                                "id": "q1",
+                                "from_handle": "worker1",
+                                "subject": "AICHESTRA_GATE:maintenance",
+                            }
+                        ],
+                    }
+                }
+            else:
+                body = {
+                    "result": {
+                        "messages": [
+                            {
+                                "type": "worker_done",
+                                "dispatchId": "d1",
+                                "outcome": "succeeded",
+                            }
+                        ]
+                    }
+                }
+            return ProviderTaskResult(ok=True, output=json.dumps(body))
+        if command == "reply":
+            replied = True
+        receipts = {
+            "status": {},
+            "run-use": {},
+            "task-create": {"id": "t1"},
+            "worker-start": {
+                "dispatchId": "d1",
+                "agentTerminalHandle": "worker1",
+                "worktreePath": str(tmp_path),
+                "launch": {"effective": {"agent": "codex"}},
+            },
+            "reply": {},
+            "worker-release": {"state": "released"},
+            "worker-list": {"workers": []},
+            "worker-show": {"dispatchId": "d1", "terminalState": "released"},
+            "run-show": {"run": {"id": "r1"}},
+            "task-list": {"tasks": [{"id": "t1", "status": "completed"}]},
+        }
+        return ProviderTaskResult(ok=True, output=json.dumps({"result": receipts[command]}))
+
+    monkeypatch.setattr("aichestra.providers.orca.run_cli_task", run)
+    result = adapter.send(
+        ProviderSession(session_id="s", kind=ProviderKind.ORCA),
+        ProviderTaskRequest(
+            prompt="Update",
+            role="mode_c_handoff",
+            cwd=str(tmp_path),
+            timeout_seconds=60.0,
+            gate_handler=lambda gate: {"ok": True, "gate": gate},
+            context={"run_id": "r1"},
+            execution_target=fake_execution_targets("codex")[0],
+        ),
+    )
+    assert result.ok, result.detail
+    assert check_calls >= 3
+    assert sum(1 for c in calls if "check" in c) >= 3
+    assert any("reply" in c for c in calls)
 
 
 @pytest.mark.parametrize("fault", [

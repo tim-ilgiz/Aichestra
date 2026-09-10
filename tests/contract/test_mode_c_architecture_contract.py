@@ -470,6 +470,90 @@ def test_unrelated_dispatch_event_is_retryable_not_terminal() -> None:
     assert meta.get("ack_delivery_id") == "d-1"
 
 
+def test_question_from_non_coordinator_terminal_is_unrelated() -> None:
+    from aichestra.providers.orca import interpret_orca_wait_event
+
+    ok, detail, meta = interpret_orca_wait_event(
+        {
+            "messages": [
+                {
+                    "type": "question",
+                    "id": "q-child",
+                    "from_handle": "term_child",
+                    "subject": "AICHESTRA_GATE:maintenance",
+                }
+            ]
+        },
+        dispatch_id="dispatch-coordinator",
+        terminal_handle="term_coordinator",
+    )
+
+    assert not ok
+    assert "unrelated" in detail
+    assert meta.get("retryable_unrelated") is True
+
+
+def test_empty_timed_out_check_poll_is_retryable() -> None:
+    """Bounded long-polls must reopen until the overall deadline."""
+    from aichestra.providers.orca import interpret_orca_wait_event
+
+    ok, detail, meta = interpret_orca_wait_event(
+        {
+            "result": {
+                "runId": "run_1",
+                "dispatchId": "ctx_1",
+                "messages": [],
+                "count": 0,
+                "timedOut": True,
+                "cancelled": False,
+                "connectionLost": False,
+            }
+        },
+        dispatch_id="ctx_1",
+        terminal_handle="term_coord",
+    )
+
+    assert not ok
+    assert "empty" in detail
+    assert meta.get("retryable_poll") is True
+    assert meta.get("timed_out") is True
+    assert meta.get("retryable_unrelated") is False
+
+
+def test_answered_question_peek_still_sees_worker_done() -> None:
+    """Non-consuming peek keeps the answered question; worker_done must win."""
+    from aichestra.providers.orca import interpret_orca_wait_event
+
+    ok, detail, meta = interpret_orca_wait_event(
+        {
+            "result": {
+                "messages": [
+                    {
+                        "type": "question",
+                        "id": "q1",
+                        "dispatchId": "ctx_1",
+                        "body": "AICHESTRA_GATE:maintenance",
+                    },
+                    {
+                        "type": "worker_done",
+                        "id": "done1",
+                        "dispatchId": "ctx_1",
+                        "outcome": "succeeded",
+                    },
+                ]
+            }
+        },
+        dispatch_id="ctx_1",
+        terminal_handle="term_coord",
+        ignore_message_ids=frozenset({"q1"}),
+    )
+
+    assert ok is True
+    assert detail == "worker_done"
+    assert meta.get("event_type") == "worker_done"
+    assert meta.get("skipped_answered_questions") == 1
+
+
 def test_mode_c_does_not_own_general_purpose_agent_phase_scheduler(tmp_path: Path) -> None:
     """MODE-C-011/012: one handoff; no Aichestra agent-phase roles."""
     orca = fake_orca("success")
