@@ -108,7 +108,7 @@ def test_speckit_policy_without_competing_tree(tmp_path: Path) -> None:
 
 
 def test_run_phase_is_early_validate_only(tmp_path: Path) -> None:
-    """run_phase validates root/Orca; does not schedule agent workers."""
+    """run_phase validates root/Orca/bootstrap; does not create a Run or schedule agents."""
     orca = fake_orca("success")
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
@@ -123,9 +123,30 @@ def test_run_phase_is_early_validate_only(tmp_path: Path) -> None:
     outcome = wf.run_phase()
     assert outcome is not None
     assert outcome.status is PhaseStatus.SUCCEEDED
-    assert wf.state.metadata.get("orca_run_id")
-    # No agent handoff from run_phase alone.
+    assert not wf.state.metadata.get("orca_run_id")
+    assert orca.sent == []
     assert not any((r.role or "") == MODE_C_HANDOFF_ROLE for r in orca.sent)
+
+
+def test_run_phase_without_bootstrap_does_not_create_run(tmp_path: Path) -> None:
+    """Empty ExecutionTargets fail closed in run_phase without run-create."""
+    orca = fake_orca("success")
+    wf = ModeCRunController(
+        mode=Mode.ORCHESTRATED,
+        bindings=WorkflowBindings(
+            execution_targets=(),
+            orca=orca,
+            providers=[(fake_codex("success")).probe()],
+            project_root=str(tmp_path),
+            task_prompt="no target",
+        ),
+    )
+    outcome = wf.run_phase()
+    assert outcome is not None
+    assert outcome.status is PhaseStatus.FAILED
+    assert "bootstrap" in outcome.detail.lower() or "ExecutionTarget" in outcome.detail
+    assert not wf.state.metadata.get("orca_run_id")
+    assert orca.sent == []
 
 
 def test_worktree_adoption_switches_effective_root(tmp_path: Path) -> None:

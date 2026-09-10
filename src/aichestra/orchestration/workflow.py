@@ -284,9 +284,6 @@ class WorkflowBindings:
     # Canonical ExecutionTarget layer (T172). Empty until CLI/discovery fills it.
     execution_targets: tuple[ExecutionTarget, ...] = ()
     execution_policy: ExecutionPolicy = field(default_factory=ExecutionPolicy)
-    # TODO(T173): fail closed when no runnable bootstrap ExecutionTarget exists
-    # once T174/T175 prove launch strategies. Do not fail on unsupported-only
-    # targets during T172 (launch proof not implemented yet).
 
 
 @dataclass
@@ -389,9 +386,10 @@ class ModeCRunController:
         return decision
 
     def run_phase(self) -> GateOutcome | None:
-        """Run early fail-closed checks only (project root / Orca presence).
+        """Validation helper only — no Orca Run creation or agent scheduling.
 
-        Does not schedule Orca agent workers. Prefer ``run_all()``.
+        Checks project root, Orca binding/availability, and a runnable
+        bootstrap ExecutionTarget. Prefer ``run_all()`` for Mode C execution.
         """
         if self.state.stopped:
             return None
@@ -475,6 +473,7 @@ class ModeCRunController:
     # ------------------------------------------------------------------ gates
 
     def _early_validate_or_fail(self) -> GateOutcome:
+        """Fail-closed preflight without creating an Orca Run (no side effects)."""
         root = self.bindings.project_root
         if not root or not str(root).strip():
             outcome = GateOutcome(
@@ -509,16 +508,26 @@ class ModeCRunController:
             )
             self._record(outcome, stop=True)
             return outcome
-        # Surface Orca unavailability / missing run_id early (fail closed).
-        ensure = self._ensure_orca_run(
-            objective=self.bindings.task_prompt or "Aichestra Mode C run"
-        )
-        if ensure is not None:
+        status = self.bindings.orca.probe()
+        if not status.available:
             outcome = GateOutcome(
                 gate=GateKind.ORCA_HANDOFF,
                 status=GateStatus.FAILED,
-                detail=str(ensure.get("detail", "Orca Run missing")),
-                result=ensure,
+                detail=status.detail or "Orca unavailable",
+                result={
+                    "ok": False,
+                    "failure": (status.failure or FailureClass.UNAVAILABLE).value,
+                },
+            )
+            self._record(outcome, stop=True)
+            return outcome
+        from aichestra.execution.launch_strategies import select_bootstrap
+        if select_bootstrap(self.bindings.execution_targets) is None:
+            outcome = GateOutcome(
+                gate=GateKind.ORCA_HANDOFF,
+                status=GateStatus.FAILED,
+                detail="Mode C has no runnable bootstrap ExecutionTarget",
+                result={"ok": False, "failure": FailureClass.UNAVAILABLE.value},
             )
             self._record(outcome, stop=True)
             return outcome

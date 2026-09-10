@@ -16,7 +16,7 @@ from aichestra.orchestration.workflow import (
     PhaseStatus,
     WorkflowBindings,
 )
-from aichestra.providers.base import FailureClass
+from aichestra.providers.base import FailureClass, ProviderTaskResult
 from tests.fakes.providers import fake_codex, fake_local_worker, fake_orca
 
 
@@ -26,6 +26,21 @@ def test_handoff_failed_does_not_complete_or_bypass_lead(tmp_path: Path) -> None
     lead = fake_codex("success")
     proj = tmp_path / "proj"
     proj.mkdir()
+    original = orca.send
+
+    def fail_handoff(session, request):
+        if (request.role or "") == MODE_C_HANDOFF_ROLE:
+            return ProviderTaskResult(
+                ok=False,
+                output="",
+                failure=FailureClass.ERROR,
+                detail="fake handoff error",
+                session_id=session.session_id,
+                metadata={"fake": True, "run_id": (request.context or {}).get("run_id")},
+            )
+        return original(session, request)
+
+    orca.send = fail_handoff  # type: ignore[method-assign]
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         bindings=WorkflowBindings(
@@ -41,10 +56,9 @@ def test_handoff_failed_does_not_complete_or_bypass_lead(tmp_path: Path) -> None
     outcome = wf.run_phase()
     assert outcome is not None
     assert outcome.status is PhaseStatus.SUCCEEDED
-    assert wf.state.metadata.get("orca_run_id")
+    assert not wf.state.metadata.get("orca_run_id")
     assert wf.state.metadata.get("canonical_orchestration") == "orca_run"
 
-    orca._execute_scenario = "error"
     lead_sent_before = len(lead.sent)
     state = wf.run_all()
     assert state.failed

@@ -487,6 +487,29 @@ def test_bootstrap_binding_receipt_mismatch_fails_closed(coordinator_rpc, tmp_pa
     state = _coordinator_controller(adapter, tmp_path).run_all()
     assert state.failed
     assert not any("check" in c for c in calls)
+    # Mismatched launch still started a worker — exact dispatch must be released.
+    release = [c for c in calls if "worker-release" in c]
+    assert release
+    assert all(c[c.index("--dispatch") + 1] == "d1" for c in release)
+    assert any(
+        "--terminal-state" in c and "reclaimable" in c
+        for c in calls if "worker-list" in c
+    )
+
+
+def test_cleanup_requires_empty_reclaimable_worker_list(coordinator_rpc, tmp_path):
+    """Success path must query reclaimable workers and require an empty list."""
+    adapter, calls, _ = coordinator_rpc
+    state = _coordinator_controller(adapter, tmp_path).run_all()
+    assert not state.failed
+    lists = [c for c in calls if "worker-list" in c]
+    assert lists
+    assert all(
+        c[c.index("--run") + 1] == "r1"
+        and "--terminal-state" in c
+        and c[c.index("--terminal-state") + 1] == "reclaimable"
+        for c in lists
+    )
 
 
 @pytest.mark.parametrize("initial", ["released", "already_released", "release_pending", "release_unknown"])

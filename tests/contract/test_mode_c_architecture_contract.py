@@ -343,10 +343,10 @@ def test_no_synthetic_run_id_when_orca_omits(tmp_path: Path) -> None:
         mode=Mode.ORCHESTRATED,
         bindings=_small_bindings(tmp_path, orca=orca),
     )
-    outcome = wf.run_phase()
-    assert outcome is not None
-    assert outcome.status is PhaseStatus.FAILED
-    assert "run_id" in outcome.detail.lower() or "synthetic" in outcome.detail.lower()
+    state = wf.run_all()
+    assert state.failed
+    blob = " ".join(o.detail for o in state.gate_outcomes.values()).lower()
+    assert "run_id" in blob or "synthetic" in blob
     assert not wf.state.metadata.get("orca_run_id_synthesized")
     assert "aichestra-run-" not in str(wf.state.metadata.get("orca_run_id") or "")
 

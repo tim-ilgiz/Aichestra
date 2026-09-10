@@ -654,10 +654,13 @@ class OrcaProvider(ProviderAdapter):
                 # Unknown instructions never authorize a mutation or blind retry.
                 break
 
-        workers, listing = call(["orchestration", "worker-list", "--run", run_id, "--json"])
+        # Coordinator contract: reclaimable resources for this Run must be empty.
+        workers, listing = call([
+            "orchestration", "worker-list", "--run", run_id,
+            "--terminal-state", "reclaimable", "--json",
+        ])
         rows = _receipt_rows(listing, "workers")
-        unresolved = rows is None or any(row.get("terminalState") not in {"released", "retained"}
-                                        for row in rows)
+        unresolved = rows is None or len(rows) > 0
         released = state in {"released", "already_released"}
         ok = bool(result.ok and released and workers.ok and not unresolved)
         return ok, {"state": state, "history": history, "unresolved_resources": unresolved}
@@ -908,10 +911,15 @@ class OrcaProvider(ProviderAdapter):
         if request.execution_target is not None and not launch_adapter.confirms(
             request.execution_target, worker_payload
         ):
-            return self._failed_dispatch(replace(worker_result, ok=False,
+            # Worker already started under a mismatched effective launch —
+            # release this exact dispatch before returning FAIL.
+            _, cleanup = self._release_worker(binary, session, request, dispatch_id, run_id)
+            failed = self._failed_dispatch(replace(worker_result, ok=False,
                 failure=FailureClass.ERROR,
                 detail=f"Orca launch binding unverified for dispatch {dispatch_id}; inspect worker-show"),
                 steps, session.session_id)
+            return replace(failed, metadata={**failed.metadata, "cleanup": cleanup,
+                "dispatch_id": dispatch_id})
 
         timeout_ms = max(1_000, int(float(request.timeout_seconds) * 1000))
         deadline = time.monotonic() + (timeout_ms / 1000.0)

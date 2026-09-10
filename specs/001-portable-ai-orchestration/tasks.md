@@ -847,7 +847,7 @@ are complete.
 - Phase 22 (T138–T144) closes architect REQUEST CHANGES residuals
 - Phase 23 (T145–T153) closes corrective alignment follow-up
 - Phase 24 workflow-ownership slice (T158–T162, T164–T166) landed; open gate is
-  ExecutionTarget work (T163, T169–T175), worker-release recovery (T176),
+  ExecutionTarget work (T163, T169–T175; T173/T176 landed),
   fresh CI (T167), and live smoke (T168)
 - T108–T124 depend on T103–T107; T167 gates merge on current HEAD CI
 - Converge / “feature complete” only after Phase 24 T163 + T167–T176
@@ -928,7 +928,7 @@ Run/task confirmation gates success. Task specs use explicit Target, Change,
 Constraints, Ownership and Observable acceptance sections. Mutating adapter
 routes require live authority. Remaining open work is provider/runtime/
 model-agnostic ExecutionTarget discovery/resolution with proven Orca launch
-strategies (T163, T169–T175), Orca worker-release recovery (T176), fresh CI
-(T167), and live Mode C smoke (T168). OpenCode + Ollama is one possible example
-target only — not a mandatory architecture. Local pytest green does not close
-T167/T168.
+strategies (T163, T169–T175; T173 bootstrap selection and T176 worker-release
+recovery are landed), fresh CI (T167), and live Mode C smoke (T168). OpenCode +
+Ollama is one possible example target only — not a mandatory architecture.
+Local pytest green does not close T167/T168.
