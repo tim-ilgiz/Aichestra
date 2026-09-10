@@ -11,10 +11,10 @@ security, and deterministic gates. Phase 24 (T163, T169–T176), Phase 25
 (T177–T181), and review residual T182–T185 are implemented, including
 structured `launch_proof_invocation`, Windows bridge attestation pipeline,
 `abort-launch` opaque cleanup lease (Orca Dispatch probe + claim/restore),
-and in-Run `AICHESTRA_GATE:verification`. Fresh GitHub CI on
-current HEAD (T167) remains open. T168 live smoke is accepted for the
-pre-T180 handshake. T180 in-Run verification live smoke is accepted on
-`run_27377a46c199`.
+and in-Run `AICHESTRA_GATE:verification`. Fresh GitHub CI (T167) is
+accepted on final implementation HEAD `8c159f85` (run #78: Ubuntu + macOS
++ Windows). T168 live smoke is accepted for the pre-T180 handshake. T180
+in-Run verification live smoke is accepted on `run_27377a46c199`.
 
 ## Summary
 

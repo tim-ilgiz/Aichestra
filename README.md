@@ -197,8 +197,9 @@ attempt bounded worker-release
 cleanup. Local-only live acceptance remains NOT VALIDATED (no proven local
 ExecutionTarget on the current machine). Cloud/native Mode C live smoke passed via T168 (`run_3d12b2f31039`) for the
 pre-T180 handshake. In-Run `AICHESTRA_GATE:verification` live smoke passed via
-T180 (`run_27377a46c199`). Fresh GitHub CI on current HEAD (T167) is required
-before merge.
+T180 (`run_27377a46c199`). Fresh GitHub CI (T167) accepted on final
+implementation HEAD `8c159f85` (GitHub Actions run #78: Ubuntu + macOS +
+Windows).
 
 Worker release distinguishes `released`, `already_released`, `release_pending`
 and `release_unknown`. Recovery executes only exact-dispatch allowlisted
@@ -212,5 +213,5 @@ worker-start never produced a dispatch.
 An ordinary headless shell without Orca terminal authority is unsupported and
 fails before Run creation. Do not invent or reuse a stale terminal handle.
 Adapter contract tests validate launch construction and receipts, not a live DAG.
-See the active tasks' T167 entry for fresh CI matrix evidence and T168 for live
-Mode C acceptance evidence.
+See the active tasks' T167 entry for CI matrix close-out evidence (run #78 on
+`8c159f85`) and T168 for live Mode C acceptance evidence.

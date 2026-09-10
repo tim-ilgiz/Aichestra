@@ -23,16 +23,13 @@ Review residual T182–T185: orchestrate/research config-root safety, structured
 `launch_proof_invocation` argv contract, Windows attestation pipeline proof,
 and `abort-launch` owner-side cleanup.
 
-Validation: **T167** was green on `c3de84f` (GitHub Actions run #70), on
-`10831fc` (run #72), on `85bde480` (run #74), and on `cbdf5a0` (run #76,
-Ubuntu + macOS + Windows) but is **reopened** by any subsequent
-production-code follow-up. The T185 dispatch/lease lifecycle fix is a
-production-code change and requires a fresh matrix. **T168** live smoke on
-`run_3d12b2f31039` remains historical
+Validation: **T167** ACCEPTED on final implementation HEAD `8c159f85`
+(GitHub Actions run #78: Ubuntu + macOS + Windows green). Intermediate
+matrices: run #70 on `c3de84f`, #72 on `10831fc`, #74 on `85bde480`, #76 on
+`cbdf5a0`. **T168** live smoke on `run_3d12b2f31039` remains historical
 evidence for the pre-T180 handshake. **T180** in-Run verification live smoke
 is ACCEPTED on `run_27377a46c199` (2026-09-10). Local-only live validation
-remains NOT VALIDATED. **Do not merge** until a fresh GitHub CI matrix is
-green on current HEAD (T167).
+remains NOT VALIDATED. Merge blockers: none.
 
 **Tests**: Included where required by success criteria (SC-001–SC-016) and
 architecture contract tests (MODE-C-001–010, MODE-C-017–020). Prefer minimal
@@ -863,9 +860,9 @@ security, deterministic gates and verification.
       close the terminal. Lease state is available → claimed → consumed;
       probe or close failure restores available so abort is retriable.
 
-### Validation gates (OPEN)
+### Validation gates
 
-- [ ] T167 CRITICAL:
+- [x] T167 CRITICAL:
       After T163/T169–T176 production implementation is complete, run the full
       local test suite and a fresh GitHub Actions matrix on that final
       implementation HEAD.
@@ -875,17 +872,11 @@ security, deterministic gates and verification.
       - macOS green
       - Windows green
 
-      Any subsequent production-code change invalidates the T167 evidence and
-      requires a new matrix run.
-
-      Docs-only / architecture-HEAD CI may be kept as intermediate sanity
-      evidence, but does NOT close T167.
-      <!-- Intermediate evidence: GitHub Actions run #70 succeeded on
-           c3de84f; run #72 on 10831fc; run #74 on 85bde480; run #76 on
-           cbdf5a0 (Ubuntu + macOS + Windows). The T185 dispatch/lease
-           lifecycle fix is a production-code change and REOPENS T167.
-           Do not reuse run #76 as close-out evidence. Local pytest
-           alone is insufficient. -->
+      ACCEPTED on final implementation HEAD `8c159f85` via GitHub Actions
+      run #78 (Ubuntu + macOS + Windows). Intermediate evidence retained for
+      audit: run #70 on `c3de84f`; #72 on `10831fc`; #74 on `85bde480`;
+      #76 on `cbdf5a0`. Docs-only follow-ups do not reopen T167; any later
+      production-code change would require a new matrix.
 
 - [x] T168 CRITICAL: Run at least one real Mode C integration smoke proving:
 
@@ -948,8 +939,8 @@ architecture. Coordinator bootstrap, project-context, and workflow-ownership
 fixes already landed (T158–T162, T164–T166) do not satisfy ExecutionTarget
 discovery/resolution or launch-proof work.
 
-**Checkpoint**: Do not treat architecture as converged until T163, T167–T181
-are complete.
+**Checkpoint**: Architecture converged — T163, T167–T181 complete (T167
+close-out: run #78 on `8c159f85`).
 
 ---
 
@@ -966,8 +957,8 @@ are complete.
   foundation and launch-proof stack (T163, T169–T176) accepted; Phase 25
   review follow-up (T177–T181) accepted; live Mode C smoke (T168) accepted
   for pre-T180 HEAD; T180 in-Run verification live smoke accepted on
-  `run_27377a46c199`; fresh CI (T167) remains open after T177–T181
-- T108–T124 depend on T103–T107; T167 gates merge on current HEAD CI
+  `run_27377a46c199`; fresh CI (T167) accepted on `8c159f85` (run #78)
+- T108–T124 depend on T103–T107; T167 merge gate closed on run #78
 - Converge / “feature complete” only after Phase 24 T163 + T167–T176
 - Phase 24 supersedes any earlier interpretation of T108/T125/T139 that allows
   `ModeCRunController.run_all()` to remain the owner of a fixed agent workflow
@@ -995,7 +986,7 @@ are complete.
   (T173 requires a runnable bootstrap ExecutionTarget; runnable requires
   proven launch strategy/proof from T174/T175);
   T176 can proceed in parallel with T169–T175 once Orca adapter seams exist
-- T167 remains after production ExecutionTarget/launch work lands
+- T167 closed on final implementation HEAD after production work landed
 
 ---
 
@@ -1030,9 +1021,10 @@ are complete.
    → bootstrap coordinator`; coordinator under Orca owns the concrete DAG;
    Orca owns canonical lifecycle — Aichestra is not a fixed agent-phase engine
    and must not treat legacy `local-worker` as the canonical abstraction
-3. Do not mark T167 `[x]` until a **fresh** GitHub CI matrix is green on the
-   final implementation HEAD after T163/T169–T176 (Ubuntu + macOS + Windows);
-   do not reuse older HEAD or docs-only CI evidence
+3. T167 is closed only by a **fresh** GitHub CI matrix green on the final
+   implementation HEAD after T163/T169–T176 (Ubuntu + macOS + Windows);
+   evidence: run #78 on `8c159f85`. Do not reuse older HEAD CI as close-out
+   for later production-code changes
 4. Do not claim Windows/Linux live validation from macOS-only execution
 5. Do not reintroduce `while current_phase: launch Orca worker` or a universal
    research→implement→writers→review `run_all()` pipeline
@@ -1049,9 +1041,8 @@ routes require live authority. T174/T175 and umbrella T163 remain accepted with
 Phase 25 T177–T181 (secret boundary, `--repo-root`, existing-terminal
 `launch_ref`, in-Run verification, Windows bridge). Live Mode C smoke (T168)
 accepted on run_3d12b2f31039 for the pre-T180 handshake. T180 in-Run
-verification live smoke accepted on run_27377a46c199. Remaining open work is
-fresh CI (T167) after T177–T181. Local-only live validation remains NOT
-VALIDATED. OpenCode + Ollama is one possible example target only — not a
-mandatory architecture. Local pytest green does not close T167. GitHub Actions
-run #76 was green on `cbdf5a0` and does not close T167 after the T185
-dispatch/lease lifecycle fix.
+verification live smoke accepted on run_27377a46c199. T167 fresh CI accepted
+on final implementation HEAD `8c159f85` (GitHub Actions run #78: Ubuntu +
+macOS + Windows). Local-only live validation remains NOT VALIDATED.
+OpenCode + Ollama is one possible example target only — not a mandatory
+architecture.
