@@ -160,14 +160,25 @@ def build_parser() -> argparse.ArgumentParser:
     abort_p = sub.add_parser(
         "abort-launch",
         help=(
-            "Close an owned prove-launch bridge terminal that was never "
-            "Dispatched (launch_ref = prepared_launch.terminal_handle)"
+            "Close an owned prove-launch bridge that was never Dispatched "
+            "(opaque cleanup lease from prove-launch; never a raw terminal handle)"
         ),
     )
     abort_p.add_argument(
+        "--token",
+        default=None,
+        help="Opaque cleanup lease from prepared_launch.cleanup.lease",
+    )
+    abort_p.add_argument(
+        "--repo-root",
+        type=Path,
+        default=None,
+        help="Aichestra repository root (machine-local cleanup leases)",
+    )
+    abort_p.add_argument(
         "--launch-ref",
-        required=True,
-        help="Opaque terminal handle from prepared_launch.terminal_handle",
+        default=None,
+        help=argparse.SUPPRESS,
     )
     abort_p.add_argument("--json", action="store_true", default=True)
 
@@ -339,9 +350,24 @@ def _cmd_prove_launch(args: argparse.Namespace) -> int:
 
 def _cmd_abort_launch(args: argparse.Namespace) -> int:
     """Owner-side cleanup for owned bridge terminals that never reached Dispatch."""
-    from aichestra.execution.launch_strategies import abort_launch_by_ref
+    from aichestra.execution.launch_strategies import abort_launch_by_token
+    from aichestra.execution.serialize import LAUNCH_ABORT_OPERATION
 
-    payload = abort_launch_by_ref(str(args.launch_ref))
+    if getattr(args, "launch_ref", None):
+        payload = {
+            "ok": False,
+            "operation": LAUNCH_ABORT_OPERATION,
+            "error": (
+                "abort-launch does not accept terminal handles; use --token "
+                "from prove-launch cleanup.lease"
+            ),
+        }
+        sys.stdout.write(json.dumps(payload, indent=2, default=str) + "\n")
+        return 1
+    payload = abort_launch_by_token(
+        str(args.token or ""),
+        repo_root=Path(args.repo_root).resolve() if args.repo_root else None,
+    )
     sys.stdout.write(json.dumps(payload, indent=2, default=str) + "\n")
     return 0 if payload.get("ok") else 1
 

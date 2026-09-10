@@ -560,6 +560,41 @@ def _extract_wait_event(payload: dict[str, Any]) -> dict[str, Any]:
     return events[0] if events else payload
 
 
+def _request_aichestra_repo_root(request: ProviderTaskRequest) -> Path | None:
+    raw = request.context.get("aichestra_repo_root")
+    if isinstance(raw, str) and raw.strip():
+        return Path(raw.strip())
+    return None
+
+
+def _consume_prepared_cleanup_lease(
+    request: ProviderTaskRequest,
+    prepared_payload: Mapping[str, Any] | None,
+) -> str | None:
+    """Absorb a prove-launch cleanup lease. Never closes a terminal."""
+    from aichestra.execution.cleanup_leases import (
+        cleanup_lease_from_prepared,
+        cleanup_repo_root_from_prepared,
+        consume_cleanup_lease,
+    )
+
+    lease = cleanup_lease_from_prepared(prepared_payload)
+    if not lease:
+        return None
+    root = (
+        _request_aichestra_repo_root(request)
+        or cleanup_repo_root_from_prepared(prepared_payload)
+    )
+    if root is None:
+        try:
+            from aichestra.repo import resolve_aichestra_config_root
+
+            root = resolve_aichestra_config_root()
+        except ValueError:
+            return None
+    return consume_cleanup_lease(lease, repo_root=root)
+
+
 class OrcaProvider(ProviderAdapter):
     kind = ProviderKind.ORCA
 
@@ -691,7 +726,9 @@ class OrcaProvider(ProviderAdapter):
                 "Use the returned prepared_launch.terminal_handle exactly; "
                 "do not create a second bridge terminal. "
                 "If prove-launch succeeds but Dispatch does not start, call "
-                "aichestra abort-launch --launch-ref <terminal_handle>. "
+                "the structured prepared_launch.cleanup.invocation "
+                "(aichestra abort-launch --token <cleanup_lease>). "
+                "Never pass a raw terminal handle to abort-launch. "
                 "Target locality may be local, remote, or cloud according to ExecutionPolicy. "
                 "Do not infer workers from raw providers. "
                 "Do not impose product-name phase routing. "
@@ -769,6 +806,7 @@ class OrcaProvider(ProviderAdapter):
                     "terminal_handle",
                     "prepared_bootstrap_launch",
                     "prepared_launch",
+                    "aichestra_repo_root",
                 )
                 if request.context.get(key) is not None
             }
@@ -1124,6 +1162,8 @@ class OrcaProvider(ProviderAdapter):
         launch_evidence: dict[str, Any] = {}
         prepared = None
         launch_ctx = None
+        preflight = None
+        used_preflight = False
         if request.execution_target is not None:
             from aichestra.execution.launch_strategies import (
                 LaunchContext,
@@ -1172,6 +1212,7 @@ class OrcaProvider(ProviderAdapter):
                 if isinstance(preflight, Mapping) and preflight.get("arguments") is not None:
                     # Already prepared/attested (bootstrap or prove-launch) —
                     # reuse exact launch; do not create a second bridge terminal.
+                    used_preflight = True
                     prepared = deserialize_prepared_launch(preflight)
                     try:
                         launch_adapter = adapter_for(request.execution_target)
@@ -1241,12 +1282,37 @@ class OrcaProvider(ProviderAdapter):
             if dispatch_id:
                 _, cleanup = self._release_worker(binary, session, request, dispatch_id, run_id)
                 cleanup_meta["cleanup"] = cleanup
-            elif prepared is not None and launch_ctx is not None and prepared.owns_terminal:
-                # Bridge created a terminal but worker-start never bound a dispatch.
-                cleanup_meta["bridge_terminal_cleanup"] = abort_prepared(prepared, launch_ctx)
+            elif launch_ctx is not None:
+                from aichestra.execution.launch_strategies import PreparedLaunch
+
+                preflight_map = preflight if isinstance(preflight, Mapping) else None
+                leased = _consume_prepared_cleanup_lease(request, preflight_map)
+                if leased:
+                    # Close only the handle recorded in an Aichestra-issued lease.
+                    cleanup_meta["bridge_terminal_cleanup"] = abort_prepared(
+                        PreparedLaunch(
+                            arguments=[],
+                            terminal_handle=leased,
+                            owns_terminal=True,
+                        ),
+                        launch_ctx,
+                    )
+                elif (
+                    prepared is not None
+                    and not used_preflight
+                    and prepared.owns_terminal
+                ):
+                    # In-process prepare() — ownership is local, not coordinator JSON.
+                    cleanup_meta["bridge_terminal_cleanup"] = abort_prepared(
+                        prepared, launch_ctx
+                    )
             if cleanup_meta:
                 failed = replace(failed, metadata={**failed.metadata, **cleanup_meta})
             return failed
+
+        _consume_prepared_cleanup_lease(
+            request, preflight if isinstance(preflight, Mapping) else None
+        )
 
         if request.execution_target is not None and launch_adapter is not None and not launch_adapter.confirms(
             request.execution_target, worker_payload

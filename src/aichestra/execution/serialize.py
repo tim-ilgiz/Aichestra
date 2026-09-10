@@ -200,12 +200,20 @@ def prove_launch_invocation(
     return {"command": "aichestra", "args": args}
 
 
-def abort_launch_invocation(*, launch_ref: str = "<launch_ref>") -> dict[str, Any]:
-    """Structured cleanup for an owned bridge terminal that was never Dispatched."""
-    return {
-        "command": "aichestra",
-        "args": ["abort-launch", "--launch-ref", str(launch_ref or "<launch_ref>")],
-    }
+def abort_launch_invocation(
+    *,
+    token: str = "<cleanup_lease>",
+    repo_root: str | None = None,
+) -> dict[str, Any]:
+    """Structured cleanup for an owned bridge that was never Dispatched.
+
+    Coordinator receives an opaque lease, never a raw Orca terminal handle.
+    """
+    args = ["abort-launch"]
+    if repo_root:
+        args.extend(["--repo-root", str(repo_root)])
+    args.extend(["--token", str(token or "<cleanup_lease>")])
+    return {"command": "aichestra", "args": args}
 
 
 def render_cli_invocation(

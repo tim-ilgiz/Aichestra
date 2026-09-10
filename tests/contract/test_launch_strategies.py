@@ -905,6 +905,7 @@ def test_prove_launch_surface_cli_and_worker_reuses_handle(tmp_path, monkeypatch
     attestation = prove_launch_by_candidate_id(
         resolved.id,
         project_root=tmp_path,
+        repo_root=tmp_path,
         worktree="current",
         binary="orca-test",
         run=run,
@@ -917,6 +918,11 @@ def test_prove_launch_surface_cli_and_worker_reuses_handle(tmp_path, monkeypatch
     assert attestation["execution_target"]["dispatchable"] is True
     assert attestation["prepared_launch"]["terminal_handle"] == "term_surface"
     assert attestation["prepared_launch"]["arguments"] == ["--terminal", "term_surface"]
+    cleanup = attestation["prepared_launch"]["cleanup"]
+    assert cleanup["lease"]
+    assert "--token" in cleanup["invocation"]["args"]
+    assert "--launch-ref" not in cleanup["invocation"]["args"]
+    assert "term_surface" not in cleanup["invocation"]["args"]
     assert "bridge_command" not in attestation["prepared_launch"].get("evidence", {})
     assert "create_command" not in json.dumps(attestation)
     assert len(creates) == 1
@@ -998,6 +1004,7 @@ def test_prove_launch_surface_cli_and_worker_reuses_handle(tmp_path, monkeypatch
             context={
                 "run_id": "r1",
                 "worktree": "current",
+                "aichestra_repo_root": str(tmp_path),
                 "prepared_launch": attestation["prepared_launch"],
                 "provider_policy": {
                     "preferred_lead": "codex",
@@ -1008,6 +1015,9 @@ def test_prove_launch_surface_cli_and_worker_reuses_handle(tmp_path, monkeypatch
         ),
     )
     assert result.ok, result.detail
+    from aichestra.execution.cleanup_leases import consume_cleanup_lease
+
+    assert consume_cleanup_lease(cleanup["lease"], repo_root=tmp_path) is None
     worker = next(c for c in worker_calls if "worker-start" in c)
     assert worker[worker.index("--terminal") + 1] == "term_surface"
     assert "--agent" not in worker
@@ -1134,12 +1144,17 @@ def test_prove_launch_payload_is_sanitized(tmp_path, monkeypatch):
     attestation = prove_launch_by_candidate_id(
         resolved.id,
         project_root=tmp_path,
+        repo_root=tmp_path,
         worktree="current",
         binary="orca-test",
         run=run,
         targets=(resolved,),
     )
     blob = json.dumps(attestation)
+    lease = (attestation.get("prepared_launch") or {}).get("cleanup", {}).get("lease")
+    assert lease
+    assert lease != "[REDACTED]"
+    assert lease in blob
     assert attestation["ok"] is True
     assert "super-secret-pass" not in blob
     process = ((attestation.get("prepared_launch") or {}).get("evidence") or {}).get("process") or {}
@@ -1291,23 +1306,224 @@ def test_prove_launch_invocation_is_structured_argv_not_shell_string():
     assert '"/Users/ilgiz/Aichestra Dev"' in rendered or "'/Users/ilgiz/Aichestra Dev'" in rendered
 
 
-def test_abort_launch_cli_closes_owned_terminal(monkeypatch):
+def _bridge_run(handle: str, closed: list[str]):
+    def run(argv, **_kwargs):
+        if argv[1:3] == ["terminal", "create"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {"ok": True, "result": {"terminal": {"handle": handle}}}
+                ),
+            )
+        if argv[1:3] == ["terminal", "wait"]:
+            return SimpleNamespace(returncode=0, stdout="{}")
+        if argv[1:3] in (["terminal", "show"], ["terminal", "read"]):
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(_structured_terminal(handle)),
+            )
+        if argv[1:3] == ["terminal", "close"]:
+            closed.append(argv[argv.index("--terminal") + 1])
+            return SimpleNamespace(returncode=0, stdout="{}")
+        raise AssertionError(argv)
+
+    return run
+
+
+def test_abort_launch_refuses_foreign_terminal_handle(tmp_path, monkeypatch):
+    """T185: abort-launch must not close a caller-supplied Orca handle."""
     from aichestra.cli import build_parser, main
-    from aichestra.execution import launch_strategies as ls
+    from aichestra.execution.cleanup_leases import issue_cleanup_lease
 
-    closes: list[str] = []
+    closed: list[str] = []
+    issue_cleanup_lease("term_owned", repo_root=tmp_path)
+    monkeypatch.setattr(
+        "aichestra.providers.orca.resolve_orca_binary",
+        lambda: "orca-test",
+    )
+    monkeypatch.setattr(
+        "aichestra.execution.launch_strategies.subprocess.run",
+        _bridge_run("term_owned", closed),
+    )
+    code = main(
+        [
+            "abort-launch",
+            "--repo-root",
+            str(tmp_path),
+            "--launch-ref",
+            "term_some_existing_cursor",
+            "--json",
+        ]
+    )
+    assert code != 0
+    assert closed == []
+    abort_help = build_parser().format_help()
+    assert "abort-launch" in abort_help
+    abort_sub = next(
+        action.choices["abort-launch"]
+        for action in build_parser()._actions
+        if getattr(action, "choices", None) and "abort-launch" in action.choices
+    )
+    assert "--token" in abort_sub.format_help()
 
-    def fake_abort(launch_ref, **_kwargs):
-        closes.append(launch_ref)
-        return {
-            "ok": True,
-            "operation": "aichestra.abort_launch",
-            "launch_ref": launch_ref,
-            "result": {"skipped": False, "ok": True, "handle": launch_ref},
-        }
 
-    monkeypatch.setattr(ls, "abort_launch_by_ref", fake_abort)
-    code = main(["abort-launch", "--launch-ref", "term_owned", "--json"])
+def test_abort_launch_unknown_token_never_closes(tmp_path, monkeypatch):
+    from aichestra.cli import main
+
+    closed: list[str] = []
+    monkeypatch.setattr(
+        "aichestra.providers.orca.resolve_orca_binary",
+        lambda: "orca-test",
+    )
+    monkeypatch.setattr(
+        "aichestra.execution.launch_strategies.subprocess.run",
+        _bridge_run("term_foreign", closed),
+    )
+    code = main(
+        [
+            "abort-launch",
+            "--repo-root",
+            str(tmp_path),
+            "--token",
+            "term_some_existing_cursor",
+            "--json",
+        ]
+    )
+    assert code != 0
+    assert closed == []
+
+
+def test_prove_launch_cleanup_lease_closes_stored_handle_only(tmp_path, monkeypatch):
+    """Issued lease closes the stored owned handle, not a caller-supplied one."""
+    from aichestra.cli import main
+    from aichestra.execution.launch_strategies import prove_launch_by_candidate_id
+
+    target = _opencode_target()
+    monkeypatch.setattr(
+        "aichestra.execution.launch_strategies.load_orca_schema",
+        lambda binary=None: _schema(),
+    )
+    launches = discover_launches([target], binary="orca-test")
+    resolved = resolve_targets(
+        DiscoveryFacts(
+            runtimes=(target.runtime,),
+            providers=(target.provider,),
+            models=(target.model,),
+        ),
+        (Compatibility("opencode", "ollama", "qwen"),),
+        known_launches=launches,
+    )[0]
+    closed: list[str] = []
+    monkeypatch.setattr(
+        "aichestra.providers.orca.resolve_orca_binary",
+        lambda: "orca-test",
+    )
+    attestation = prove_launch_by_candidate_id(
+        resolved.id,
+        project_root=tmp_path,
+        repo_root=tmp_path,
+        binary="orca-test",
+        run=_bridge_run("term_owned", closed),
+        targets=(resolved,),
+    )
+    assert attestation["ok"] is True
+    assert closed == []
+    lease = attestation["prepared_launch"]["cleanup"]["lease"]
+    invocation = attestation["prepared_launch"]["cleanup"]["invocation"]["args"]
+    assert invocation[invocation.index("--token") + 1] == lease
+    monkeypatch.setattr(
+        "aichestra.execution.launch_strategies.subprocess.run",
+        _bridge_run("term_owned", closed),
+    )
+    code = main(
+        [
+            "abort-launch",
+            "--repo-root",
+            str(tmp_path),
+            "--token",
+            lease,
+            "--json",
+        ]
+    )
     assert code == 0
-    assert closes == ["term_owned"]
-    assert "abort-launch" in build_parser().format_help()
+    assert closed == ["term_owned"]
+    # Consumed lease cannot close again.
+    code = main(
+        [
+            "abort-launch",
+            "--repo-root",
+            str(tmp_path),
+            "--token",
+            lease,
+            "--json",
+        ]
+    )
+    assert code != 0
+    assert closed == ["term_owned"]
+
+
+def test_abort_launch_after_dispatch_does_not_close(tmp_path, monkeypatch):
+    from aichestra.cli import main
+    from aichestra.execution.cleanup_leases import consume_cleanup_lease
+    from aichestra.execution.launch_strategies import prove_launch_by_candidate_id
+
+    target = _opencode_target()
+    monkeypatch.setattr(
+        "aichestra.execution.launch_strategies.load_orca_schema",
+        lambda binary=None: _schema(),
+    )
+    launches = discover_launches([target], binary="orca-test")
+    resolved = resolve_targets(
+        DiscoveryFacts(
+            runtimes=(target.runtime,),
+            providers=(target.provider,),
+            models=(target.model,),
+        ),
+        (Compatibility("opencode", "ollama", "qwen"),),
+        known_launches=launches,
+    )[0]
+    closed: list[str] = []
+    monkeypatch.setattr(
+        "aichestra.providers.orca.resolve_orca_binary",
+        lambda: "orca-test",
+    )
+    attestation = prove_launch_by_candidate_id(
+        resolved.id,
+        project_root=tmp_path,
+        repo_root=tmp_path,
+        binary="orca-test",
+        run=_bridge_run("term_worker", closed),
+        targets=(resolved,),
+    )
+    lease = attestation["prepared_launch"]["cleanup"]["lease"]
+    assert consume_cleanup_lease(lease, repo_root=tmp_path) == "term_worker"
+    monkeypatch.setattr(
+        "aichestra.execution.launch_strategies.subprocess.run",
+        _bridge_run("term_worker", closed),
+    )
+    code = main(
+        ["abort-launch", "--repo-root", str(tmp_path), "--token", lease, "--json"]
+    )
+    assert code != 0
+    assert closed == []
+
+
+def test_existing_terminal_prepared_launch_has_no_cleanup_lease(tmp_path):
+    from aichestra.execution.cleanup_leases import lease_dir
+    from aichestra.execution.launch_strategies import (
+        PreparedLaunch,
+        _coordinator_prepared_launch,
+    )
+
+    payload = _coordinator_prepared_launch(
+        PreparedLaunch(
+            arguments=["--terminal", "term_live"],
+            terminal_handle="term_live",
+            owns_terminal=False,
+        ),
+        repo_root=tmp_path,
+    )
+    assert payload["owns_terminal"] is False
+    assert "cleanup" not in payload
+    stored = lease_dir(tmp_path)
+    assert not stored.exists() or not any(stored.iterdir())

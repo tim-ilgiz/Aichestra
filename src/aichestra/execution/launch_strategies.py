@@ -147,44 +147,61 @@ def abort_prepared(prepared: PreparedLaunch, ctx: LaunchContext) -> dict[str, An
         return {"skipped": False, "handle": handle, "ok": False, "error": str(exc)}
 
 
-def abort_launch_by_ref(
-    launch_ref: str,
+def abort_launch_by_token(
+    token: str,
     *,
     binary: str | None = None,
     run: Callable[..., Any] | None = None,
+    repo_root: str | os.PathLike[str] | None = None,
 ) -> dict[str, Any]:
     """Owner-side cleanup for a prove-launch bridge that never reached Dispatch.
 
-    ``launch_ref`` is the opaque terminal handle returned as
-    ``prepared_launch.terminal_handle``. Safe only for Aichestra-owned bridges
-    (``owns_terminal=true``); callers must not pass foreign terminals.
+    ``token`` is an opaque cleanup lease issued by Aichestra after an owned
+    bridge proof. Unknown, foreign, or already-consumed leases fail closed
+    without calling ``terminal close``.
     """
-    from aichestra.providers.orca import resolve_orca_binary
+    from pathlib import Path
 
+    from aichestra.providers.orca import resolve_orca_binary
+    from aichestra.repo import resolve_aichestra_config_root
+
+    from .cleanup_leases import consume_cleanup_lease
     from .serialize import LAUNCH_ABORT_OPERATION
 
-    handle = str(launch_ref or "").strip()
+    lease = str(token or "").strip()
+    if not lease:
+        return {
+            "ok": False,
+            "operation": LAUNCH_ABORT_OPERATION,
+            "error": "cleanup lease is required",
+        }
+    try:
+        root = resolve_aichestra_config_root(
+            repo_root=Path(repo_root).resolve() if repo_root else None,
+        )
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "operation": LAUNCH_ABORT_OPERATION,
+            "error": str(exc),
+        }
+    handle = consume_cleanup_lease(lease, repo_root=root)
     if not handle:
         return {
             "ok": False,
             "operation": LAUNCH_ABORT_OPERATION,
-            "error": "launch_ref is required",
+            "error": "unknown or already consumed cleanup lease",
         }
     orca_binary = (binary or "").strip() or resolve_orca_binary() or ""
     if not orca_binary:
         return {
             "ok": False,
             "operation": LAUNCH_ABORT_OPERATION,
-            "launch_ref": handle,
             "error": "Orca binary required for abort-launch",
+            "result": {"skipped": False, "handle": handle, "ok": False},
         }
-    prepared = PreparedLaunch(
-        arguments=[],
-        terminal_handle=handle,
-        owns_terminal=True,
-    )
     result = abort_prepared(
-        prepared,
+        PreparedLaunch(arguments=[], terminal_handle=handle, owns_terminal=True),
         LaunchContext(
             binary=orca_binary,
             worktree="current",
@@ -194,7 +211,6 @@ def abort_launch_by_ref(
     return {
         "ok": bool(result.get("ok")) and not result.get("skipped"),
         "operation": LAUNCH_ABORT_OPERATION,
-        "launch_ref": handle,
         "result": result,
     }
 
@@ -1211,26 +1227,30 @@ def prove_launch_by_candidate_id(
             "error": f"project_root is not a directory: {root}",
         })
 
+    try:
+        aichestra_root = resolve_aichestra_config_root(
+            repo_root=Path(repo_root).resolve() if repo_root else None,
+            project_root=root,
+        )
+    except ValueError as exc:
+        aichestra_root = None
+        config_root_error = str(exc)
+    else:
+        config_root_error = None
+
     if targets is None:
-        try:
-            cfg = (
-                dict(config)
-                if config is not None
-                else resolve_config(
-                    repo_root=resolve_aichestra_config_root(
-                        repo_root=Path(repo_root).resolve() if repo_root else None,
-                        project_root=root,
-                    ),
-                    project_root=root,
-                )
-            )
-        except ValueError as exc:
+        if aichestra_root is None:
             return _payload({
                 "ok": False,
                 "operation": LAUNCH_PROOF_OPERATION,
                 "candidate_id": cid,
-                "error": str(exc),
+                "error": config_root_error,
             })
+        cfg = (
+            dict(config)
+            if config is not None
+            else resolve_config(repo_root=aichestra_root, project_root=root)
+        )
         targets, _policy, _facts = resolve_mode_c_execution(cfg)
 
     match = next((t for t in targets if t.id == cid), None)
@@ -1279,17 +1299,37 @@ def prove_launch_by_candidate_id(
             "error": str(exc),
         })
 
+    try:
+        prepared_payload = _coordinator_prepared_launch(
+            prepared, repo_root=aichestra_root
+        )
+    except ValueError as exc:
+        abort_prepared(prepared, launch_ctx)
+        return _payload({
+            "ok": False,
+            "operation": LAUNCH_PROOF_OPERATION,
+            "candidate_id": cid,
+            "error": str(exc),
+        })
+
     return _payload({
         "ok": True,
         "operation": LAUNCH_PROOF_OPERATION,
         "candidate_id": cid,
         "execution_target": serialize_execution_target(proven),
-        "prepared_launch": _coordinator_prepared_launch(prepared),
+        "prepared_launch": prepared_payload,
     })
 
 
-def _coordinator_prepared_launch(prepared: PreparedLaunch) -> dict[str, Any]:
+def _coordinator_prepared_launch(
+    prepared: PreparedLaunch,
+    *,
+    repo_root: os.PathLike[str] | str | None = None,
+) -> dict[str, Any]:
     """Attestation for coordinator: handle + argv fragment; no DIY command/env."""
+    from pathlib import Path
+
+    from .cleanup_leases import issue_cleanup_lease
     from .serialize import LAUNCH_ABORT_OPERATION, abort_launch_invocation
 
     evidence = {
@@ -1311,9 +1351,16 @@ def _coordinator_prepared_launch(prepared: PreparedLaunch) -> dict[str, Any]:
         "owns_terminal": prepared.owns_terminal,
     }
     if prepared.owns_terminal and isinstance(handle, str) and handle.strip():
+        if repo_root is None:
+            raise ValueError(
+                "Aichestra config root required to issue an owned-bridge cleanup lease"
+            )
+        root = Path(repo_root).resolve()
+        lease = issue_cleanup_lease(handle.strip(), repo_root=root)
         payload["cleanup"] = {
             "operation": LAUNCH_ABORT_OPERATION,
             "required_if": "owns_terminal and not dispatched",
-            "invocation": abort_launch_invocation(launch_ref=handle.strip()),
+            "lease": lease,
+            "invocation": abort_launch_invocation(token=lease, repo_root=str(root)),
         }
     return sanitize_mapping(payload)
