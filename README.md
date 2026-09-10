@@ -176,22 +176,29 @@ coordinator launch must return the matching `launch.effective.agent`; missing
 or mismatched binding receipts fail closed. Runtime-specific launch adapters
 can be registered without adding workflow product branches.
 
-Explicit provider/model/endpoint combinations become runnable only through a
-proven launch adapter. Native ``--agent`` alone does not prove a backend
-binding; native ``--model`` covers opaque runtime model preferences when Orca
-returns matching ``launch.effective.model``. Backend bindings use
-``orca-terminal-bridge`` (create → wait → read proof → ``worker-start
---terminal``) or an attested ``orca-existing-terminal`` handle. Prompt text,
-discovery alone, and Aichestra-process environment variables are not proof.
-Local-only live acceptance remains NOT VALIDATED until T168.
+Explicit provider/model/endpoint combinations become dispatchable through a
+launch adapter. Native ``--agent`` alone does not prove a backend binding;
+native ``--model`` covers opaque runtime model preferences when Orca returns
+matching ``launch.effective.model``. Backend bindings use
+``orca-terminal-bridge`` (create → wait → **live** ``terminal read`` process
+proof → ``worker-start --terminal``) or an attested ``orca-existing-terminal``
+handle (``ORCA_WORKER_TERMINAL_HANDLE`` / context). Schema support for a bridge
+marks a target **provisionable**, not **runnable**; ``runnable`` requires a
+proven process/contract binding. Create-receipt ``startupCommand`` echoes are
+not proof. Prompt text, discovery alone, and Aichestra-process environment
+variables are not proof. Bridge-owned terminals are closed on prepare/dispatch
+failure before attach; foreign existing terminals are never closed. After an
+exact ``dispatch_id`` exists, failure paths attempt bounded worker-release
+cleanup. Local-only live acceptance remains NOT VALIDATED until T168.
 
 Worker release distinguishes `released`, `already_released`, `release_pending`
 and `release_unknown`. Recovery executes only exact-dispatch allowlisted
 commands from Orca's receipt, bounded to three recovery attempts, and inspects
 the exact worker again. Automatic recovery can settle a pending release without
-a retry. Unresolved Run resources prevent success; broad terminal close is
-never used. Failed starts retain their diagnostic and attempt Orca-owned
-cleanup only when the receipt proves the worker is failed.
+a retry. Unresolved Run resources prevent success; broad never close is
+never used. Failed starts release an exact ``dispatch_id`` when present, or
+close only a bridge-owned terminal handle created by this prepare() when
+worker-start never produced a dispatch.
 
 An ordinary headless shell without Orca terminal authority is unsupported and
 fails before Run creation. Do not invent or reuse a stale terminal handle.

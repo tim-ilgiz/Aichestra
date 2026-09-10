@@ -121,6 +121,7 @@ def test_arbitrary_runtime_provider_and_exact_launch_binding():
         "coder",
         "http://localhost:1234",
         LaunchStrategy.ORCA_NATIVE,
+        proven=True,
     )
     assert resolve_targets(facts, BINDINGS, known_launches=(launch,))[0].runnable
     wrong_endpoint = replace(launch, endpoint="http://localhost:9999")
@@ -150,6 +151,7 @@ def test_stable_target_identity_ignores_endpoint_change():
         "coder",
         old.endpoint,
         LaunchStrategy.ORCA_NATIVE,
+        proven=True,
     )
     assert resolve_targets(facts, BINDINGS, known_launches=(old_proof,))[0].runnable
     assert not resolve_targets(

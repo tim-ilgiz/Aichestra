@@ -144,8 +144,10 @@ class Compatibility:
 class LaunchCapability:
     """Trusted adapter input for an exact binding, NOT discovery evidence.
 
-    The installed Orca contract establishes the launch path. Production launch
-    adapters must also validate its effective binding receipt on every dispatch.
+    ``proven=True`` means discovery already attested a process/contract binding
+    sufficient to advertise ``ExecutionTarget.runnable``. Schema support for a
+    terminal bridge alone is provisionable (``proven=False``): prepare() must
+    still prove the live Orca-supervised process before attach.
     """
 
     runtime: str
@@ -153,6 +155,7 @@ class LaunchCapability:
     model: str | None = None
     endpoint: str | None = None
     strategy: LaunchStrategy = LaunchStrategy.UNSUPPORTED
+    proven: bool = False
 
     def binding_key(self) -> LaunchBindingKey:
         return LaunchBindingKey(
@@ -178,6 +181,7 @@ class ExecutionTarget:
     allowed: bool
     preferred: bool
     launch_strategy: LaunchStrategy = LaunchStrategy.UNSUPPORTED
+    launch_proven: bool = False
     reasons: tuple[str, ...] = ()
 
     @property
@@ -202,9 +206,39 @@ class ExecutionTarget:
         return self.launch_strategy != LaunchStrategy.UNSUPPORTED
 
     @property
+    def provisionable(self) -> bool:
+        """Schema-capable bridge path; process binding is proven only in prepare()."""
+        return (
+            all(
+                (
+                    self.enabled,
+                    self.available,
+                    self.capable,
+                    self.allowed,
+                    self.launchable,
+                )
+            )
+            and not self.launch_proven
+            and self.launch_strategy == LaunchStrategy.ORCA_TERMINAL_BRIDGE
+        )
+
+    @property
     def runnable(self) -> bool:
-        return all((self.enabled, self.available, self.capable,
-                    self.allowed, self.launchable))
+        return all(
+            (
+                self.enabled,
+                self.available,
+                self.capable,
+                self.allowed,
+                self.launchable,
+                self.launch_proven,
+            )
+        )
+
+    @property
+    def dispatchable(self) -> bool:
+        """Selectable for bootstrap/dispatch attempt (proven or provisionable bridge)."""
+        return self.runnable or self.provisionable
 
 
 @dataclass(frozen=True)

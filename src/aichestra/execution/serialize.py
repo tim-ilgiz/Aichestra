@@ -124,7 +124,9 @@ def serialize_execution_target(target: ExecutionTarget) -> dict[str, Any]:
         "allowed": target.allowed,
         "preferred": target.preferred,
         "launch_strategy": target.launch_strategy.value,
+        "launch_proven": target.launch_proven,
         "runnable": target.runnable,
+        "provisionable": target.provisionable,
         "reasons": list(target.reasons),
     }
 
@@ -212,11 +214,14 @@ def resolve_mode_c_execution(
     runtime_binaries: Mapping[str, tuple[str, ...]] | None = None,
     provider_registry: ProviderProbeRegistry | None = None,
     provider_probes: list[ModelProviderProbe] | None = None,
+    terminal_handle: str | None = None,
 ) -> tuple[tuple[ExecutionTarget, ...], ExecutionPolicy, DiscoveryFacts]:
     """Production Mode C pipeline: facts → bindings → policy → targets.
 
     Production probes the installed Orca launch contract. Tests may inject
     exact adapter capabilities; unproven bindings remain unsupported.
+    An explicit live ``terminal_handle`` (or ``ORCA_WORKER_TERMINAL_HANDLE``)
+    may attest ``orca-existing-terminal`` during discovery.
     """
     facts = discover_execution_facts(
         config,
@@ -229,7 +234,10 @@ def resolve_mode_c_execution(
     policy = build_execution_policy(config)
     if known_launches is None:
         from .launch_strategies import discover_launches
-        known_launches = discover_launches(resolve_targets(facts, bindings, policy))
+        known_launches = discover_launches(
+            resolve_targets(facts, bindings, policy),
+            terminal_handle=terminal_handle,
+        )
     targets = resolve_targets(
         facts,
         bindings,

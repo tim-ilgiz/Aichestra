@@ -138,6 +138,7 @@ def resolve_targets(
             launch_strategy=(
                 launch.strategy if launch else LaunchStrategy.UNSUPPORTED
             ),
+            launch_proven=bool(launch.proven) if launch else False,
             reasons=tuple(reasons),
         )
     return list(targets.values())

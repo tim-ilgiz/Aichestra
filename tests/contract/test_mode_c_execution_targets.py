@@ -55,6 +55,7 @@ def _target(
     allowed: bool = True,
     preferred: bool = False,
     launch_strategy: LaunchStrategy = LaunchStrategy.UNSUPPORTED,
+    launch_proven: bool | None = None,
     caps: frozenset[str] = frozenset({"code_edit", "shell"}),
     reasons: tuple[str, ...] = (),
 ) -> ExecutionTarget:
@@ -81,6 +82,11 @@ def _target(
         if model and provider
         else None
     )
+    proven = (
+        launch_proven
+        if launch_proven is not None
+        else launch_strategy == LaunchStrategy.ORCA_NATIVE
+    )
     return ExecutionTarget(
         id=ExecutionTargetKey(runtime, provider, model).target_id(),
         runtime=rt,
@@ -95,6 +101,7 @@ def _target(
         allowed=allowed,
         preferred=preferred,
         launch_strategy=launch_strategy,
+        launch_proven=proven,
         reasons=reasons,
     )
 
@@ -165,7 +172,9 @@ def test_arbitrary_fake_runtime_serializes_without_product_branches() -> None:
         "allowed": True,
         "preferred": False,
         "launch_strategy": "unsupported",
+        "launch_proven": False,
         "runnable": False,
+        "provisionable": False,
         "reasons": [],
     }
 

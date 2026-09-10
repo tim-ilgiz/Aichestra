@@ -983,7 +983,9 @@ class ModeCRunController:
             (self.state.metadata.get("speckit_path") or {}).get("steps") or ()
         )
         serialized_targets = tuple(
-            serialize_execution_target(t) for t in self.bindings.execution_targets if t.runnable
+            serialize_execution_target(t)
+            for t in self.bindings.execution_targets
+            if t.runnable or t.provisionable
         )
         serialized_policy = serialize_execution_policy(self.bindings.execution_policy)
         return ModeCPolicyPackage(

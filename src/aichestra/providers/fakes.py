@@ -223,4 +223,4 @@ def fake_execution_targets(statuses, policy):
                      for s in statuses if s.kind.value in {"codex", "cursor"})
     return tuple(resolve_targets(DiscoveryFacts(runtimes=runtimes),
         tuple(Compatibility(r.id) for r in runtimes), policy,
-        tuple(LaunchCapability(r.id, strategy=LaunchStrategy.ORCA_NATIVE) for r in runtimes)))
+        tuple(LaunchCapability(r.id, strategy=LaunchStrategy.ORCA_NATIVE, proven=True) for r in runtimes)))

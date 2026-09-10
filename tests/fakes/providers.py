@@ -345,4 +345,4 @@ def fake_execution_targets(runtime="codex"):
     from aichestra.execution.domain import AgentRuntime, Compatibility, DiscoveryFacts, LaunchCapability, LaunchStrategy
     from aichestra.execution.targets import resolve_targets
     return tuple(resolve_targets(DiscoveryFacts(runtimes=(AgentRuntime(runtime, available=True),)),
-        (Compatibility(runtime),), known_launches=(LaunchCapability(runtime, strategy=LaunchStrategy.ORCA_NATIVE),)))
+        (Compatibility(runtime),), known_launches=(LaunchCapability(runtime, strategy=LaunchStrategy.ORCA_NATIVE, proven=True),)))

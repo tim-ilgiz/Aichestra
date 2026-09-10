@@ -862,27 +862,31 @@ class OrcaProvider(ProviderAdapter):
         ]
         launch_adapter = None
         launch_evidence: dict[str, Any] = {}
+        prepared = None
+        launch_ctx = None
         if request.execution_target is not None:
             from aichestra.execution.launch_strategies import (
                 LaunchContext,
+                abort_prepared,
                 adapter_for,
             )
 
             try:
                 launch_adapter = adapter_for(request.execution_target)
+                launch_ctx = LaunchContext(
+                    binary=binary,
+                    worktree=worktree,
+                    terminal_handle=str(
+                        request.context.get("terminal_handle")
+                        or os.environ.get("ORCA_WORKER_TERMINAL_HANDLE")
+                        or ""
+                    ).strip()
+                    or None,
+                    run=subprocess.run,
+                )
                 prepared = launch_adapter.prepare(
                     request.execution_target,
-                    LaunchContext(
-                        binary=binary,
-                        worktree=worktree,
-                        terminal_handle=str(
-                            request.context.get("terminal_handle")
-                            or os.environ.get("ORCA_WORKER_TERMINAL_HANDLE")
-                            or ""
-                        ).strip()
-                        or None,
-                        run=subprocess.run,
-                    ),
+                    launch_ctx,
                 )
             except ValueError as exc:
                 return ProviderTaskResult(
@@ -938,11 +942,16 @@ class OrcaProvider(ProviderAdapter):
             detail = data.get("lastError") or worker_result.detail or "Missing coordinator dispatch id"
             failed = self._failed_dispatch(replace(worker_result, ok=False,
                 failure=FailureClass.ERROR, detail=detail), steps, session.session_id)
-            # A failed start may leave a settled worker resource. Orca release
-            # itself enforces ownership; never close the terminal ourselves.
-            if dispatch_id and data.get("state") == "failed":
+            cleanup_meta: dict[str, Any] = {}
+            # Exact dispatch cleanup when Orca already allocated a worker resource.
+            if dispatch_id:
                 _, cleanup = self._release_worker(binary, session, request, dispatch_id, run_id)
-                failed = replace(failed, metadata={**failed.metadata, "cleanup": cleanup})
+                cleanup_meta["cleanup"] = cleanup
+            elif prepared is not None and launch_ctx is not None and prepared.owns_terminal:
+                # Bridge created a terminal but worker-start never bound a dispatch.
+                cleanup_meta["bridge_terminal_cleanup"] = abort_prepared(prepared, launch_ctx)
+            if cleanup_meta:
+                failed = replace(failed, metadata={**failed.metadata, **cleanup_meta})
             return failed
 
         if request.execution_target is not None and launch_adapter is not None and not launch_adapter.confirms(
@@ -1087,6 +1096,8 @@ class OrcaProvider(ProviderAdapter):
             "orca_attach_flags": len(attach_flags) // 2,
         }
         if not wait_result.ok:
+            _, cleanup = self._release_worker(binary, session, request, dispatch_id, run_id)
+            meta["cleanup"] = cleanup
             return ProviderTaskResult(
                 ok=False,
                 output=wait_result.output,
@@ -1103,6 +1114,9 @@ class OrcaProvider(ProviderAdapter):
         if request.role == "mode_c_handoff" and not gate_answered:
             done_ok, done_detail = False, "Coordinator omitted maintenance gate handshake"
         if not done_ok:
+            if "cleanup" not in meta:
+                _, cleanup = self._release_worker(binary, session, request, dispatch_id, run_id)
+                meta["cleanup"] = cleanup
             return ProviderTaskResult(
                 ok=False,
                 output=wait_result.output or worker_result.output,

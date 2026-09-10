@@ -8,6 +8,7 @@ Never treat prompt text, ambient discovery, or Aichestra-process env as proof.
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import subprocess
 from dataclasses import dataclass, field
@@ -72,6 +73,7 @@ class PreparedLaunch:
     arguments: list[str]
     terminal_handle: str | None = None
     evidence: Mapping[str, Any] = field(default_factory=dict)
+    owns_terminal: bool = False
 
 
 class LaunchAdapter(Protocol):
@@ -82,6 +84,35 @@ class LaunchAdapter(Protocol):
     def arguments(self, target: ExecutionTarget) -> list[str]: ...
     def confirms(self, target: ExecutionTarget, receipt: dict) -> bool: ...
     def prepare(self, target: ExecutionTarget, ctx: LaunchContext) -> PreparedLaunch: ...
+
+
+def abort_prepared(prepared: PreparedLaunch, ctx: LaunchContext) -> dict[str, Any]:
+    """Close only a bridge-owned exact terminal handle; never a foreign terminal."""
+    handle = (prepared.terminal_handle or "").strip()
+    if not prepared.owns_terminal or not handle or ctx.run is None:
+        return {"skipped": True, "reason": "not_owned"}
+    try:
+        result = ctx.run(
+            [ctx.binary, "terminal", "close", "--terminal", handle, "--json"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        return {
+            "skipped": False,
+            "handle": handle,
+            "ok": getattr(result, "returncode", 1) in (0, None),
+            "returncode": getattr(result, "returncode", None),
+        }
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"skipped": False, "handle": handle, "ok": False, "error": str(exc)}
+
+
+def _close_owned_terminal(ctx: LaunchContext, handle: str) -> None:
+    abort_prepared(
+        PreparedLaunch(arguments=[], terminal_handle=handle, owns_terminal=True),
+        ctx,
+    )
 
 
 @dataclass(frozen=True)
@@ -219,13 +250,15 @@ class ExistingTerminalLaunch:
             text=True,
             timeout=30,
         )
-        evidence = {**_merge_terminal_evidence(show, read), "handle": handle}
+        evidence = {**_merge_process_evidence(show, read), "handle": handle}
         if not _terminal_evidence_matches(target, evidence):
             raise ValueError("Existing terminal does not prove the requested binding")
+        # Never owns a foreign terminal — cleanup must not close this handle.
         return PreparedLaunch(
             arguments=["--terminal", handle],
             terminal_handle=handle,
             evidence=evidence,
+            owns_terminal=False,
         )
 
 
@@ -277,66 +310,75 @@ class TerminalBridgeLaunch:
         bridge = bridge_command_for(target)
         if bridge is None:
             raise ValueError("No terminal-bridge command for this ExecutionTarget")
-        create = ctx.run(
-            [
-                ctx.binary,
-                "terminal",
-                "create",
-                "--worktree",
-                ctx.worktree,
-                "--title",
-                f"aichestra-{target.runtime.id}",
-                "--command",
-                bridge.command,
-                "--json",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        create_payload = _json_payload(create)
-        handle = _dig_handle(create_payload)
-        if not handle:
-            raise ValueError("terminal create did not return a handle")
-        wait = ctx.run(
-            [
-                ctx.binary,
-                "terminal",
-                "wait",
-                "--terminal",
-                handle,
-                "--for",
-                "tui-idle",
-                "--timeout-ms",
-                "120000",
-                "--json",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=130,
-        )
-        if getattr(wait, "returncode", 1) not in (0, None):
-            # Still attempt read-based proof; some agents never report tui-idle.
-            pass
-        read = ctx.run(
-            [ctx.binary, "terminal", "read", "--terminal", handle, "--json"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        evidence = {
-            **_merge_terminal_evidence(create, read),
-            "handle": handle,
-            "bridge_command": bridge.command,
-            "proof_tokens": list(bridge.proof_tokens),
-        }
-        if not _terminal_evidence_matches(target, evidence):
-            raise ValueError("Terminal bridge did not prove the requested binding")
-        return PreparedLaunch(
-            arguments=["--terminal", handle],
-            terminal_handle=handle,
-            evidence=evidence,
-        )
+        handle: str | None = None
+        try:
+            create = ctx.run(
+                [
+                    ctx.binary,
+                    "terminal",
+                    "create",
+                    "--worktree",
+                    ctx.worktree,
+                    "--title",
+                    f"aichestra-{target.runtime.id}",
+                    "--command",
+                    bridge.command,
+                    "--json",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            create_payload = _json_payload(create)
+            handle = _dig_handle(create_payload)
+            if not handle:
+                raise ValueError("terminal create did not return a handle")
+            wait = ctx.run(
+                [
+                    ctx.binary,
+                    "terminal",
+                    "wait",
+                    "--terminal",
+                    handle,
+                    "--for",
+                    "tui-idle",
+                    "--timeout-ms",
+                    "120000",
+                    "--json",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=130,
+            )
+            if getattr(wait, "returncode", 1) not in (0, None):
+                # Still attempt read-based proof; some agents never report tui-idle.
+                pass
+            read = ctx.run(
+                [ctx.binary, "terminal", "read", "--terminal", handle, "--json"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            # Process proof must come from live read/show observations — never from
+            # the terminal-create receipt's startupCommand echo of our own argv.
+            evidence = {
+                **_merge_process_evidence(read),
+                "handle": handle,
+                "bridge_command": bridge.command,
+                "proof_tokens": list(bridge.proof_tokens),
+            }
+            if not _terminal_evidence_matches(target, evidence):
+                raise ValueError("Terminal bridge did not prove the requested binding")
+            return PreparedLaunch(
+                arguments=["--terminal", handle],
+                terminal_handle=handle,
+                evidence=evidence,
+                owns_terminal=True,
+            )
+        except Exception:
+            if handle:
+                _close_owned_terminal(ctx, handle)
+            raise
 
 
 @dataclass(frozen=True)
@@ -434,7 +476,12 @@ def _dig_handle(payload: Mapping[str, Any]) -> str | None:
     return handle.strip() if isinstance(handle, str) and handle.strip() else None
 
 
-def _merge_terminal_evidence(*results: Any) -> dict[str, Any]:
+def _merge_process_evidence(*results: Any) -> dict[str, Any]:
+    """Collect live process observations only.
+
+    Ignores ``command`` / ``startupCommand`` so a create receipt that merely
+    echoes Aichestra's requested argv cannot satisfy binding proof.
+    """
     text_parts: list[str] = []
     handle = None
     for result in results:
@@ -446,13 +493,14 @@ def _merge_terminal_evidence(*results: Any) -> dict[str, Any]:
         terminal = data.get("terminal", data)
         if not isinstance(terminal, dict):
             continue
-        for key in ("preview", "title", "command", "startupCommand"):
-            value = terminal.get(key)
-            if isinstance(value, str):
-                text_parts.append(value)
+        preview = terminal.get("preview")
+        if isinstance(preview, str):
+            text_parts.append(preview)
         tail = terminal.get("tail")
         if isinstance(tail, list):
             text_parts.extend(str(item) for item in tail)
+        elif isinstance(tail, str):
+            text_parts.append(tail)
     return {"handle": handle, "text": "\n".join(text_parts)}
 
 
@@ -476,11 +524,16 @@ def _terminal_evidence_matches(target: ExecutionTarget, evidence: Mapping[str, A
 
 # Product support is adapter data, never workflow routing.
 _NATIVE_RUNTIMES = ("codex", "cursor", "claude", "gemini", "opencode")
-LAUNCH_ADAPTERS: list[LaunchAdapter] = [
+_NATIVE_ADAPTERS: list[LaunchAdapter] = [
     *[NativeLaunch(name) for name in _NATIVE_RUNTIMES],
     *[NativeModelLaunch(name) for name in ("codex", "cursor", "claude")],
-    ExistingTerminalLaunch(),
-    TerminalBridgeLaunch(),
+]
+_EXISTING_TERMINAL = ExistingTerminalLaunch()
+_TERMINAL_BRIDGE = TerminalBridgeLaunch()
+LAUNCH_ADAPTERS: list[LaunchAdapter] = [
+    *_NATIVE_ADAPTERS,
+    _EXISTING_TERMINAL,
+    _TERMINAL_BRIDGE,
 ]
 
 
@@ -504,25 +557,112 @@ def load_orca_schema(binary: str | None = None) -> dict[str, Any]:
     return schema if isinstance(schema, dict) and schema.get("schemaVersion") == 1 else {}
 
 
-def discover_launches(targets, *, binary: str | None = None) -> tuple[LaunchCapability, ...]:
+def _attest_existing_terminal(
+    target: ExecutionTarget,
+    *,
+    binary: str,
+    handle: str,
+    run: Callable[..., Any],
+    schema: Mapping[str, Any],
+) -> LaunchCapability | None:
+    """Produce a proven existing-terminal capability from a live attested handle."""
+    if not _EXISTING_TERMINAL.accepts(target):
+        return None
+    show_cmd = _command(schema, "terminal", "show")
+    read_cmd = _command(schema, "terminal", "read")
+    start = _command(schema, "orchestration", "worker-start")
+    if not (
+        show_cmd
+        and read_cmd
+        and {"task", "worktree", "terminal"} <= _flags(start)
+    ):
+        return None
+    try:
+        _EXISTING_TERMINAL.prepare(
+            target,
+            LaunchContext(binary=binary, terminal_handle=handle, run=run),
+        )
+    except ValueError:
+        return None
+    key = target.launch_binding_key
+    return LaunchCapability(
+        *key.as_tuple(),
+        strategy=LaunchStrategy.ORCA_EXISTING_TERMINAL,
+        proven=True,
+    )
+
+
+def discover_launches(
+    targets,
+    *,
+    binary: str | None = None,
+    terminal_handle: str | None = None,
+    run: Callable[..., Any] | None = None,
+) -> tuple[LaunchCapability, ...]:
+    """Discover launch capabilities.
+
+    Native schema support → proven runnable.
+    Explicit live terminal handle → attested existing-terminal when process matches.
+    Terminal-bridge schema + builder → provisionable only (``proven=False``).
+    """
     schema = load_orca_schema(binary)
     if not schema:
         return ()
+    resolved_binary = binary
+    if resolved_binary is None:
+        from aichestra.providers.orca import resolve_orca_binary
+
+        resolved_binary = resolve_orca_binary()
+    handle = (terminal_handle or os.environ.get("ORCA_WORKER_TERMINAL_HANDLE") or "").strip()
+    runner = run or subprocess.run
     launches = []
     for target in targets:
         if not all((target.enabled, target.available, target.capable, target.allowed)):
             continue
+        key = target.launch_binding_key
+        chosen: LaunchCapability | None = None
         for adapter in LAUNCH_ADAPTERS:
+            if adapter.strategy in {
+                LaunchStrategy.ORCA_EXISTING_TERMINAL,
+                LaunchStrategy.ORCA_TERMINAL_BRIDGE,
+            }:
+                continue
             if adapter.prove(target, schema):
-                key = target.launch_binding_key
-                launches.append(LaunchCapability(*key.as_tuple(), strategy=adapter.strategy))
+                chosen = LaunchCapability(
+                    *key.as_tuple(),
+                    strategy=adapter.strategy,
+                    proven=True,
+                )
                 break
+        if chosen is None and handle and resolved_binary:
+            chosen = _attest_existing_terminal(
+                target,
+                binary=resolved_binary,
+                handle=handle,
+                run=runner,
+                schema=schema,
+            )
+        if chosen is None:
+            for adapter in LAUNCH_ADAPTERS:
+                if (
+                    adapter.strategy is LaunchStrategy.ORCA_TERMINAL_BRIDGE
+                    and adapter.prove(target, schema)
+                ):
+                    # Schema+builder prove only that a bridge attempt is possible.
+                    chosen = LaunchCapability(
+                        *key.as_tuple(),
+                        strategy=LaunchStrategy.ORCA_TERMINAL_BRIDGE,
+                        proven=False,
+                    )
+                    break
+        if chosen is not None:
+            launches.append(chosen)
     return tuple(launches)
 
 
 def adapter_for(target: ExecutionTarget) -> LaunchAdapter:
-    if not target.runnable:
-        raise ValueError("No runnable bootstrap ExecutionTarget")
+    if not target.dispatchable:
+        raise ValueError("No dispatchable bootstrap ExecutionTarget")
     for adapter in LAUNCH_ADAPTERS:
         if adapter.strategy == target.launch_strategy and adapter.accepts(target):
             return adapter
@@ -530,13 +670,15 @@ def adapter_for(target: ExecutionTarget) -> LaunchAdapter:
 
 
 def select_bootstrap(targets) -> ExecutionTarget | None:
-    """Select one bootstrap only; the coordinator selects every inner worker."""
+    """Select one bootstrap only; the coordinator selects every inner worker.
+
+    Prefer proven runnable targets. A provisionable terminal-bridge target may be
+    selected only when nothing proven is available; prepare() remains the
+    process-binding gate before worker-start.
+    """
+    proven = [t for t in targets if t.runnable]
+    candidates = proven or [t for t in targets if t.provisionable]
     return next(
-        iter(
-            sorted(
-                (t for t in targets if t.runnable),
-                key=lambda t: (not t.preferred, t.id),
-            )
-        ),
+        iter(sorted(candidates, key=lambda t: (not t.preferred, t.id))),
         None,
     )
