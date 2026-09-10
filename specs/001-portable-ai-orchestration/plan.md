@@ -4,11 +4,14 @@
 
 **Input**: Feature specification from `/specs/001-portable-ai-orchestration/spec.md`
 
-**Status**: Architecture source of truth strengthened (coordinator under Orca
-owns the concrete workflow/DAG; Orca owns canonical orchestration
-lifecycle/state; provider/runtime/model agnostic via ExecutionTargets).
-Production Mode C realignment against Phase 24 (T158–T168) is **not** complete
-— docs lead; code must follow.
+**Status**: Architecture source of truth: coordinator under Orca owns the
+concrete workflow/DAG; Orca owns canonical Run/Task/Dispatch/worker/terminal
+lifecycle; Aichestra owns discovery, ExecutionTarget resolution, policy,
+security, and deterministic gates. Phase 24 (T163, T169–T176) and Phase 25
+(T177–T181) are implemented, including in-Run `AICHESTRA_GATE:verification`.
+Fresh GitHub CI on current HEAD (T167) remains open. T168 live smoke is
+accepted for the pre-T180 handshake. T180 in-Run verification live smoke is
+accepted on `run_27377a46c199`.
 
 ## Summary
 
@@ -298,7 +301,10 @@ Aichestra deterministic services may participate at explicit boundaries:
 - maintenance policy
 - verification commands / authoritative exit codes
 
-Their results are fed back to the same Orca Run.
+Their results are fed back to the same Orca Run via coordinator ask/reply
+(`AICHESTRA_GATE:maintenance`, `AICHESTRA_GATE:verification`). The coordinator
+MUST NOT send `worker_done outcome=succeeded` until Aichestra returns the
+authoritative verification result.
 
 Aichestra MUST NOT translate this into a fixed internal sequence such as:
 

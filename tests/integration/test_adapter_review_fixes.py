@@ -310,9 +310,12 @@ def test_real_adapter_coordinator_contract(monkeypatch, tmp_path, provider, loca
             "reply": {}, "worker-release": {"state": "released"}, "worker-list": {"workers": []},
             "task-list": {"tasks": [{"id": "t1", "status": "completed"}]},
         }
-        if command == "check" and not any("reply" in c for c in calls):
+        if command == "check" and sum(1 for c in calls if "reply" in c) == 0:
             return ProviderTaskResult(ok=True, output=json.dumps({"deliveryId": "delivery1", "messages": [{
                 "type": "question", "id": "q1", "dispatchId": "d1", "body": "AICHESTRA_GATE:maintenance"}]}))
+        if command == "check" and sum(1 for c in calls if "reply" in c) == 1:
+            return ProviderTaskResult(ok=True, output=json.dumps({"deliveryId": "delivery2", "messages": [{
+                "type": "question", "id": "q2", "dispatchId": "d1", "body": "AICHESTRA_GATE:verification"}]}))
         return ProviderTaskResult(ok=True, output=json.dumps(receipts[command]))
     monkeypatch.setattr("aichestra.providers.orca.run_cli_task", run)
     policy = {"preferred_lead": "codex", "fallback_lead": "cursor", "local_enabled": local,
@@ -332,8 +335,9 @@ def test_real_adapter_coordinator_contract(monkeypatch, tmp_path, provider, loca
     assert "Bind the supplied existing Run exactly once with run-use" in spec
     assert "NEVER call run-create" in spec
     assert "non-consumingly" in spec
-    assert "replies only to that exact maintenance question" in spec
-    assert "Child workers must not ask the maintenance question" in spec
+    assert "replies only to exact" in spec or "AICHESTRA_GATE" in spec
+    assert "Child workers must not ask" in spec
+    assert "AICHESTRA_GATE:verification" in spec
     assert "worker_done outcome failed" in spec
     assert "arbitrary Tasks/Dispatches" in spec
     assert spec.count("POLICY_PACKAGE:") == 1
@@ -385,7 +389,7 @@ def coordinator_rpc(monkeypatch, tmp_path):
         kind=ProviderKind.ORCA, available=True, binary_path="orca"))
     calls = []
     fault = {}
-    replied = False
+    replied = 0
 
     def run(**kwargs):
         nonlocal replied
@@ -407,16 +411,19 @@ def coordinator_rpc(monkeypatch, tmp_path):
             "task-list": {"tasks": [{"id": "t1", "status": "completed"}]},
         }
         if command == "check":
-            event = ({"type": "worker_done", "id": "done1",
-                      "payload": json.dumps({"dispatchId": "d1", "outcome": "succeeded"})}
-                     if replied or fault.get("omit_gate") else
-                     {"type": "question", "id": "q1", "from_handle": "worker1",
-                      "subject": "AICHESTRA_GATE:maintenance"})
+            event = (
+                {"type": "worker_done", "id": "done1",
+                 "payload": json.dumps({"dispatchId": "d1", "outcome": "succeeded"})}
+                if replied >= 2 or fault.get("omit_gate")
+                or (replied >= 1 and fault.get("omit_verification")) else
+                {"type": "question", "id": f"q{replied + 1}", "from_handle": "worker1",
+                 "subject": "AICHESTRA_GATE:maintenance" if replied == 0 else "AICHESTRA_GATE:verification"}
+            )
             data = {"deliveryId": "delivery1", "messages": [event]}
         else:
             data = receipts[command]
         if command == "reply":
-            replied = True
+            replied += 1
         data = fault.get(command, data)
         if callable(data):
             data = data()
@@ -444,10 +451,23 @@ def test_production_gate_reply_precedes_completion_and_cleanup(coordinator_rpc, 
     answer = json.loads(reply[reply.index("--body") + 1])
     assert answer["run_id"] == "r1"
     assert answer["decision"] == state.decision.to_dict()
+    replies = [c for c in calls if "reply" in c]
+    assert len(replies) == 2
+    verification = json.loads(replies[1][replies[1].index("--body") + 1])
+    assert verification["gate"] == "verification"
+    assert verification["ok"] is True
     assert state.metadata["orca_run_status"]["ok"] is True
     run_create = next(c for c in calls if "run-create" in c)
     objective = run_create[run_create.index("--objective") + 1]
     assert "CONSTRAINT: read-only" not in objective
+
+
+def test_production_mode_c_requires_verification_gate(coordinator_rpc, tmp_path):
+    adapter, _, faults = coordinator_rpc
+    faults["omit_verification"] = True
+    state = _coordinator_controller(adapter, tmp_path).run_all()
+    assert state.failed and state.stopped
+    assert "verification" in json.dumps(state.to_dict()).lower()
 
 
 def test_wait_json_parser_ignores_documented_stderr_keepalives():
@@ -480,7 +500,7 @@ def test_empty_check_polls_reopen_until_maintenance_question(monkeypatch, tmp_pa
     )
     calls: list[list[str]] = []
     check_calls = 0
-    replied = False
+    replied = 0
 
     def run(**kwargs):
         nonlocal check_calls, replied
@@ -489,7 +509,7 @@ def test_empty_check_polls_reopen_until_maintenance_question(monkeypatch, tmp_pa
         command = argv[2] if len(argv) > 2 and argv[1] == "orchestration" else "status"
         if command == "check":
             check_calls += 1
-            if not replied and check_calls < 3:
+            if replied == 0 and check_calls < 3:
                 body = {
                     "result": {
                         "runId": "r1",
@@ -499,7 +519,7 @@ def test_empty_check_polls_reopen_until_maintenance_question(monkeypatch, tmp_pa
                         "timedOut": True,
                     }
                 }
-            elif not replied:
+            elif replied == 0:
                 body = {
                     "result": {
                         "deliveryId": "delivery1",
@@ -509,6 +529,20 @@ def test_empty_check_polls_reopen_until_maintenance_question(monkeypatch, tmp_pa
                                 "id": "q1",
                                 "from_handle": "worker1",
                                 "subject": "AICHESTRA_GATE:maintenance",
+                            }
+                        ],
+                    }
+                }
+            elif replied == 1:
+                body = {
+                    "result": {
+                        "deliveryId": "delivery2",
+                        "messages": [
+                            {
+                                "type": "question",
+                                "id": "q2",
+                                "from_handle": "worker1",
+                                "subject": "AICHESTRA_GATE:verification",
                             }
                         ],
                     }
@@ -527,7 +561,7 @@ def test_empty_check_polls_reopen_until_maintenance_question(monkeypatch, tmp_pa
                 }
             return ProviderTaskResult(ok=True, output=json.dumps(body))
         if command == "reply":
-            replied = True
+            replied += 1
         receipts = {
             "status": {},
             "run-use": {},

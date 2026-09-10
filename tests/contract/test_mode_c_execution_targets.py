@@ -173,6 +173,7 @@ def test_arbitrary_fake_runtime_serializes_without_product_branches() -> None:
         "preferred": False,
         "launch_strategy": "unsupported",
         "launch_proven": False,
+        "launch_ref": None,
         "runnable": False,
         "provisionable": False,
         "preparable": False,
@@ -267,6 +268,7 @@ def test_coordinator_context_receives_capabilities_locality_policy(
     assert "enabled, available, capable, allowed, and runnable" in prompt
     assert "execution_target_candidates" in prompt
     assert "aichestra.prove_launch" in prompt
+    assert "--repo-root" in prompt
     assert "launch_recipe" not in prompt
     assert "Use only enabled, available cloud providers" not in prompt
     assert "OpenCode launch is unavailable" not in prompt
@@ -285,6 +287,8 @@ def test_coordinator_context_receives_capabilities_locality_policy(
     assert "execution_target_candidates" in adapter_src
     assert "aichestra.prove_launch" in adapter_src
     assert "prove-launch" in adapter_src
+    assert "--repo-root" in adapter_src
+    assert "AICHESTRA_GATE:verification" in adapter_src
     assert "launch_recipe" not in adapter_src
     assert "create_command" not in adapter_src
 

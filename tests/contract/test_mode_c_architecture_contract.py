@@ -609,7 +609,7 @@ def test_mode_c_orca_is_canonical_lifecycle_owner(tmp_path: Path) -> None:
 
 
 def test_mode_c_policy_gates_do_not_become_worker_scheduler(tmp_path: Path) -> None:
-    """Maintenance + verification are local; they must not call lead.execute_task."""
+    """Maintenance + verification stay Aichestra gates; they must not call lead.execute_task."""
     orca = fake_orca("success")
     lead = fake_codex("success")
     wf = ModeCRunController(
@@ -826,6 +826,10 @@ def test_child_worktree_missing_locator_fails_closed(tmp_path: Path) -> None:
     original = orca.send
 
     def claim_missing_child(session, request):
+        if (request.role or "") == MODE_C_HANDOFF_ROLE and isinstance(request.context, dict):
+            request.context["worktree_path"] = str(parent / "missing-child")
+            request.context["worktree_id"] = "fake-repo::missing"
+            request.context["integration_policy"] = "adopt_child_worktree"
         result = original(session, request)
         if (request.role or "") == MODE_C_HANDOFF_ROLE and result.ok:
             meta = dict(result.metadata)

@@ -159,6 +159,10 @@ def test_worktree_adoption_switches_effective_root(tmp_path: Path) -> None:
     original_send = orca.send
 
     def send_with_child(session, request):
+        if (request.role or "") == MODE_C_HANDOFF_ROLE and isinstance(request.context, dict):
+            request.context["worktree_path"] = str(child)
+            request.context["worktree_id"] = f"fake-repo::{child}"
+            request.context["integration_policy"] = "adopt_child_worktree"
         result = original_send(session, request)
         if (request.role or "") == MODE_C_HANDOFF_ROLE and result.ok:
             meta = dict(result.metadata)

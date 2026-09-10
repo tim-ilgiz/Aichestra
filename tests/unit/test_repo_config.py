@@ -13,7 +13,7 @@ from aichestra.config.layering import (
     resolve_config,
     save_machine_local,
 )
-from aichestra.repo import find_repo_root
+from aichestra.repo import find_repo_root, looks_like_aichestra_root
 
 
 def test_find_repo_root_from_tests(repo_root: Path) -> None:
@@ -27,6 +27,17 @@ def test_find_repo_root_arbitrary_spaced_path(fake_aichestra_root: Path) -> None
     nested.mkdir(parents=True)
     assert " " in str(fake_aichestra_root)
     assert find_repo_root(nested) == fake_aichestra_root.resolve()
+
+
+def test_looks_like_aichestra_root_rejects_foreign_project(
+    repo_root: Path, tmp_path: Path
+) -> None:
+    foreign = tmp_path / "app"
+    foreign.mkdir()
+    (foreign / "pyproject.toml").write_text("[project]\nname='app'\n", encoding="utf-8")
+    (foreign / "AGENTS.md").write_text("# app\n", encoding="utf-8")
+    assert looks_like_aichestra_root(repo_root)
+    assert not looks_like_aichestra_root(foreign)
 
 
 def test_config_layering_precedence(fake_aichestra_root: Path) -> None:

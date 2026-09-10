@@ -225,6 +225,22 @@ def extract_worktree_locator(payload: dict[str, Any] | None) -> dict[str, str | 
     return {"worktree_path": path, "worktree_id": worktree_id}
 
 
+def _publish_worktree_locator(
+    request: ProviderTaskRequest, locator: Mapping[str, Any]
+) -> None:
+    """Expose the live worktree to in-flight Aichestra gates before worker_done."""
+    ctx = request.context
+    if not isinstance(ctx, dict):
+        return
+    path = locator.get("worktree_path")
+    worktree_id = locator.get("worktree_id")
+    if isinstance(path, str) and path.strip():
+        ctx["worktree_path"] = path.strip()
+        ctx.setdefault("integration_policy", "adopt_child_worktree")
+    if isinstance(worktree_id, str) and worktree_id.strip():
+        ctx["worktree_id"] = worktree_id.strip()
+
+
 def _parse_orca_json(output: str) -> dict[str, Any]:
     """Parse Orca ``--json`` stdout; tolerate trailing/leading noise."""
     text = (output or "").strip()
@@ -628,6 +644,17 @@ class OrcaProvider(ProviderAdapter):
                     session_id=session.session_id,
                 )
             agent = target.runtime.id
+            from aichestra.execution.serialize import prove_launch_invocation
+
+            prove_cmd = prove_launch_invocation(
+                project_root=str(request.context.get("project_root") or "<root>"),
+                repo_root=(
+                    str(request.context.get("aichestra_repo_root")).strip()
+                    if isinstance(request.context.get("aichestra_repo_root"), str)
+                    and str(request.context.get("aichestra_repo_root")).strip()
+                    else None
+                ),
+            )
             # Preserve the complete policy; generic bounded_prompt truncates context.
             contract = (
                 "Target:\nYou are the explicit Mode C coordinator for project_root in ProjectContext. "
@@ -645,12 +672,16 @@ class OrcaProvider(ProviderAdapter):
                 "and execution_policy (execution_target_contract_version). "
                 "For inner workers, Dispatch only targets listed in execution_targets "
                 "(enabled, available, capable, allowed, and runnable). "
+                "orca-existing-terminal targets include launch_ref; Dispatch that "
+                "handle — do not invent a terminal. "
                 "Candidates require aichestra.prove_launch via "
-                "`aichestra prove-launch --project-root <root> "
-                "--candidate-id <id> --json` (deterministic structured process "
-                "attestation; Aichestra re-resolves binding from trusted config) "
+                f"`{prove_cmd}` (deterministic structured process "
+                "attestation; Aichestra re-resolves binding from trusted config "
+                "using --repo-root) "
                 "before they become runnable — never DIY terminal show/tail "
                 "recipes, embedded shell launch strings, or screen substring matching. "
+                "Invoke aichestra prove-launch --repo-root <aichestra_repo_root> "
+                "--project-root <root> --candidate-id <id> --json. "
                 "Use the returned prepared_launch.terminal_handle exactly; "
                 "do not create a second bridge terminal. "
                 "Target locality may be local, remote, or cloud according to ExecutionPolicy. "
@@ -663,22 +694,26 @@ class OrcaProvider(ProviderAdapter):
                 "At the implementation boundary, converge edits into the coordinator checkout, "
                 "settle implementation workers, then call orchestration ask --question "
                 "AICHESTRA_GATE:maintenance --json. Wait for the authoritative reply before "
-                "dispatching test/doc/spec/ADR writers. Aichestra replies only to that exact "
-                "maintenance question. Child workers must not ask the maintenance question; "
-                "only this coordinator crosses that boundary after their implementation "
-                "Dispatches are settled. State that prohibition explicitly in child Task "
-                "specs. For any other launch, policy, or capability blocker, "
+                "dispatching test/doc/spec/ADR writers. Aichestra replies only to exact "
+                "coordinator AICHESTRA_GATE questions. Child workers must not ask those "
+                "questions; only this coordinator crosses that boundary after their "
+                "implementation Dispatches are settled. State that prohibition explicitly "
+                "in child Task specs. For any other launch, policy, or capability blocker, "
                 "settle affected Tasks and report this coordinator Dispatch with worker_done "
                 "outcome failed; do not leave an operator question pending. Required writer "
                 "work MUST be dispatched through Orca in this Run. If implementation changes "
-                "again, repeat the gate. "
-                "Even a no-implementation task must request the gate before completion.\n"
+                "again, repeat the maintenance gate. "
+                "Even a no-implementation task must request the maintenance gate before "
+                "verification.\n"
                 "Observable acceptance:\nAll required gate handshakes completed; required writer "
                 "Dispatches completed; all child Dispatches settled; changes converged into "
                 "coordinator checkout. After each child worker_done reuse or worker-release it; "
                 "worker-list --run <run_id> --terminal-state reclaimable must be empty. "
-                "Only then send worker_done with explicit outcome succeeded; unresolved work "
-                "requires outcome failed. Aichestra verifies commands and canonical Run state.\n"
+                "Then call orchestration ask --question AICHESTRA_GATE:verification --json "
+                "and wait for the authoritative result. Do not send worker_done outcome "
+                "succeeded until that reply has ok=true. If verification ok=false, finish "
+                "this coordinator Dispatch with worker_done outcome failed so the Orca Run "
+                "and Aichestra agree. Unresolved work requires outcome failed.\n"
             )
             package = request.context.get("policy_package")
             if isinstance(package, Mapping):
@@ -699,6 +734,7 @@ class OrcaProvider(ProviderAdapter):
                         "execution_policy",
                         "execution_target_contract_version",
                         "launch_proof_operation",
+                        "aichestra_repo_root",
                         "attachments",
                         "classify",
                         "speckit_scale",
@@ -1109,6 +1145,7 @@ class OrcaProvider(ProviderAdapter):
             handle = (
                 str(request.context.get("terminal_handle") or "").strip()
                 or prepared_handle
+                or str(getattr(request.execution_target, "launch_ref", None) or "").strip()
                 or str(os.environ.get("ORCA_WORKER_TERMINAL_HANDLE") or "").strip()
                 or None
             )
@@ -1176,6 +1213,7 @@ class OrcaProvider(ProviderAdapter):
             else None
         )
         locator = extract_worktree_locator(worker_payload)
+        _publish_worktree_locator(request, locator)
         steps.append(
             {
                 "step": "worker-start",
@@ -1260,6 +1298,10 @@ class OrcaProvider(ProviderAdapter):
 
         timeout_ms = max(1_000, int(float(request.timeout_seconds) * 1000))
         deadline = time.monotonic() + (timeout_ms / 1000.0)
+        from aichestra.execution.serialize import (
+            COORDINATOR_GATES,
+            coordinator_gate_from_event,
+        )
         wait_result: ProviderTaskResult | None = None
         wait_payload: dict[str, Any] = {}
         done_ok = False
@@ -1267,7 +1309,8 @@ class OrcaProvider(ProviderAdapter):
         done_meta: dict[str, Any] = {}
         ack_delivery_id: str | None = None
         attempts = 0
-        gate_answered = False
+        gates_answered: set[str] = set()
+        verification_ok = True
         gate_replies: dict[str, dict[str, Any]] = {}
         monitor_coordinator = bool(
             request.role == "mode_c_handoff" and terminal_handle
@@ -1317,19 +1360,20 @@ class OrcaProvider(ProviderAdapter):
             if not wait_result.ok:
                 break
             event = done_meta.get("event") or {}
+            gate_name = coordinator_gate_from_event(event)
             if (done_meta.get("event_type") == "question"
                     and done_meta.get("event_dispatch_id") == dispatch_id
-                    and (event.get("question") or event.get("body") or event.get("subject")) == "AICHESTRA_GATE:maintenance"
+                    and gate_name is not None
                     and request.gate_handler is not None):
                 message_id = event.get("messageId") or event.get("id")
                 if not message_id:
-                    done_detail = "Maintenance question missing message id"
+                    done_detail = f"{gate_name} question missing message id"
                     break
                 try:
-                    gate_replies[message_id] = request.gate_handler("maintenance")
+                    gate_replies[message_id] = request.gate_handler(gate_name)
                     answer = gate_replies[message_id]
                 except Exception as exc:
-                    done_detail = f"Maintenance gate failed: {exc}"
+                    done_detail = f"{gate_name} gate failed: {exc}"
                     break
                 reply_argv = [
                     binary,
@@ -1353,10 +1397,15 @@ class OrcaProvider(ProviderAdapter):
                     isinstance(reply_payload.get("error"), dict)
                     and str(reply_payload["error"].get("code") or "") == "answer_conflict"
                 )
-                if (not reply.ok and not already_answered) or not answer.get("ok"):
+                if not reply.ok and not already_answered:
+                    done_detail = f"{gate_name} gate reply failed"
+                    break
+                if gate_name == "maintenance" and not answer.get("ok"):
                     done_detail = "Maintenance gate reply failed or gate rejected"
                     break
-                gate_answered = True
+                if gate_name == "verification":
+                    verification_ok = bool(answer.get("ok"))
+                gates_answered.add(gate_name)
                 if not monitor_coordinator:
                     ack_delivery_id = done_meta.get("ack_delivery_id")
                 continue
@@ -1447,8 +1496,15 @@ class OrcaProvider(ProviderAdapter):
             meta["cleanup"] = cleanup
             if not cleaned:
                 done_ok, done_detail = False, "Coordinator resource cleanup failed or unverifiable"
-        if request.role == "mode_c_handoff" and not gate_answered:
-            done_ok, done_detail = False, "Coordinator omitted maintenance gate handshake"
+        if request.role == "mode_c_handoff":
+            missing = [name for name in COORDINATOR_GATES if name not in gates_answered]
+            if missing:
+                done_ok, done_detail = False, f"Coordinator omitted {missing[0]} gate handshake"
+            elif done_ok and not verification_ok:
+                done_ok, done_detail = (
+                    False,
+                    "Coordinator reported succeeded after failed verification",
+                )
         if not done_ok:
             if "cleanup" not in meta:
                 _, cleanup = self._release_worker(binary, session, request, dispatch_id, run_id)

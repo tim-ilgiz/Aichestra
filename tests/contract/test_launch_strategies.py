@@ -33,6 +33,7 @@ from aichestra.execution.launch_strategies import (
     select_bootstrap_candidate,
     structured_binding_matches,
 )
+from aichestra.execution.serialize import serialize_execution_target
 from aichestra.execution.targets import resolve_targets
 
 
@@ -174,13 +175,21 @@ def test_prompt_metadata_is_not_launch_proof():
 
 
 def test_bridge_command_embeds_binding_in_orca_process_argv():
+    from aichestra.platform_detect import OperatingSystem, detect_os
+
     target = _opencode_target()
     bridge = bridge_command_for(target)
     assert bridge is not None
-    assert "ollama/qwen" in bridge.command
-    assert "http://127.0.0.1:11434/v1" in bridge.command
     assert "OPENCODE_CONFIG_CONTENT" in bridge.command
     assert "/usr/bin/opencode" in bridge.command
+    if detect_os() == OperatingSystem.WINDOWS:
+        assert "powershell.exe" in bridge.command
+        assert "FromBase64String" in bridge.command
+        assert "env OPENCODE_CONFIG_CONTENT=" not in bridge.command
+    else:
+        assert "ollama/qwen" in bridge.command
+        assert "http://127.0.0.1:11434/v1" in bridge.command
+        assert bridge.command.startswith("env OPENCODE_CONFIG_CONTENT=")
 
 
 def test_terminal_bridge_prepare_and_confirm_require_structured_process_evidence():
@@ -422,8 +431,30 @@ def test_existing_terminal_requires_attested_handle():
         (Compatibility("opencode", "ollama", "qwen"),),
         known_launches=(launch,),
     )[0]
-    assert asserted.runnable
     assert asserted.launch_strategy is LaunchStrategy.ORCA_EXISTING_TERMINAL
+    assert not asserted.runnable
+    assert not asserted.dispatchable
+    with_ref = LaunchCapability(
+        "opencode",
+        "ollama",
+        "qwen",
+        "http://127.0.0.1:11434",
+        LaunchStrategy.ORCA_EXISTING_TERMINAL,
+        proven=True,
+        launch_ref="term_live",
+    )
+    dispatchable = resolve_targets(
+        DiscoveryFacts(
+            runtimes=(target.runtime,),
+            providers=(target.provider,),
+            models=(target.model,),
+        ),
+        (Compatibility("opencode", "ollama", "qwen"),),
+        known_launches=(with_ref,),
+    )[0]
+    assert dispatchable.runnable
+    assert dispatchable.dispatchable
+    assert dispatchable.launch_ref == "term_live"
 
 
 def test_discover_launches_attests_existing_terminal_from_live_handle(monkeypatch):
@@ -450,6 +481,7 @@ def test_discover_launches_attests_existing_terminal_from_live_handle(monkeypatc
     assert len(launches) == 1
     assert launches[0].strategy is LaunchStrategy.ORCA_EXISTING_TERMINAL
     assert launches[0].proven is True
+    assert launches[0].launch_ref == "term_prod"
     resolved = resolve_targets(
         DiscoveryFacts(
             runtimes=(target.runtime,),
@@ -460,7 +492,12 @@ def test_discover_launches_attests_existing_terminal_from_live_handle(monkeypatc
         known_launches=launches,
     )[0]
     assert resolved.runnable
+    assert resolved.dispatchable
+    assert resolved.launch_ref == "term_prod"
     assert not resolved.provisionable
+    row = serialize_execution_target(resolved)
+    assert row["launch_ref"] == "term_prod"
+    assert row["dispatchable"] is True
 
 
 def test_prove_bootstrap_launch_promotes_bridge_before_run(monkeypatch):
@@ -901,20 +938,28 @@ def test_prove_launch_surface_cli_and_worker_reuses_handle(tmp_path, monkeypatch
         worker_calls.append(list(argv))
         command = argv[2] if len(argv) > 2 and argv[1] == "orchestration" else "status"
         if command == "check":
-            if replied["ok"]:
+            n_replies = sum(1 for c in worker_calls if "reply" in c)
+            if n_replies == 0:
+                event = {
+                    "type": "question",
+                    "id": "q1",
+                    "from_handle": "term_surface",
+                    "subject": "AICHESTRA_GATE:maintenance",
+                }
+            elif n_replies == 1:
+                event = {
+                    "type": "question",
+                    "id": "q2",
+                    "from_handle": "term_surface",
+                    "subject": "AICHESTRA_GATE:verification",
+                }
+            else:
                 event = {
                     "type": "worker_done",
                     "id": "done1",
                     "payload": json.dumps(
                         {"dispatchId": "d_inner", "outcome": "succeeded"}
                     ),
-                }
-            else:
-                event = {
-                    "type": "question",
-                    "id": "q1",
-                    "from_handle": "term_surface",
-                    "subject": "AICHESTRA_GATE:maintenance",
                 }
             data = {"deliveryId": "delivery1", "messages": [event]}
         elif command == "reply":
@@ -1004,3 +1049,129 @@ def test_prove_launch_surface_cli_and_worker_reuses_handle(tmp_path, monkeypatch
         ]
     )
     assert code == 1
+
+
+def test_process_evidence_does_not_copy_env_secrets():
+    from aichestra.execution.launch_strategies import merge_process_evidence
+
+    config = json.dumps(_opencode_config(), separators=(",", ":"))
+    result = SimpleNamespace(
+        returncode=0,
+        stdout=json.dumps(
+            {
+                "ok": True,
+                "result": {
+                    "terminal": {
+                        "handle": "term_secret",
+                        "process": {
+                            "pid": 7,
+                            "argv": _process_argv(),
+                            "env": {
+                                "OPENAI_API_KEY": "sk-secret-should-not-leak",
+                                "TOKEN": "leak-token",
+                                "OPENCODE_CONFIG_CONTENT": config,
+                            },
+                        },
+                    }
+                },
+            }
+        ),
+    )
+    evidence = merge_process_evidence(result, result)
+    blob = json.dumps(evidence)
+    assert "sk-secret-should-not-leak" not in blob
+    assert "leak-token" not in blob
+    assert "env" not in (evidence.get("process") or {})
+    assert (evidence.get("process") or {}).get("config", {}).get("model") == "ollama/qwen"
+
+
+def test_prove_launch_payload_is_sanitized(tmp_path, monkeypatch):
+    from aichestra.execution.launch_strategies import prove_launch_by_candidate_id
+
+    target = _opencode_target()
+    monkeypatch.setattr(
+        "aichestra.execution.launch_strategies.load_orca_schema",
+        lambda binary=None: _schema(),
+    )
+    launches = discover_launches([target], binary="orca-test")
+    resolved = resolve_targets(
+        DiscoveryFacts(
+            runtimes=(target.runtime,),
+            providers=(target.provider,),
+            models=(target.model,),
+        ),
+        (Compatibility("opencode", "ollama", "qwen"),),
+        known_launches=launches,
+    )[0]
+
+    def run(argv, **_kwargs):
+        if argv[1:3] == ["terminal", "create"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {"ok": True, "result": {"terminal": {"handle": "term_s"}}}
+                ),
+            )
+        if argv[1:3] == ["terminal", "wait"]:
+            return SimpleNamespace(returncode=0, stdout="{}")
+        if argv[1:3] in (["terminal", "show"], ["terminal", "read"]):
+            payload = _structured_terminal("term_s")
+            payload["result"]["terminal"]["process"]["env"] = {
+                "password": "super-secret-pass",
+                "OPENCODE_CONFIG_CONTENT": json.dumps(
+                    _opencode_config(), separators=(",", ":")
+                ),
+            }
+            return SimpleNamespace(returncode=0, stdout=json.dumps(payload))
+        if argv[1:3] == ["terminal", "close"]:
+            return SimpleNamespace(returncode=0, stdout="{}")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(
+        "aichestra.providers.orca.resolve_orca_binary",
+        lambda: "orca-test",
+    )
+    attestation = prove_launch_by_candidate_id(
+        resolved.id,
+        project_root=tmp_path,
+        worktree="current",
+        binary="orca-test",
+        run=run,
+        targets=(resolved,),
+    )
+    blob = json.dumps(attestation)
+    assert attestation["ok"] is True
+    assert "super-secret-pass" not in blob
+    process = ((attestation.get("prepared_launch") or {}).get("evidence") or {}).get("process") or {}
+    assert "env" not in process
+
+
+def test_prove_launch_refuses_foreign_project_as_config_root(tmp_path, monkeypatch):
+    from aichestra.execution.launch_strategies import prove_launch_by_candidate_id
+
+    foreign = tmp_path / "other-app"
+    foreign.mkdir()
+    (foreign / "pyproject.toml").write_text("[project]\nname='app'\n", encoding="utf-8")
+    (foreign / "AGENTS.md").write_text("# app\n", encoding="utf-8")
+    monkeypatch.chdir(foreign)
+    monkeypatch.delenv("AICHESTRA_REPO_ROOT", raising=False)
+    payload = prove_launch_by_candidate_id(
+        "any",
+        project_root=foreign,
+    )
+    assert payload["ok"] is False
+    assert "config root" in payload["error"].lower() or "repo-root" in payload["error"].lower()
+
+
+def test_windows_bridge_command_is_powershell_not_posix_env():
+    from aichestra.execution.launch_strategies import _opencode_bridge_command
+
+    target = _opencode_target()
+    bridge = _opencode_bridge_command(target, os_name="windows")
+    assert bridge is not None
+    assert "powershell.exe" in bridge.command
+    assert "FromBase64String" in bridge.command
+    assert not bridge.command.startswith("env ")
+    posix = _opencode_bridge_command(target, os_name="macos")
+    assert posix is not None
+    assert posix.command.startswith("env OPENCODE_CONFIG_CONTENT=")

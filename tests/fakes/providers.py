@@ -160,7 +160,25 @@ class FakeProvider(ProviderAdapter):
         if scenario in {"success", "ok", "available"}:
             meta: dict = {"fake": True}
             if role == "mode_c_handoff" and request.gate_handler:
+                ctx = request.context if isinstance(request.context, dict) else {}
+                if not ctx.get("worktree_path"):
+                    worktree_path = request.cwd or f"/tmp/fake-orca-worktree-{session.session_id[:8]}"
+                    ctx["worktree_path"] = worktree_path
+                    ctx["worktree_id"] = f"fake-repo::{worktree_path}"
+                    ctx["integration_policy"] = "adopt_child_worktree"
                 meta["gate_reply"] = request.gate_handler("maintenance")
+                meta["verification_gate_reply"] = request.gate_handler("verification")
+                maint_ok = bool((meta.get("gate_reply") or {}).get("ok"))
+                ver_ok = bool((meta.get("verification_gate_reply") or {}).get("ok"))
+                if not maint_ok or not ver_ok:
+                    return ProviderTaskResult(
+                        ok=False,
+                        output=self._execute_output,
+                        failure=FailureClass.ERROR,
+                        detail="coordinator gate failed",
+                        session_id=session.session_id,
+                        metadata=meta,
+                    )
             if role == "run_status":
                 meta.update({"settled": True, "receipt": {"run": {"id": ctx_run}}})
             if role == "ensure_run":
@@ -190,8 +208,12 @@ class FakeProvider(ProviderAdapter):
             else:
                 # Agent roles (mode_c_agents, research, lead_*, writers, …)
                 run_id = ctx_run.strip()
+                ctx_map = request.context if isinstance(request.context, dict) else {}
                 cwd = request.cwd
-                worktree_path = cwd or f"/tmp/fake-orca-worktree-{session.session_id[:8]}"
+                worktree_path = ctx_map.get("worktree_path") or cwd or (
+                    f"/tmp/fake-orca-worktree-{session.session_id[:8]}"
+                )
+                worktree_id = ctx_map.get("worktree_id") or f"fake-repo::{worktree_path}"
                 meta.update(
                     {
                         "run_id": run_id,
@@ -199,8 +221,9 @@ class FakeProvider(ProviderAdapter):
                         "task_id": f"fake-task-{len(self.sent)}",
                         "dispatch_id": f"fake-dispatch-{len(self.sent)}",
                         "worktree_path": worktree_path,
-                        "worktree_id": f"fake-repo::{worktree_path}",
-                        "integration_policy": "adopt_child_worktree",
+                        "worktree_id": worktree_id,
+                        "integration_policy": ctx_map.get("integration_policy")
+                        or "adopt_child_worktree",
                         "agent_complete": True,
                     }
                 )

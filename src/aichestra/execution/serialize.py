@@ -32,6 +32,10 @@ EXECUTION_TARGET_CONTRACT_VERSION = 2
 # Coordinator may request this; it must NOT DIY attestation from text recipes.
 LAUNCH_PROOF_OPERATION = "aichestra.prove_launch"
 
+# Coordinator-owned ask/reply gates answered by Aichestra during the live Run.
+COORDINATOR_GATES: tuple[str, ...] = ("maintenance", "verification")
+AICHESTRA_GATE_PREFIX = "AICHESTRA_GATE:"
+
 LEGACY_COMPATIBILITY_FIELDS: tuple[str, ...] = (
     "preferred_lead",
     "fallback_lead",
@@ -137,6 +141,7 @@ def serialize_execution_target(target: ExecutionTarget) -> dict[str, Any]:
         "preferred": target.preferred,
         "launch_strategy": target.launch_strategy.value,
         "launch_proven": target.launch_proven,
+        "launch_ref": target.launch_ref,
         "runnable": target.runnable,
         "provisionable": target.provisionable,
         "preparable": target.preparable,
@@ -167,6 +172,47 @@ def serialize_launch_candidate(target: ExecutionTarget) -> dict[str, Any]:
         }
     )
     return payload
+
+
+def prove_launch_invocation(
+    *,
+    project_root: str = "<root>",
+    repo_root: str | None = None,
+    candidate_id: str = "<id>",
+) -> str:
+    """Trusted CLI the coordinator must invoke — includes Aichestra config root."""
+    parts = ["aichestra", "prove-launch"]
+    if repo_root:
+        parts.extend(["--repo-root", str(repo_root)])
+    else:
+        parts.extend(["--repo-root", "<aichestra_repo_root>"])
+    parts.extend(
+        [
+            "--project-root",
+            str(project_root or "<root>"),
+            "--candidate-id",
+            str(candidate_id or "<id>"),
+            "--json",
+        ]
+    )
+    return " ".join(parts)
+
+
+def coordinator_gate_from_event(event: Mapping[str, Any] | None) -> str | None:
+    """Return the AICHESTRA_GATE name if *event* is a coordinator gate ask."""
+    if not isinstance(event, Mapping):
+        return None
+    for key in ("question", "body", "subject"):
+        value = event.get(key)
+        if not isinstance(value, str):
+            continue
+        text = value.strip()
+        if not text.startswith(AICHESTRA_GATE_PREFIX):
+            continue
+        gate = text[len(AICHESTRA_GATE_PREFIX) :].strip().lower()
+        if gate in COORDINATOR_GATES:
+            return gate
+    return None
 
 
 def serialize_execution_policy(policy: ExecutionPolicy) -> dict[str, Any]:

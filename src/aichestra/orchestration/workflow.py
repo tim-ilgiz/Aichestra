@@ -91,10 +91,12 @@ from aichestra.providers.base import (
 from aichestra.execution.domain import ExecutionPolicy, ExecutionTarget
 from aichestra.execution.serialize import (
     CANONICAL_EXECUTION_FIELDS,
+    COORDINATOR_GATES,
     EXECUTION_TARGET_CONTRACT_VERSION,
     LAUNCH_PROOF_OPERATION,
     LEGACY_COMPATIBILITY_FIELDS,
     OWNERSHIP_METADATA,
+    prove_launch_invocation,
     safe_endpoint_for_context,
     serialize_execution_policy,
     serialize_execution_target,
@@ -288,6 +290,7 @@ class WorkflowBindings:
     # Canonical ExecutionTarget layer (T172). Empty until CLI/discovery fills it.
     execution_targets: tuple[ExecutionTarget, ...] = ()
     execution_policy: ExecutionPolicy = field(default_factory=ExecutionPolicy)
+    aichestra_repo_root: str | None = None
 
 
 @dataclass
@@ -306,6 +309,7 @@ class ModeCPolicyPackage:
     research_query: str
     project_root: str
     project_context: dict[str, Any]
+    aichestra_repo_root: str = ""
     preferred_lead: str = "codex"
     fallback_lead: str = "cursor"
     local_enabled: bool = False
@@ -331,6 +335,7 @@ class ModeCPolicyPackage:
             "task_prompt": self.task_prompt,
             "research_query": self.research_query,
             "project_root": self.project_root,
+            "aichestra_repo_root": self.aichestra_repo_root,
             "project_context": dict(self.project_context),
             # Canonical ExecutionTarget contract (T172 / T163).
             "execution_target_contract_version": self.execution_target_contract_version,
@@ -390,6 +395,7 @@ class ModeCRunController:
         self._attach_stage_root: str | None = None
         self._bootstrap_target = None
         self._prepared_bootstrap_launch = None
+        self._inflight_handoff_context: dict[str, Any] | None = None
 
     def apply_maintenance_review(self, **kwargs: Any) -> MaintenanceReviewDecision:
         decision = review_change(**kwargs)
@@ -456,6 +462,7 @@ class ModeCRunController:
                     str(
                         os.environ.get("ORCA_WORKER_TERMINAL_HANDLE") or ""
                     ).strip()
+                    or (candidate.launch_ref or "").strip()
                     or None
                 ),
                 run=subprocess.run,
@@ -518,11 +525,16 @@ class ModeCRunController:
             if not self._handoff_to_orca(str(run_id).strip()):
                 return self.state
 
-            # Maintenance must have been answered while the coordinator was live.
+            # Maintenance + verification must have been answered while the
+            # coordinator was live so canonical Orca outcome can agree.
             if self.state.decision is None:
                 self._fail_gate(GateKind.MAINTENANCE, detail="Coordinator omitted maintenance gate handshake")
                 return self.state
-            if not self._gate_verification():
+            if GateKind.VERIFICATION.value not in self.state.completed:
+                self._fail_gate(
+                    GateKind.VERIFICATION,
+                    detail="Coordinator omitted verification gate handshake",
+                )
                 return self.state
 
             self._finalize_orca_run_status(ok=True)
@@ -796,6 +808,10 @@ class ModeCRunController:
 
         package = self._build_policy_package(run_id)
         self.state.metadata["mode_c_policy_package"] = package.to_dict()
+        prove_cmd = prove_launch_invocation(
+            project_root=package.project_root or "<root>",
+            repo_root=package.aichestra_repo_root or None,
+        )
 
         context = sanitize_mapping(
             {
@@ -819,6 +835,7 @@ class ModeCRunController:
                     package.execution_target_contract_version
                 ),
                 "launch_proof_operation": LAUNCH_PROOF_OPERATION,
+                "aichestra_repo_root": package.aichestra_repo_root,
                 # Capability hints — ExecutionTargets are canonical; legacy secondary.
                 "capabilities": {
                     "execution_targets": list(package.execution_targets),
@@ -863,13 +880,13 @@ class ModeCRunController:
                 "execution_targets (enabled, available, capable, allowed, and "
                 "runnable). execution_target_candidates are NOT dispatchable; "
                 f"promote a candidate only via `{LAUNCH_PROOF_OPERATION}` / "
-                "`aichestra prove-launch --project-root <root> --candidate-id <id> "
-                "--json` (deterministic structured process attestation; Aichestra "
-                "re-resolves binding from trusted config) which returns a proven "
+                f"`{prove_cmd}` (deterministic structured process attestation; Aichestra "
+                "re-resolves binding from trusted config using --repo-root) which returns a proven "
                 "runnable target + prepared_launch handle — never DIY terminal "
                 "show/tail recipes, embedded shell launch strings, or screen "
                 "substring matching. "
                 "Reuse the returned terminal_handle exactly (no second bridge). "
+                "orca-existing-terminal targets are dispatchable only with launch_ref. "
                 "Target locality may be local, remote, or cloud according to "
                 "ExecutionPolicy. "
                 "Do not infer workers from raw providers. "
@@ -882,6 +899,8 @@ class ModeCRunController:
             read_only=False,
             adopt_worktree=True,
         )
+        if self.state.stopped:
+            return False
         if not out.get("ok"):
             self._fail_gate(
                 GateKind.ORCA_HANDOFF,
@@ -1106,6 +1125,7 @@ class ModeCRunController:
             or self.bindings.task_prompt
             or "",
             project_root=str(self.bindings.project_root or ""),
+            aichestra_repo_root=str(self.bindings.aichestra_repo_root or ""),
             project_context=project_ctx,
             preferred_lead=self.bindings.preferred_lead,
             fallback_lead=self.bindings.fallback_lead,
@@ -1258,6 +1278,27 @@ class ModeCRunController:
         }
         return None
 
+    def _adopt_inflight_worktree(self) -> dict[str, Any] | None:
+        """Adopt the live coordinator worktree before answering in-Run gates."""
+        ctx = self._inflight_handoff_context
+        if not isinstance(ctx, dict):
+            return None
+        if self.state.metadata.get("orca_worktree_path"):
+            return None
+        path = ctx.get("worktree_path")
+        if not isinstance(path, str) or not path.strip():
+            return None
+        stub = ProviderTaskResult(
+            ok=True,
+            metadata={
+                "worktree_path": path.strip(),
+                "worktree_id": ctx.get("worktree_id"),
+                "integration_policy": ctx.get("integration_policy")
+                or "adopt_child_worktree",
+            },
+        )
+        return self._adopt_orca_worktree(stub)
+
     def _run_via_orca(
         self,
         *,
@@ -1276,23 +1317,27 @@ class ModeCRunController:
         run_id = str(self.state.metadata["orca_run_id"])
         ctx = sanitize_mapping(dict(context or {}))
         ctx["run_id"] = run_id
+        self._inflight_handoff_context = ctx if role == MODE_C_HANDOFF_ROLE else None
 
         root = self._effective_project_root()
-        result = orca.execute_task(
-            ProviderTaskRequest(
-                prompt=prompt,
-                role=role,
-                context=ctx,
-                cwd=root,
-                timeout_seconds=600.0,
-                read_only=read_only,
-                attachments=tuple(self.bindings.attachments or ()),
-                execution_target=self._bootstrap_target if role == MODE_C_HANDOFF_ROLE else None,
-                gate_handler=self._answer_orca_gate if role == MODE_C_HANDOFF_ROLE else None,
+        try:
+            result = orca.execute_task(
+                ProviderTaskRequest(
+                    prompt=prompt,
+                    role=role,
+                    context=ctx,
+                    cwd=root,
+                    timeout_seconds=600.0,
+                    read_only=read_only,
+                    attachments=tuple(self.bindings.attachments or ()),
+                    execution_target=self._bootstrap_target if role == MODE_C_HANDOFF_ROLE else None,
+                    gate_handler=self._answer_orca_gate if role == MODE_C_HANDOFF_ROLE else None,
+                )
             )
-        )
+        finally:
+            self._inflight_handoff_context = None
         self.state.metadata[f"orca_{role}"] = result.to_dict()
-        if result.ok and adopt_worktree:
+        if result.ok and adopt_worktree and not self.state.metadata.get("orca_worktree_path"):
             adopt_fail = self._adopt_orca_worktree(result)
             if adopt_fail is not None:
                 return adopt_fail
@@ -1309,12 +1354,35 @@ class ModeCRunController:
 
     def _answer_orca_gate(self, gate: str) -> dict[str, Any]:
         """Deterministic callback, invoked by the adapter during a blocking Orca ask."""
-        if gate != "maintenance":
+        name = str(gate or "").strip().lower()
+        run_id = self.state.metadata.get("orca_run_id")
+        adopt_fail = self._adopt_inflight_worktree()
+        if adopt_fail is not None:
+            return {
+                "ok": False,
+                "run_id": run_id,
+                "gate": name,
+                "detail": adopt_fail.get("detail"),
+            }
+        if name not in COORDINATOR_GATES:
             raise ValueError("Unsupported deterministic gate")
-        if not self._gate_maintenance():
-            return {"ok": False, "run_id": self.state.metadata.get("orca_run_id")}
-        return {"ok": True, "run_id": self.state.metadata.get("orca_run_id"),
-                "gate": gate, "decision": self.state.decision.to_dict()}
+        if name == "maintenance":
+            if not self._gate_maintenance():
+                return {"ok": False, "run_id": run_id, "gate": name}
+            return {
+                "ok": True,
+                "run_id": run_id,
+                "gate": name,
+                "decision": self.state.decision.to_dict(),
+            }
+        # verification — authoritative result for the same Orca Run
+        ok = self._gate_verification()
+        return {
+            "ok": ok,
+            "run_id": run_id,
+            "gate": name,
+            "verification": dict(self.state.metadata.get("verification") or {}),
+        }
 
     def _finalize_orca_run_status(self, *, ok: bool) -> None:
         status = dict(self.state.metadata.get("orca_run_status") or {})

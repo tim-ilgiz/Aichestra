@@ -156,6 +156,9 @@ class LaunchCapability:
     endpoint: str | None = None
     strategy: LaunchStrategy = LaunchStrategy.UNSUPPORTED
     proven: bool = False
+    # Opaque transferable launch reference (existing-terminal handle).
+    # Required for dispatchable existing-terminal targets; never a DIY recipe.
+    launch_ref: str | None = None
 
     def binding_key(self) -> LaunchBindingKey:
         return LaunchBindingKey(
@@ -182,6 +185,7 @@ class ExecutionTarget:
     preferred: bool
     launch_strategy: LaunchStrategy = LaunchStrategy.UNSUPPORTED
     launch_proven: bool = False
+    launch_ref: str | None = None
     reasons: tuple[str, ...] = ()
 
     @property
@@ -224,7 +228,7 @@ class ExecutionTarget:
 
     @property
     def runnable(self) -> bool:
-        return all(
+        proven = all(
             (
                 self.enabled,
                 self.available,
@@ -234,6 +238,13 @@ class ExecutionTarget:
                 self.launch_proven,
             )
         )
+        if not proven:
+            return False
+        if self.launch_strategy == LaunchStrategy.ORCA_EXISTING_TERMINAL:
+            # Runnable means actually dispatchable: the attested terminal
+            # handle must travel with the target.
+            return bool((self.launch_ref or "").strip())
+        return True
 
     @property
     def preparable(self) -> bool:

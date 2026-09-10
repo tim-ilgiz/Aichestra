@@ -8,19 +8,24 @@ description: "Task list for portable Aichestra platform implementation"
 
 **Prerequisites**: plan.md (required), spec.md (required)
 
-**Architecture contract status (2026-09-10)**: Spec/plan are source of truth for
+**Architecture contract status (2026-09-10):** Spec/plan are source of truth for
 **single-Orca-Run Mode C** with provider/runtime/model-agnostic
 **ExecutionTargets**. Coordinator under Orca owns the concrete workflow/DAG;
 Orca owns canonical Run/Task/Dispatch/worker/terminal/worktree lifecycle;
 Aichestra owns discovery, ExecutionTarget resolution, policy, security,
-deterministic gates and verification. Phase 24 T163/T169–T176 is accepted:
-launch proof is callable through `aichestra prove-launch`, candidate payloads
-contain no DIY launch recipe, `preparable` and `dispatchable` are distinct, and
-only proven runnable targets reach canonical `execution_targets`. Validation
-gate **T167** (fresh CI matrix) remains open; **T168** live Mode C smoke
-passed on 2026-09-10 (`run_3d12b2f31039`). Local-only live validation remains
-NOT VALIDATED. **Do not merge** until fresh GitHub CI matrix is green on
-current HEAD (T167).
+deterministic gates and verification.
+
+Phase 24 T163/T169–T176 remains the ExecutionTarget/launch-proof foundation.
+Phase 25 (T177–T181) closes the post-c3de84f review blockers: prove-launch
+secret boundary, stable Aichestra `--repo-root`, existing-terminal `launch_ref`,
+in-Run `AICHESTRA_GATE:verification`, and Windows-native terminal-bridge.
+
+Validation: **T167** was green on `c3de84f` (GitHub Actions run #70) and is
+**reopened** by this production follow-up. **T168** live smoke on
+`run_3d12b2f31039` remains historical evidence for the pre-T180 handshake.
+**T180** in-Run verification live smoke is ACCEPTED on `run_27377a46c199`
+(2026-09-10). Local-only live validation remains NOT VALIDATED. **Do not
+merge** until a fresh GitHub CI matrix is green on current HEAD (T167).
 
 **Tests**: Included where required by success criteria (SC-001–SC-016) and
 architecture contract tests (MODE-C-001–010, MODE-C-017–020). Prefer minimal
@@ -787,6 +792,42 @@ security, deterministic gates and verification.
       * release_unknown
       * unresolved reclaimable resources
 
+### Review follow-up — prove-launch / verification / Windows (COMPLETE)
+
+- [x] T177 CRITICAL: `prove-launch` / process evidence MUST NOT copy process
+      `env` into coordinator-visible payloads. Allowlist only binding-safe
+      fields (e.g. parse `OPENCODE_CONFIG_CONTENT` into structured config).
+      Sanitize the entire `aichestra prove-launch` JSON payload before stdout.
+- [x] T178 CRITICAL: Candidate promotion MUST pass a stable Aichestra config
+      root (`--repo-root` / `aichestra_repo_root` in the trusted package).
+      `prove_launch_by_candidate_id` MUST NOT `find_repo_root()` from a foreign
+      target-project cwd. T163/T175 remain accepted only with this seam.
+- [x] T179 CRITICAL: `orca-existing-terminal` is dispatchable only with a
+      transferable opaque `launch_ref` (attested terminal handle). Proven
+      without a handle MUST NOT appear in canonical `execution_targets`.
+- [x] T180 CRITICAL: Deterministic verification is an in-Run coordinator gate
+      (`AICHESTRA_GATE:verification`), symmetric with maintenance. Coordinator
+      MUST NOT `worker_done outcome=succeeded` until Aichestra returns the
+      authoritative verification result; verification failure completes the
+      Dispatch with `outcome=failed` so Orca and Aichestra agree.
+      <!-- LIVE ACCEPTED (2026-09-10): `aichestra orchestrate` with
+           ORCA_TERMINAL_HANDLE against the isolated acceptance fixture created
+           exactly one Run `run_27377a46c199`. Bootstrap ExecutionTarget was
+           cursor (`--no-codex --no-local`). Coordinator Dispatch
+           `ctx_ee792ba5c418` / `task_69844cd1dccb` dynamically created child
+           `task_f2432a42e443` / `ctx_40ecf96220e8` which wrote
+           `result.txt`=`accepted`. Live ask order:
+           `AICHESTRA_GATE:maintenance` (msg_24640ff359f7 @ 14:02:13Z) then
+           `AICHESTRA_GATE:verification` (msg_701912090358 @ 14:02:18Z);
+           Aichestra answered both in-wait (`skipped_answered_questions=2`);
+           only then `worker_done outcome=succeeded` (msg_46cc6dcec3f8 @
+           14:02:25Z). Deterministic verification ok; both workers released;
+           `orca_run_status.ok=true`. Gates completed: project_context, policy,
+           attachments, maintenance, verification, orca_handoff. -->
+- [x] T181 HIGH: `orca-terminal-bridge` command builder is OS-specific.
+      Windows uses PowerShell + base64 config; POSIX keeps `env KEY=VAL`.
+      Binding proof still uses structured process evidence, not screen text.
+
 ### Validation gates (OPEN)
 
 - [ ] T167 CRITICAL:
@@ -804,11 +845,10 @@ security, deterministic gates and verification.
 
       Docs-only / architecture-HEAD CI may be kept as intermediate sanity
       evidence, but does NOT close T167.
-      <!-- Evidence: do NOT reuse older HEAD (e.g. run 34396617374). Keep open
-           until a fresh GitHub Actions matrix completes successfully on Ubuntu,
-           macOS, and Windows for the final implementation HEAD after
-           T163/T169–T176. Update this comment only after that green run.
-           Local pytest alone is insufficient. Docs-only CI does not close. -->
+      <!-- Intermediate evidence: GitHub Actions run #70 succeeded on
+           c3de84f (Ubuntu + macOS + Windows). Phase 25 T177–T181 is a
+           production-code change and REOPENS T167. Do not reuse run #70
+           as close-out evidence. Local pytest alone is insufficient. -->
 
 - [x] T168 CRITICAL: Run at least one real Mode C integration smoke proving:
 
@@ -863,14 +903,15 @@ security, deterministic gates and verification.
            verification. No Aichestra-owned research→implement→writers→review
            Python pipeline. Local-only Mode C live validation: NOT VALIDATED;
            no proven local provider/model/endpoint launch adapter on this
-           machine. -->
+           machine. Phase 25 T180 in-Run verification live path separately
+           ACCEPTED on `run_27377a46c199` (see T180). -->
 
 Do not mark T163/T169–T176 complete merely because documentation describes the
 architecture. Coordinator bootstrap, project-context, and workflow-ownership
 fixes already landed (T158–T162, T164–T166) do not satisfy ExecutionTarget
 discovery/resolution or launch-proof work.
 
-**Checkpoint**: Do not treat architecture as converged until T163, T167–T176
+**Checkpoint**: Do not treat architecture as converged until T163, T167–T181
 are complete.
 
 ---
@@ -885,8 +926,10 @@ are complete.
 - Phase 22 (T138–T144) closes architect REQUEST CHANGES residuals
 - Phase 23 (T145–T153) closes corrective alignment follow-up
 - Phase 24 workflow-ownership slice (T158–T162, T164–T166) and ExecutionTarget
-  foundation and launch-proof stack (T163, T169–T176) accepted; live Mode C
-  smoke (T168) accepted; fresh CI (T167) remains open
+  foundation and launch-proof stack (T163, T169–T176) accepted; Phase 25
+  review follow-up (T177–T181) accepted; live Mode C smoke (T168) accepted
+  for pre-T180 HEAD; T180 in-Run verification live smoke accepted on
+  `run_27377a46c199`; fresh CI (T167) remains open after T177–T181
 - T108–T124 depend on T103–T107; T167 gates merge on current HEAD CI
 - Converge / “feature complete” only after Phase 24 T163 + T167–T176
 - Phase 24 supersedes any earlier interpretation of T108/T125/T139 that allows
@@ -961,11 +1004,15 @@ are complete.
 7. Advertise an ExecutionTarget as runnable only with proven launch binding;
    discovery/install alone is insufficient
 
-Review follow-up: maintenance uses an in-dispatch ask/reply callback; canonical
-Run/task confirmation gates success. Task specs use explicit Target, Change,
+Review follow-up: maintenance uses an in-dispatch ask/reply callback; verification
+is the symmetric in-Run `AICHESTRA_GATE:verification`. Canonical Run/task
+confirmation gates success. Task specs use explicit Target, Change,
 Constraints, Ownership and Observable acceptance sections. Mutating adapter
-routes require live authority. T174/T175 and umbrella T163 are accepted; live
-Mode C smoke (T168) accepted on run_3d12b2f31039. Remaining open work is fresh
-CI (T167). Local-only live validation remains NOT VALIDATED. OpenCode + Ollama
-is one possible example target only — not a mandatory architecture. Local
-pytest green does not close T167.
+routes require live authority. T174/T175 and umbrella T163 remain accepted with
+Phase 25 T177–T181 (secret boundary, `--repo-root`, existing-terminal
+`launch_ref`, in-Run verification, Windows bridge). Live Mode C smoke (T168)
+accepted on run_3d12b2f31039 for the pre-T180 handshake. T180 in-Run
+verification live smoke accepted on run_27377a46c199. Remaining open work is
+fresh CI (T167) after T177–T181. Local-only live validation remains NOT
+VALIDATED. OpenCode + Ollama is one possible example target only — not a
+mandatory architecture. Local pytest green does not close T167.

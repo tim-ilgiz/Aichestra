@@ -7,6 +7,7 @@ Never treat prompt text, ambient discovery, or Aichestra-process env as proof.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import shlex
@@ -14,6 +15,9 @@ import subprocess
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Mapping, Protocol
 from urllib.parse import urlsplit, urlunsplit
+
+from aichestra.platform_detect import OperatingSystem, detect_os
+from aichestra.security.sanitize import sanitize_mapping
 
 from .domain import ExecutionTarget, LaunchCapability, LaunchStrategy
 
@@ -437,7 +441,11 @@ def bridge_command_for(target: ExecutionTarget) -> BridgeCommand | None:
     return builder(target)
 
 
-def _opencode_bridge_command(target: ExecutionTarget) -> BridgeCommand | None:
+def _opencode_bridge_command(
+    target: ExecutionTarget,
+    *,
+    os_name: str | None = None,
+) -> BridgeCommand | None:
     if target.provider is None or target.model is None:
         return None
     provider = target.provider.id
@@ -460,9 +468,24 @@ def _opencode_bridge_command(target: ExecutionTarget) -> BridgeCommand | None:
             }
         },
     }
+    config_json = json.dumps(config, separators=(",", ":"))
+    platform = (os_name or detect_os().value).lower()
+    if platform == OperatingSystem.WINDOWS.value:
+        encoded = base64.b64encode(config_json.encode("utf-8")).decode("ascii")
+        ps_binary = str(binary).replace("'", "''")
+        # Windows-native: POSIX ``env KEY=VAL`` is not a standard command.
+        # Base64 avoids JSON quoting in PowerShell; live process env carries
+        # OPENCODE_CONFIG_CONTENT after this wrapper execs the runtime.
+        command = (
+            "powershell.exe -NoProfile -NonInteractive -Command "
+            "\"$env:OPENCODE_CONFIG_CONTENT = "
+            "[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('"
+            f"{encoded}')); & '{ps_binary}'\""
+        )
+        return BridgeCommand(command=command)
     # Binding travels in the Orca-supervised process command, not Aichestra env.
     command = (
-        f"env OPENCODE_CONFIG_CONTENT={shlex.quote(json.dumps(config, separators=(',', ':')))} "
+        f"env OPENCODE_CONFIG_CONTENT={shlex.quote(config_json)} "
         f"{shlex.quote(binary)}"
     )
     return BridgeCommand(command=command)
@@ -530,11 +553,47 @@ def _as_argv(value: Any) -> list[str] | None:
     return None
 
 
+# Process env is not launch evidence. Only these keys may be lifted into
+# structured config for binding proof — never a full environment dump.
+_BINDING_ENV_ALLOWLIST = frozenset({"OPENCODE_CONFIG_CONTENT"})
+
+
+def _iter_env_pairs(env: Any) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    if isinstance(env, Mapping):
+        for key, value in env.items():
+            if isinstance(key, str) and isinstance(value, str):
+                pairs.append((key, value))
+        return pairs
+    if isinstance(env, (list, tuple)):
+        for item in env:
+            if isinstance(item, str) and "=" in item:
+                key, value = item.split("=", 1)
+                pairs.append((key, value))
+    return pairs
+
+
+def _apply_allowlisted_env(into: dict[str, Any], env: Any) -> None:
+    """Lift binding-only env into process.config; never copy the env mapping."""
+    for key, value in _iter_env_pairs(env):
+        if key not in _BINDING_ENV_ALLOWLIST:
+            continue
+        if key == "OPENCODE_CONFIG_CONTENT" and "config" not in into:
+            try:
+                parsed = json.loads(value)
+            except ValueError:
+                continue
+            if isinstance(parsed, Mapping):
+                into["config"] = dict(parsed)
+
+
 def _merge_process_dict(into: dict[str, Any], process: Mapping[str, Any]) -> None:
     """Accumulate structured process fields; never screen preview/tail text."""
-    for key in ("pid", "argv", "command", "commandLine", "executable", "cwd", "env"):
+    for key in ("pid", "argv", "command", "commandLine", "executable", "cwd"):
         if key in process and process[key] is not None and key not in into:
             into[key] = process[key]
+    if "env" in process:
+        _apply_allowlisted_env(into, process.get("env"))
     # Nested effective / config blocks from the live process, not create echoes.
     for key in ("effective", "effectiveConfig", "config", "binding"):
         value = process.get(key)
@@ -565,7 +624,7 @@ def merge_process_evidence(*results: Any) -> dict[str, Any]:
         terminal = data.get("terminal", data)
         if not isinstance(terminal, dict):
             continue
-        # Structured process attestation from Orca (pid/argv/env/effective).
+        # Structured process attestation from Orca (pid/argv/effective).
         for key in ("process", "proc", "runtimeProcess"):
             proc = terminal.get(key)
             if isinstance(proc, Mapping):
@@ -635,11 +694,23 @@ def _binding_from_process_argv(argv: list[str]) -> dict[str, str | None] | None:
             config_raw = item.split("=", 1)[1]
             break
     if config_raw is None:
-        # ``env KEY=VAL binary`` form produced by the bridge builder.
+        # ``env KEY=VAL binary`` form produced by the POSIX bridge builder.
         for index, item in enumerate(argv):
             if item == "OPENCODE_CONFIG_CONTENT" and index + 1 < len(argv):
                 config_raw = argv[index + 1]
                 break
+    if config_raw is None:
+        # Windows PowerShell wrapper: FromBase64String('...')
+        joined = " ".join(argv)
+        marker = "FromBase64String('"
+        if marker in joined:
+            start = joined.index(marker) + len(marker)
+            end = joined.find("')", start)
+            if end > start:
+                try:
+                    config_raw = base64.b64decode(joined[start:end]).decode("utf-8")
+                except (ValueError, UnicodeDecodeError):
+                    config_raw = None
     if not config_raw:
         return None
     try:
@@ -810,6 +881,7 @@ def _attest_existing_terminal(
         *key.as_tuple(),
         strategy=LaunchStrategy.ORCA_EXISTING_TERMINAL,
         proven=True,
+        launch_ref=handle,
     )
 
 
@@ -914,9 +986,14 @@ def select_bootstrap_candidate(targets) -> ExecutionTarget | None:
     )
 
 
-def mark_launch_proven(target: ExecutionTarget) -> ExecutionTarget:
+def mark_launch_proven(
+    target: ExecutionTarget,
+    *,
+    launch_ref: str | None = None,
+) -> ExecutionTarget:
     """Advertise a target as runnable after successful prepare/attest."""
-    return replace(target, launch_proven=True)
+    ref = (launch_ref or target.launch_ref or "").strip() or None
+    return replace(target, launch_proven=True, launch_ref=ref)
 
 
 def serialize_prepared_launch(prepared: PreparedLaunch) -> dict[str, Any]:
@@ -978,7 +1055,10 @@ def prove_launch(
                     arguments.extend(["--model", target.model.id])
                 prepared = PreparedLaunch(arguments=arguments)
             elif target.launch_strategy is LaunchStrategy.ORCA_EXISTING_TERMINAL:
-                handle = (ctx.terminal_handle or "").strip()
+                handle = (
+                    (ctx.terminal_handle or "").strip()
+                    or (target.launch_ref or "").strip()
+                )
                 if not handle:
                     raise ValueError("Existing-terminal launch requires terminal_handle")
                 prepared = PreparedLaunch(
@@ -988,7 +1068,7 @@ def prove_launch(
                 )
             else:
                 raise
-        return target, prepared
+        return mark_launch_proven(target, launch_ref=prepared.terminal_handle), prepared
 
     # Provisionable bridge: must prepare/attest before Dispatch or Run create.
     adapter = adapter_for(target)
@@ -996,7 +1076,7 @@ def prove_launch(
     if not structured_binding_matches(target, prepared.evidence):
         abort_prepared(prepared, ctx)
         raise ValueError("Launch proof did not prove the requested binding")
-    return mark_launch_proven(target), prepared
+    return mark_launch_proven(target, launch_ref=prepared.terminal_handle), prepared
 
 
 def prove_bootstrap_launch(
@@ -1020,14 +1100,16 @@ def prove_launch_by_candidate_id(
 ) -> dict[str, Any]:
     """Trusted production surface for ``aichestra.prove_launch`` / CLI.
 
-    Coordinator supplies only ``candidate_id`` (+ project/worktree). Aichestra
-    reloads layered config, discovery, and binding from trusted state — never
-    treats caller-supplied runtime/provider/model/command as authoritative.
+    Coordinator supplies only ``candidate_id`` (+ project/worktree/repo-root).
+    Aichestra reloads layered config, discovery, and binding from trusted
+    state — never treats caller-supplied runtime/provider/model/command as
+    authoritative. The returned payload is sanitized for coordinator stdout.
     """
     from pathlib import Path
 
     from aichestra.config.layering import resolve_config
     from aichestra.providers.orca import resolve_orca_binary
+    from aichestra.repo import resolve_aichestra_config_root
 
     from .serialize import (
         LAUNCH_PROOF_OPERATION,
@@ -1035,97 +1117,121 @@ def prove_launch_by_candidate_id(
         serialize_execution_target,
     )
 
+    def _payload(data: dict[str, Any]) -> dict[str, Any]:
+        return sanitize_mapping(data)
+
     cid = str(candidate_id or "").strip()
     if not cid:
-        return {
+        return _payload({
             "ok": False,
             "operation": LAUNCH_PROOF_OPERATION,
             "error": "candidate_id is required",
-        }
+        })
 
     root = Path(project_root).resolve()
     if not root.is_dir():
-        return {
+        return _payload({
             "ok": False,
             "operation": LAUNCH_PROOF_OPERATION,
             "candidate_id": cid,
             "error": f"project_root is not a directory: {root}",
-        }
+        })
 
     if targets is None:
-        cfg = (
-            dict(config)
-            if config is not None
-            else resolve_config(
-                repo_root=Path(repo_root).resolve() if repo_root else None,
-                project_root=root,
+        try:
+            cfg = (
+                dict(config)
+                if config is not None
+                else resolve_config(
+                    repo_root=resolve_aichestra_config_root(
+                        repo_root=Path(repo_root).resolve() if repo_root else None,
+                        project_root=root,
+                    ),
+                    project_root=root,
+                )
             )
-        )
+        except ValueError as exc:
+            return _payload({
+                "ok": False,
+                "operation": LAUNCH_PROOF_OPERATION,
+                "candidate_id": cid,
+                "error": str(exc),
+            })
         targets, _policy, _facts = resolve_mode_c_execution(cfg)
 
     match = next((t for t in targets if t.id == cid), None)
     if match is None:
-        return {
+        return _payload({
             "ok": False,
             "operation": LAUNCH_PROOF_OPERATION,
             "candidate_id": cid,
             "error": f"unknown candidate_id: {cid}",
-        }
+        })
     if not match.preparable:
-        return {
+        return _payload({
             "ok": False,
             "operation": LAUNCH_PROOF_OPERATION,
             "candidate_id": cid,
             "error": "candidate is not preparable",
             "execution_target": serialize_execution_target(match),
-        }
+        })
 
     orca_binary = (binary or "").strip() or resolve_orca_binary() or ""
     if not orca_binary:
-        return {
+        return _payload({
             "ok": False,
             "operation": LAUNCH_PROOF_OPERATION,
             "candidate_id": cid,
             "error": "Orca binary required for launch proof",
-        }
+        })
 
     launch_ctx = LaunchContext(
         binary=orca_binary,
         worktree=str(worktree or "current").strip() or "current",
         terminal_handle=(
-            str(os.environ.get("ORCA_WORKER_TERMINAL_HANDLE") or "").strip() or None
+            str(os.environ.get("ORCA_WORKER_TERMINAL_HANDLE") or "").strip()
+            or (match.launch_ref or "").strip()
+            or None
         ),
         run=run if run is not None else subprocess.run,
     )
     try:
         proven, prepared = prove_launch(match, launch_ctx)
     except ValueError as exc:
-        return {
+        return _payload({
             "ok": False,
             "operation": LAUNCH_PROOF_OPERATION,
             "candidate_id": cid,
             "error": str(exc),
-        }
+        })
 
-    return {
+    return _payload({
         "ok": True,
         "operation": LAUNCH_PROOF_OPERATION,
         "candidate_id": cid,
         "execution_target": serialize_execution_target(proven),
         "prepared_launch": _coordinator_prepared_launch(prepared),
-    }
+    })
 
 
 def _coordinator_prepared_launch(prepared: PreparedLaunch) -> dict[str, Any]:
-    """Attestation for coordinator: handle + argv fragment; no DIY bridge command."""
+    """Attestation for coordinator: handle + argv fragment; no DIY command/env."""
     evidence = {
         key: value
         for key, value in dict(prepared.evidence).items()
-        if key != "bridge_command"
+        if key not in {"bridge_command", "env"}
     }
-    return {
-        "arguments": list(prepared.arguments),
-        "terminal_handle": prepared.terminal_handle,
-        "evidence": evidence,
-        "owns_terminal": prepared.owns_terminal,
-    }
+    process = evidence.get("process")
+    if isinstance(process, Mapping) and "env" in process:
+        evidence = {
+            **evidence,
+            "process": {k: v for k, v in process.items() if k != "env"},
+        }
+    return sanitize_mapping(
+        {
+            "arguments": list(prepared.arguments),
+            "terminal_handle": prepared.terminal_handle,
+            "evidence": evidence,
+            "owns_terminal": prepared.owns_terminal,
+        }
+    )

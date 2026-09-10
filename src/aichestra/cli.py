@@ -522,6 +522,7 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         installed_models=installed_models,
         execution_targets=execution_targets,
         execution_policy=execution_policy,
+        aichestra_repo_root=str(repo_root),
     )
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
