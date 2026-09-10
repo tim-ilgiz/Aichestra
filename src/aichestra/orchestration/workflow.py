@@ -44,6 +44,8 @@ task + project root
 from __future__ import annotations
 
 import os
+import json
+import copy
 import re
 import shutil
 import subprocess
@@ -406,6 +408,9 @@ class ModeCRunController:
             self.state.metadata["orca_run_id"] = self.bindings.resume_run_id.strip()
             self.state.metadata["orca_run_resumed"] = True
         self._attach_stage_root: str | None = None
+        self._resolved_roles = {}
+        self._quota_target = None
+        self._quota_attempted = False
         self._bootstrap_target = None
         self._prepared_bootstrap_launch = None
         self._inflight_handoff_context: dict[str, Any] | None = None
@@ -448,7 +453,21 @@ class ModeCRunController:
             )
             from aichestra.providers.orca import resolve_orca_binary
 
-            candidate = select_bootstrap_candidate(self.bindings.execution_targets)
+            if self.bindings.role_bindings:
+                from aichestra.config.roles import load_role_bindings, load_quota_policy
+                from aichestra.execution.roles import RoleBindingResolver
+                try:
+                    resolver = RoleBindingResolver(self.bindings.execution_targets)
+                    self._resolved_roles = resolver.resolve_all(load_role_bindings({"roles": self.bindings.role_bindings,
+                        "execution": {"runtimes": {t.runtime.id: {} for t in self.bindings.execution_targets}}}))
+                    quota = load_quota_policy({"quota": self.bindings.quota_policy,
+                        "execution": {"runtimes": {t.runtime.id: {} for t in self.bindings.execution_targets}}})
+                    if quota.mode == "auto":
+                        self._quota_target = resolver.resolve("implement_fallback", quota.implement_fallback)
+                except ValueError as exc:
+                    self._fail_gate(GateKind.ORCA_HANDOFF, detail=str(exc), result={"ok": False})
+                    return self.state
+            candidate = self._resolved_roles.get("implement") or select_bootstrap_candidate(self.bindings.execution_targets)
             if candidate is None:
                 self._fail_gate(GateKind.ORCA_HANDOFF,
                     detail="Mode C has no runnable bootstrap ExecutionTarget",
@@ -1191,7 +1210,9 @@ class ModeCRunController:
             if isinstance(self.state.metadata.get("media_routing"), dict)
             else None,
             precedence=tuple(project_ctx.get("precedence") or ()),
-            role_bindings=dict(self.bindings.role_bindings or {}),
+            role_bindings={role: {**binding, **({"execution_target_id": self._resolved_roles[role].id}
+                           if role in self._resolved_roles else {})}
+                           for role, binding in (self.bindings.role_bindings or {}).items()},
             quota_policy=dict(self.bindings.quota_policy or {}),
         )
 
@@ -1388,7 +1409,7 @@ class ModeCRunController:
             if adopt_fail is not None:
                 return adopt_fail
         if self._is_quota_failure(result):
-            return self._quota_handoff_failure(result, role=role, source="orca")
+            return self._quota_handoff_failure(result, role=role, source="orca", prompt=prompt, context=ctx)
         return {
             "ok": result.ok,
             "detail": result.detail,
@@ -1445,7 +1466,10 @@ class ModeCRunController:
         if run_id and self.bindings.orca:
             result = self.bindings.orca.execute_task(ProviderTaskRequest(
                 prompt="Read canonical Run state", role="run_status", read_only=True,
-                context={"run_id": run_id}, cwd=self.bindings.project_root,
+                context={"run_id": run_id, "quota_mode": self.bindings.quota_policy.get("mode", "manual")},
+                cwd=self.bindings.project_root, role_targets=self._resolved_roles,
+                execution_target=self._resolved_roles.get("implement") or self._bootstrap_target,
+                quota_target=self._quota_target,
             ))
             status["canonical_read"] = result.to_dict()
             status["canonical_state"] = result.metadata.get("receipt")
@@ -1549,10 +1573,7 @@ class ModeCRunController:
         return classify_speckit_scale(**heuristics)
 
     def _is_quota_failure(self, result: ProviderTaskResult) -> bool:
-        if result.failure is FailureClass.QUOTA:
-            return True
-        blob = f"{result.detail} {result.output}".lower()
-        return "quota" in blob
+        return result.failure is FailureClass.QUOTA
 
     def _quota_handoff_failure(
         self,
@@ -1560,7 +1581,64 @@ class ModeCRunController:
         *,
         role: str,
         source: str,
+        prompt: str = "",
+        context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        mode = self.bindings.quota_policy.get("mode", "manual")
+        if mode == "auto" and role == MODE_C_HANDOFF_ROLE and not self._quota_attempted:
+            self._quota_attempted = True
+            if result.metadata.get("worktree_path"):
+                adoption_error = self._adopt_orca_worktree(result)
+                if adoption_error:
+                    return adoption_error
+            target = self._quota_target
+            if target is None:
+                return {"ok": False, "failure": FailureClass.QUOTA.value,
+                        "detail": "Configured quota fallback has no resolved exact target"}
+            from aichestra.execution.launch_strategies import (
+                LaunchContext, prove_bootstrap_launch, serialize_prepared_launch)
+            from aichestra.providers.orca import resolve_orca_binary
+            orca = self.bindings.orca
+            binary = orca.probe().binary_path or resolve_orca_binary()
+            try:
+                if not binary:
+                    raise ValueError("Orca unavailable for same-Run quota fallback")
+                target, prepared = prove_bootstrap_launch(target, LaunchContext(
+                    binary=binary, worktree="current", run=subprocess.run))
+            except ValueError as exc:
+                return {"ok": False, "failure": FailureClass.QUOTA.value, "detail": str(exc)}
+            self._bootstrap_target = target
+            self._prepared_bootstrap_launch = prepared
+            ctx = copy.deepcopy(context or {})
+            # Never reuse the exhausted runtime's prepared launch/terminal handle.
+            for key in ("terminal_handle", "prepared_launch", "prepared_bootstrap_launch"):
+                ctx.pop(key, None)
+            ctx["prepared_bootstrap_launch"] = serialize_prepared_launch(prepared)
+            ctx["bootstrap_execution_target"] = serialize_execution_target(target)
+            recovery = {"run_id": self.state.metadata["orca_run_id"],
+                        "failed_dispatch": result.metadata.get("dispatch_id"),
+                        "failure": FailureClass.QUOTA.value,
+                        "previous_outcome": result.to_dict(),
+                        "fallback_target": serialize_execution_target(target)}
+            # Tell the replacement what already happened; never start a fresh
+            # objective or silently reuse the exhausted implement binding.
+            for container in (ctx, ctx.get("policy_package")):
+                if isinstance(container, dict):
+                    roles = dict(container.get("role_bindings") or {})
+                    roles["implement"] = {"runtime": target.runtime.id,
+                        "provider": target.provider.id if target.provider else None,
+                        "model": target.model.id if target.model else None,
+                        "execution_target_id": target.id}
+                    container["role_bindings"] = roles
+            prompt = ("Resume the existing Orca Run after quota exhaustion. Inspect "
+                      "canonical tasks and continue unfinished work in the same worktree. "
+                      "Quota recovery: " + json.dumps(sanitize_mapping(recovery)) + "\n\n" + prompt)
+            self.state.metadata["quota_fallback"] = {"run_id": self.state.metadata["orca_run_id"],
+                "target": serialize_execution_target(target), "source": result.to_dict()}
+            return self._run_via_orca(prompt=prompt, role=role, context=ctx, adopt_worktree=True)
+        if mode == "auto":
+            return {"ok": False, "failure": FailureClass.QUOTA.value,
+                    "detail": "Configured automatic quota fallback exhausted; change settings to continue the same Run"}
         packet = build_handoff_packet(
             original_request=self.bindings.task_prompt
             or self.state.metadata.get("task_prompt", ""),
@@ -1576,7 +1654,7 @@ class ModeCRunController:
             next_action="Continue inside the same Orca Run",
             compacted_research={},
             source_lead=source if source != "orca" else self.bindings.preferred_lead,
-            target_lead="cursor",
+            target_lead=str(self.bindings.quota_policy.get("implement_fallback", {}).get("runtime") or self.bindings.fallback_lead or "operator"),
             orca_run_id=str(self.state.metadata.get("orca_run_id") or ""),
         )
         handoff = prepare_manual_handoff(

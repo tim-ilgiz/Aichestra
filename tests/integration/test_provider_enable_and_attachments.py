@@ -191,26 +191,24 @@ def test_orchestrate_honors_preferred_lead_and_no_codex(
             "--no-codex",
         ]
     )
-    payload = json.loads(capsys.readouterr().out)
-    assert code == 0, payload
-    assert payload["config_roots"]["preferred_lead"] == "cursor"
-    assert payload["config_roots"]["providers_enabled"]["codex"] is False
+    output = capsys.readouterr()
+    assert code == 2
+    assert "roles.implement" in output.err and "disabled" in output.err
+    assert not output.out
 
 
-def test_orchestrate_requires_project_root(
-    fake_aichestra_root: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+def test_orchestrate_infers_project_root_and_preflights_verification(
+    fake_aichestra_root, tmp_path, monkeypatch, capsys,
+):
+    from aichestra.config.project_settings import init_project
+    project = tmp_path / "project"
+    project.mkdir()
+    init_project(project, yes=True)
+    nested = project / "nested"
+    nested.mkdir()
+    monkeypatch.chdir(nested)
     monkeypatch.setenv("AICHESTRA_FAKE_PROVIDERS", "1")
-    with pytest.raises(SystemExit) as exc:
-        main(
-            [
-                "orchestrate",
-                "--repo-root",
-                str(fake_aichestra_root),
-                "--prompt",
-                "no root",
-            ]
-        )
-    assert exc.value.code == 2
+    code = main(["orchestrate", "--repo-root", str(fake_aichestra_root), "--prompt", "noop"])
+    assert code == 2
+    assert "Configure verification before orchestration" in capsys.readouterr().err
+    assert not (project / ".aichestra" / "last_mode_c_run.json").exists()

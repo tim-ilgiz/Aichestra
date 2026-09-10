@@ -266,3 +266,69 @@ def test_infer_signals_latest_py_is_behavior_not_test() -> None:
     )
     assert signals["touches_behavior"] is True
     assert signals["existing_tests_cover"] is False
+
+
+@pytest.mark.parametrize("mode, fallback_runtime, fallback_failure", [
+    ("manual", "cursor", False), ("auto", "gemini", False), ("auto", "cursor", True),
+])
+def test_quota_policy_continues_exact_target_in_one_run(tmp_path, mode, fallback_runtime, fallback_failure):
+    from aichestra.providers.base import FailureClass, ProviderTaskResult
+    orca = fake_orca()
+    original = orca.execute_task
+    attempts = []
+    def execute(request):
+        if request.role == MODE_C_HANDOFF_ROLE:
+            attempts.append(request)
+            if len(attempts) == 1 or fallback_failure:
+                return ProviderTaskResult(ok=False, failure=FailureClass.QUOTA, detail="quota exhausted")
+        return original(request)
+    orca.execute_task = execute
+    targets = fake_execution_targets() + fake_execution_targets(fallback_runtime)
+    ctl = ModeCRunController(bindings=WorkflowBindings(
+        orca=orca, project_root=str(tmp_path), task_prompt="fix typo",
+        execution_targets=targets, verification_enabled=True,
+        verification_commands=[[sys.executable, "-c", "pass"]],
+        role_bindings={r: {"runtime": "codex"} for r in ("implement", "research", "tests", "docs")},
+        quota_policy={"mode": mode, "implement_fallback": {"runtime": fallback_runtime}},
+    ))
+    state = ctl.run_all()
+    assert orca.run_creates == 1
+    assert len({r.context["run_id"] for r in attempts}) == 1
+    if mode == "manual":
+        assert len(attempts) == 1 and state.failed
+        assert state.metadata["manual_handoff"]
+    else:
+        assert len(attempts) == 2
+        assert attempts[1].execution_target.runtime.id == fallback_runtime
+        assert attempts[1].context["role_bindings"]["implement"]["runtime"] == fallback_runtime
+        assert attempts[0].context["role_bindings"]["implement"]["runtime"] == "codex"
+        assert "quota exhausted" in attempts[1].prompt
+        assert attempts[1].context["prepared_bootstrap_launch"] != attempts[0].context["prepared_bootstrap_launch"]
+        assert bool(state.failed) == fallback_failure
+        assert "manual_handoff" not in state.metadata
+
+
+def test_production_run_status_audits_effective_role_receipts(monkeypatch, tmp_path):
+    import json
+    from aichestra.providers.orca import OrcaProvider
+    from aichestra.providers.base import ProviderTaskResult, ProviderSession
+    from tests.contract.test_role_bindings_policy import receipt
+    task, worker, payload = receipt()
+    task["status"] = "completed"
+    responses = {"run-show": {"run": {"id": "r1", "state": "active"}},
+                 "task-list": {"tasks": [task]}, "worker-list": {"workers": [worker]},
+                 "worker-show": payload}
+    def cli(**kwargs):
+        data = {} if kwargs["argv"][1] == "status" else responses[kwargs["argv"][2]]
+        return ProviderTaskResult(ok=True, output=json.dumps(data))
+    monkeypatch.setattr("aichestra.providers.orca.run_cli_task", cli)
+    monkeypatch.setattr("aichestra.providers.orca.resolve_orca_binary", lambda: "orca")
+    adapter = OrcaProvider()
+    request = ProviderTaskRequest(prompt="status", role="run_status", cwd=str(tmp_path),
+                                  context={"run_id": "r1"}, role_targets={"tests": fake_execution_targets()[0]})
+    result = adapter.execute_task(request)
+    assert result.ok and result.metadata["role_audit"]["dispatches_checked"] == 1
+    payload["launch"]["effective"]["agent"] = "cursor"
+    result = adapter.execute_task(request)
+    assert not result.ok and not result.metadata["settled"]
+    assert "violates binding" in result.metadata["role_audit"]["detail"]

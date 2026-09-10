@@ -96,7 +96,8 @@ def build_parser() -> argparse.ArgumentParser:
         "settings",
         help="Show or set project .aichestra role/quota/verify settings",
     )
-    settings_sub = settings_p.add_subparsers(dest="settings_command", required=True)
+    settings_p.add_argument("--project-root", type=Path, default=None)
+    settings_sub = settings_p.add_subparsers(dest="settings_command")
     settings_show = settings_sub.add_parser("show", help="Print project settings")
     settings_show.add_argument("--project-root", type=Path, default=None)
     settings_show.add_argument("--json", action="store_true", default=True)
@@ -249,8 +250,8 @@ def build_parser() -> argparse.ArgumentParser:
     orch_p.add_argument(
         "--project-root",
         type=Path,
-        required=True,
-        help="Target project root (required for Mode C; verify commands + write isolation)",
+        default=None,
+        help="Target project root (default: nearest .aichestra/project.json or cwd)",
     )
     orch_p.add_argument(
         "--attach",
@@ -412,8 +413,12 @@ def _cmd_init(args: argparse.Namespace) -> int:
 def _cmd_settings(args: argparse.Namespace) -> int:
     from aichestra.config.project_settings import settings_set, show_settings
 
-    root = Path(args.project_root or Path.cwd()).resolve()
+    from aichestra.config.project_settings import resolve_project_root, interactive_settings
+    root = resolve_project_root(args.project_root)
     try:
+        if args.settings_command is None:
+            interactive_settings(root)
+            return 0
         if args.settings_command == "show":
             payload = show_settings(root)
         else:
@@ -544,7 +549,6 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         resolve_mode_c_execution,
     )
     from aichestra.orchestration.modes import Mode
-    from aichestra.orchestration.roles import select_lead
     from aichestra.orchestration.verification import (
         verification_commands_from_config,
         verification_enabled,
@@ -555,13 +559,8 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
     from aichestra.providers.orca import OrcaProvider
     from aichestra.providers.quota_guard import real_provider_execution_blocked
 
-    # Mode C must never write into ambient cwd — project-root is mandatory.
-    if not args.project_root:
-        sys.stderr.write(
-            "Mode C requires --project-root before any provider execution\n"
-        )
-        return 2
-    project_root = Path(args.project_root).resolve()
+    from aichestra.config.project_settings import resolve_project_root
+    project_root = resolve_project_root(args.project_root)
     if not project_root.is_dir():
         sys.stderr.write(f"Mode C --project-root is not a directory: {project_root}\n")
         return 2
@@ -582,10 +581,17 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         no_cursor=bool(getattr(args, "no_cursor", False)),
         no_local=bool(getattr(args, "no_local", False)),
     )
+    if not verification_enabled(cfg) or not verification_commands_from_config(cfg):
+        sys.stderr.write("Configure verification before orchestration: aichestra settings set verification.enabled=true 'verify=[\"python\",\"-m\",\"pytest\"]' (choose commands for your project).\n")
+        return 2
     # CI/fake mode never probes or launches real runtimes.
     use_fakes = real_provider_execution_blocked()
-    execution_targets, execution_policy, _facts = resolve_mode_c_execution(
-        cfg, known_launches=() if use_fakes else None)
+    try:
+        execution_targets, execution_policy, _facts = resolve_mode_c_execution(
+            cfg, known_launches=() if use_fakes else None)
+    except ValueError as exc:
+        sys.stderr.write(f"Invalid execution/role config: {exc}\n")
+        return 2
     local_cfg = cfg.get("local") if isinstance(cfg.get("local"), dict) else {}
     ollama_host = local_cfg.get("ollama_host") or local_cfg.get("endpoint")
     preferred_ids = _local_cfg_list(local_cfg, "preferred_models", "preferred_ids")
@@ -596,7 +602,6 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
     enabled = enabled_map_from_config(cfg)
 
     from aichestra.config.roles import (
-        RoleBinding,
         load_quota_policy,
         load_role_bindings,
         role_bindings_to_dict,
@@ -613,36 +618,10 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
     fallback = fallback_lead_name(cfg)
     disabled = frozenset(execution_policy.disabled_runtimes or ())
     implement = role_bindings_map["implement"]
-    if implement.runtime not in disabled:
-        preferred = implement.runtime
-    else:
-        # CLI/policy disabled the bound implement runtime — remap for this
-        # invocation to preferred_lead / fallback / research / quota fallback.
-        candidates = [
-            preferred,
-            fallback,
-            role_bindings_map["research"].runtime,
-            quota_policy_obj.implement_fallback.runtime,
-        ]
-        remapped = next(
-            (c for c in candidates if c and str(c) not in disabled),
-            None,
-        )
-        if remapped is None:
-            sys.stderr.write(
-                "Mode C fail closed: roles.implement is bound to "
-                f"{implement.runtime!r} but that runtime is disabled and no "
-                "allowed fallback remains. Change roles via "
-                "`aichestra settings set` or remove the disable flag.\n"
-            )
-            return 2
-        role_bindings_map = dict(role_bindings_map)
-        role_bindings_map["implement"] = RoleBinding(
-            runtime=str(remapped),
-            provider=implement.provider,
-            model=implement.model,
-        )
-        preferred = str(remapped)
+    if implement.runtime in disabled:
+        sys.stderr.write(f"Mode C fail closed: roles.implement runtime {implement.runtime!r} is disabled; change settings or remove the disable flag.\n")
+        return 2
+    preferred = implement.runtime
     fallback = (
         quota_policy_obj.implement_fallback.runtime
         if quota_policy_obj.implement_fallback.runtime not in disabled
@@ -661,7 +640,17 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         from aichestra.providers.fakes import fake_execution_targets
         execution_targets = fake_execution_targets(providers, execution_policy)
     # Policy resolution for observability / config_roots — not adapter construction.
-    selection = select_lead(providers, preferred=preferred, fallback=fallback)
+    from aichestra.execution.roles import RoleBindingResolver
+    try:
+        resolver = RoleBindingResolver(execution_targets)
+        resolved_roles = resolver.resolve_all(role_bindings_map)
+        if quota_policy_obj.mode == "auto":
+            resolver.resolve("implement_fallback", quota_policy_obj.implement_fallback)
+    except ValueError as exc:
+        sys.stderr.write(str(exc) + "\n")
+        return 2
+    from dataclasses import replace
+    execution_targets = tuple(replace(t, preferred=t.id == resolved_roles["implement"].id) for t in execution_targets)
     attachments = tuple(str(Path(p).expanduser().resolve()) for p in (args.attach or []))
 
     orca = (fake_orca() if use_fakes else OrcaProvider()) if enabled.get("orca", True) else None
@@ -763,7 +752,7 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         "local_enabled": enabled_local,
         "preferred_lead": preferred,
         "fallback_lead": fallback,
-        "lead_policy": selection.lead.value if selection.lead else None,
+        "lead_policy": preferred,
         "providers_enabled": enabled,
         "fake_providers": use_fakes,
         "verification_commands": bindings.verification_commands,

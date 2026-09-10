@@ -47,3 +47,6 @@ Thumbs.db
 
 # Do NOT ignore Spec Kit / agent integration skill files:
 # .cursor/skills, .cursor/rules, .agents/skills, .opencode/commands are tracked.
+
+# Machine-local IDE state
+.idea/

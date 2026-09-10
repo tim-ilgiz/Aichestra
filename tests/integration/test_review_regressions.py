@@ -284,11 +284,8 @@ def test_orchestrate_with_verification_disabled_fails_closed(
             "--no-research",
         ]
     )
-    payload = json.loads(capsys.readouterr().out)
-    assert code != 0
-    assert GateKind.VERIFICATION.value in payload["failed"]
-    assert payload["config_roots"]["verification_enabled"] is False
-    assert payload["metadata"].get("verification_disabled") is True
-    report = payload["metadata"].get("verification") or {}
-    assert report.get("ok") is False
-    assert int(report.get("exit_code") or 0) != 0
+    output = capsys.readouterr()
+    assert code == 2
+    assert "Configure verification before orchestration" in output.err
+    assert not output.out
+    assert not (project / ".aichestra" / "last_mode_c_run.json").exists()

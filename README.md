@@ -49,6 +49,7 @@ python -m aichestra update            # after git pull; preserves machine-local
 
 # Target project
 aichestra init --yes                  # create .aichestra/project.json
+aichestra settings                    # interactive role/model/quota editor
 aichestra settings show               # print roles / quota / verification
 aichestra settings set KEY=VALUE …    # mutate project.json (see below)
 
@@ -109,14 +110,31 @@ values are AgentRuntime ids (`codex`, `cursor`, `gemini`, `claude`, `opencode`)
 with optional `provider` / `model` (OpenCode + local/Ollama). Aliases `local` /
 `local-worker` map to `opencode`. Config lives in `.aichestra/project.json`.
 `verify` is separate from the toggle. Init sets `verification.enabled=false`;
-until enabled, the verification gate returns non-zero to Orca (no soft-pass).
+until enabled with non-empty verify commands, orchestration stops at preflight
+before creating a Run. The verification gate also remains fail-closed.
 Machine-local prefs for a global install use the portable user config home
 (`AICHESTRA_CONFIG_HOME` override supported).
 
-Mode C reads these bindings into `POLICY_PACKAGE.role_bindings` /
-`quota_policy`. The Orca coordinator MUST Dispatch by role; `quota.mode=auto`
-means same-Run fallback on implement quota; `manual` notifies the operator to
-change settings.
+Mode C resolves each role into an exact supported ExecutionTarget before
+creating a Run. `execution.runtimes` can register additional runtime ids.
+Disabled or unresolved bindings fail with a settings error. Orca owns task
+creation; canonical task/worker receipts are audited for role, Run and effective
+runtime/provider/model/endpoint. Missing or mismatched evidence fails the Run.
+This audit happens after dispatch and does not prevent earlier worker edits.
+An Orca version that omits required evidence cannot pass this contract. The
+installed version inspected during this change exposes `dispatch`, `worker` and
+`startOptions` from worker-show, but no durable effective launch binding. Full
+live role/quota acceptance is blocked on that upstream receipt capability.
+
+`quota.mode=manual` stops and asks the operator to change settings. `auto`
+retries the coordinator once through Orca with `quota.implement_fallback` in
+the same Run; another quota stops. Inner-task fallback must have a prior
+structured quota receipt. Live quota recovery remains NOT VALIDATED.
+
+From a project or subdirectory, use `aichestra orchestrate --prompt "..."`.
+The nearest ancestor `.aichestra/project.json` selects the project root, with
+cwd as the fallback; `--project-root` overrides this. `aichestra init` opens
+the settings editor on a terminal; `--yes` accepts defaults for automation.
 
 ### Modes in practice
 
@@ -177,8 +195,9 @@ python scripts/smoke_mac.py         # Mac-oriented live smoke report
 | C | `orchestrated` | One Orca Run + Aichestra policy/gates (agent steps via Orca; local maintenance-reviewer + verification on adopted worktree). |
 
 Orca is opt-in and **required for Mode C**. Codex is the preferred lead; Cursor is the fallback.
-Quota handoff Codex→Cursor is **manual one-action** in v1
-(`automatic_quota_fallback_reliable = false`).
+Quota behavior uses project `quota.mode` and its exact configured fallback.
+Legacy handoff helpers retain their manual semantics; Mode C recovery is owned
+by the Run controller and executed only through Orca.
 
 ## Staging diagnostics
 

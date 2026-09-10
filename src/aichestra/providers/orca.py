@@ -775,7 +775,7 @@ class OrcaProvider(ProviderAdapter):
                 "Never pass a raw terminal handle to abort-launch. "
                 "Target locality may be local, remote, or cloud according to ExecutionPolicy. "
                 "Do not infer workers from raw providers. "
-                "When POLICY_PACKAGE.role_bindings is present, it is explicit "
+                "Every inner task must use its exact role (implement/research/tests/docs) as task-title. Canonical worker-show launch.effective receipts are audited; missing or mismatched evidence fails the Run. When POLICY_PACKAGE.role_bindings is present, it is explicit "
                 "project/user policy: for each child Task declare role in "
                 "{implement,research,tests,docs} and Dispatch ONLY the bound "
                 "runtime (and provider/model when set) from execution_targets. "
@@ -894,13 +894,17 @@ class OrcaProvider(ProviderAdapter):
                 argv=[binary, "orchestration", "task-list", "--run", str(request.context["run_id"]), "--json"],
                 session=session, request=request, unavailable_detail="Orca unavailable")
             rows = _receipt_rows(_parse_orca_json(tasks.output), "tasks")
+            audit = {"ok": True}
+            if request.role_targets:
+                audit = self._audit_role_dispatches(binary, session, request, rows)
+                valid = valid and audit["ok"]
             settled = bool(valid and tasks.ok and rows and all(
-                row.get("status") == "completed" for row in rows))
+                (row.get("status") == "completed" or (row.get("id") or row.get("taskId")) in audit.get("superseded_quota_tasks", [])) for row in rows))
             return replace(result, ok=settled,
                 failure=FailureClass.NONE if settled else FailureClass.ERROR,
                 detail="Canonical Run settled" if settled else "Canonical Run failed, unsettled, or unverifiable",
                 metadata={**result.metadata, "receipt": receipt, "tasks": _parse_orca_json(tasks.output),
-                          "settled": settled})
+                          "settled": settled, "role_audit": audit})
 
         # Phase reports must never create Runs — local metadata only at adapter.
         if role in {"phase_report", "status_ping"}:
@@ -1023,6 +1027,32 @@ class OrcaProvider(ProviderAdapter):
         released = state in {"released", "already_released"}
         ok = bool(result.ok and released and workers.ok and not unresolved)
         return ok, {"state": state, "history": history, "unresolved_resources": unresolved}
+
+    def _audit_role_dispatches(self, binary, session, request, tasks):
+        from aichestra.execution.roles import validate_role_receipts
+        run_id = request.context["run_id"]
+        def call(args):
+            result = run_cli_task(binary=binary, argv=[binary, *args], session=session, request=request)
+            if not result.ok:
+                raise ValueError("Cannot read canonical dispatch receipts")
+            return _parse_orca_json(result.output)
+        try:
+            if not tasks:
+                raise ValueError("Cannot read canonical role tasks")
+            workers = _receipt_rows(call(["orchestration", "worker-list", "--run", run_id, "--json"]), "workers")
+            if workers is None:
+                raise ValueError("Cannot enumerate Run dispatches")
+            receipts = {}
+            for worker in workers:
+                dispatch = worker.get("dispatch_id") or worker.get("dispatchId")
+                if not isinstance(dispatch, str) or not dispatch:
+                    raise ValueError("Worker receipt missing dispatch id")
+                receipts[dispatch] = call(["orchestration", "worker-show", "--dispatch", dispatch, "--json"])
+            return validate_role_receipts(run_id, tasks, workers, receipts,
+                request.role_targets, bootstrap_target=request.execution_target,
+                quota_target=request.quota_target, quota_mode=request.context.get("quota_mode", "manual"))
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            return {"ok": False, "detail": str(exc)}
 
     def _register_run(
         self,
@@ -1637,10 +1667,17 @@ class OrcaProvider(ProviderAdapter):
             if "cleanup" not in meta:
                 _, cleanup = self._release_worker(binary, session, request, dispatch_id, run_id)
                 meta["cleanup"] = cleanup
+            event = done_meta.get("event") or {}
+            failure_code = event.get("failure")
+            if isinstance(failure_code, dict):
+                failure_code = failure_code.get("code")
+            quota_failure = failure_code in {"quota", "rate_limit", "quota_exhausted"}
+            cleanup = meta.get("cleanup") or {}
+            quota_failure = quota_failure and cleanup.get("state") in {"released", "already_released"} and not cleanup.get("unresolved_resources", True)
             return ProviderTaskResult(
                 ok=False,
                 output=wait_result.output or worker_result.output,
-                failure=FailureClass.ERROR,
+                failure=FailureClass.QUOTA if quota_failure else FailureClass.ERROR,
                 detail=done_detail,
                 session_id=session.session_id,
                 metadata=meta,

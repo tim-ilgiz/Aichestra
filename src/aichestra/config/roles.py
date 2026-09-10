@@ -8,9 +8,12 @@ from typing import Any, Mapping
 ROLE_KEYS: tuple[str, ...] = ("implement", "research", "tests", "docs")
 
 # Product ids are identifiers, not enum cases for dispatch logic — validation set.
-KNOWN_RUNTIMES: frozenset[str] = frozenset(
-    {"codex", "cursor", "gemini", "claude", "opencode"}
-)
+from aichestra.execution.runtimes import DEFAULT_RUNTIME_BINARIES
+
+KNOWN_RUNTIMES = frozenset(DEFAULT_RUNTIME_BINARIES)
+
+def configured_runtimes(config):
+    return KNOWN_RUNTIMES | set((config or {}).get("execution", {}).get("runtimes", {}))
 
 _RUNTIME_ALIASES: dict[str, str] = {
     "local": "opencode",
@@ -46,23 +49,23 @@ class QuotaPolicy:
         }
 
 
-def normalize_runtime_id(raw: str) -> str:
+def normalize_runtime_id(raw: str, *, known=KNOWN_RUNTIMES) -> str:
     text = str(raw or "").strip().lower()
     if not text:
         raise ValueError("runtime id must be non-empty")
     text = _RUNTIME_ALIASES.get(text, text)
-    if text not in KNOWN_RUNTIMES:
+    if text not in known:
         raise ValueError(
-            f"unknown runtime {raw!r}; expected one of {sorted(KNOWN_RUNTIMES)} "
+            f"unknown runtime {raw!r}; expected one of {sorted(known)} "
             f"or aliases {sorted(_RUNTIME_ALIASES)}"
         )
     return text
 
 
-def parse_role_binding(raw: Any, *, field: str = "role") -> RoleBinding:
+def parse_role_binding(raw: Any, *, field: str = "role", known=KNOWN_RUNTIMES) -> RoleBinding:
     """Accept string runtime or object {runtime, provider?, model?}."""
     if isinstance(raw, str):
-        return RoleBinding(runtime=normalize_runtime_id(raw))
+        return RoleBinding(runtime=normalize_runtime_id(raw, known=known))
     if isinstance(raw, Mapping):
         runtime = raw.get("runtime") or raw.get("agent")
         if runtime is None or not str(runtime).strip():
@@ -70,7 +73,7 @@ def parse_role_binding(raw: Any, *, field: str = "role") -> RoleBinding:
         provider = raw.get("provider")
         model = raw.get("model") or raw.get("model_ref")
         return RoleBinding(
-            runtime=normalize_runtime_id(str(runtime)),
+            runtime=normalize_runtime_id(str(runtime), known=known),
             provider=str(provider).strip() if provider else None,
             model=str(model).strip() if model else None,
         )
@@ -103,7 +106,7 @@ def load_role_bindings(config: Mapping[str, Any] | None) -> dict[str, RoleBindin
     out = dict(base)
     for key in ROLE_KEYS:
         if key in raw_roles:
-            out[key] = parse_role_binding(raw_roles[key], field=f"roles.{key}")
+            out[key] = parse_role_binding(raw_roles[key], field=f"roles.{key}", known=configured_runtimes(config))
     return out
 
 
@@ -118,7 +121,7 @@ def load_quota_policy(config: Mapping[str, Any] | None) -> QuotaPolicy:
     if mode not in {"manual", "auto"}:
         raise ValueError("quota.mode must be 'manual' or 'auto'")
     fb_raw = raw.get("implement_fallback", base.implement_fallback.to_dict())
-    fallback = parse_role_binding(fb_raw, field="quota.implement_fallback")
+    fallback = parse_role_binding(fb_raw, field="quota.implement_fallback", known=configured_runtimes(config))
     return QuotaPolicy(mode=mode, implement_fallback=fallback)
 
 

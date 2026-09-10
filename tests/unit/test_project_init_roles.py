@@ -122,3 +122,31 @@ def test_resolve_config_root_falls_back_to_user_home(
     monkeypatch.chdir(foreign)
     root = resolve_aichestra_config_root(start=foreign)
     assert root == cfg_home.resolve()
+
+
+def test_settings_menu_uses_discovery_and_preserves_cancel(tmp_path, monkeypatch):
+    import sys
+    from aichestra.config.project_settings import interactive_settings, load_project_config
+    from aichestra.execution.domain import AgentRuntime, DiscoveryFacts
+    init_project(tmp_path, yes=True)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("aichestra.execution.discovery.discover_execution_facts",
+                        lambda _: DiscoveryFacts(runtimes=(AgentRuntime("cursor", available=True),)))
+    replies = iter(["1", "1", "1", "7"])
+    monkeypatch.setattr("builtins.input", lambda _: next(replies))
+    interactive_settings(tmp_path)
+    assert load_project_config(tmp_path)["roles"]["implement"] == {"runtime": "cursor"}
+    before = load_project_config(tmp_path)
+    replies = iter(["5", "2", "1", "1", "0"])
+    interactive_settings(tmp_path)
+    assert load_project_config(tmp_path) == before
+
+
+def test_custom_runtime_settings_and_invalid_mutation_are_atomic(tmp_path):
+    from aichestra.config.project_settings import apply_settings_sets
+    cfg = {"execution": {"runtimes": {"custom": {}}}, "roles": {"tests": {"runtime": "cursor"}}}
+    result = apply_settings_sets(cfg, ["roles.tests=custom"])
+    assert result["roles"]["tests"]["runtime"] == "custom"
+    with pytest.raises(ValueError):
+        apply_settings_sets(cfg, ["roles.tests.runtime=unknown"])
+    assert cfg["roles"]["tests"]["runtime"] == "cursor"

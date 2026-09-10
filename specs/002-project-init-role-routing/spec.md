@@ -4,7 +4,7 @@
 
 **Created**: 2026-09-10
 
-**Status**: Specified — implement per plan/tasks
+**Status**: Implemented; live Orca receipt compatibility requires live validation
 
 **Input**: Global pip-installable Aichestra; `aichestra init` in a target project;
 Console settings CLI for role→runtime(+model) bindings; Mode C coordinator
@@ -48,7 +48,7 @@ local models.
 2. `aichestra settings set roles.implement=codex` works.
 3. Object form works: `roles.tests={"runtime":"opencode","model":"qwen2.5-coder:14b"}`
    or dotted keys `roles.tests.runtime=opencode` + `roles.tests.model=...`.
-4. Unknown runtime ids fail closed.
+4. Unknown runtime ids fail closed; execution.runtimes registrations are valid.
 5. `quota.mode=manual|auto` and `quota.implement_fallback` are settable.
 
 ### US3 — Mode C honors role bindings (P1)
@@ -82,8 +82,36 @@ still run when present. Language-aware verification is a follow-up.
 
 ## Out of scope
 
-- Full interactive installer TUI
+- Full graphical installer TUI (a small console settings editor is in scope)
 - Per-model pins inside Codex/Cursor cloud product UIs beyond Dispatch args
   when Orca supports them
 - OpenAI billing API polling
 - Aichestra-owned research→implement→tests→docs phase graph
+
+## PR #2 acceptance corrections
+
+- Resolve every configured role to one exact ExecutionTarget before Run creation;
+  role provider/model declarations participate in compatibility resolution.
+  Disabled, missing, incompatible or unsupported targets fail closed. Registered
+  `execution.runtimes` ids are accepted alongside built-ins.
+- Canonical Orca task/worker receipts must prove role, same-Run task association,
+  and effective runtime/provider/model/endpoint. Missing evidence or a mismatch
+  fails the Run. A prompt or source-text assertion is not proof of dispatch.
+- Auto quota recovery retries the coordinator once through Orca with the exact
+  configured fallback and the original run_id. No direct provider execution.
+  Inner-task fallback receipts require a prior structured quota outcome and
+  chronological same-Run evidence; manual mode stops with operator guidance.
+- An explicitly disabled implement binding must never be remapped, including
+  when its runtime differs from legacy preferred_lead configuration.
+- `orchestrate --prompt ...` finds the nearest ancestor `.aichestra/project.json`,
+  otherwise uses resolved cwd. `--project-root` remains an explicit override.
+- `settings` opens a console menu for Coding, Research, Tests, Documentation,
+  Quota fallback and Verification; available choices use discovery. `init`
+  without `--yes` opens this editor on a terminal. Noninteractive automation
+  retains `init --yes` and `settings show|set`.
+- Init keeps verification disabled without inventing project commands. Run
+  preflight rejects missing/disabled verification before discovery or paid work.
+- Every CI OS builds a wheel and installs it into a clean venv, then exercises
+  version/init/settings from an unrelated temporary project without checkout
+  imports. Fake-provider tests do not establish live Orca compatibility.
+- Machine-local IDE workspace/account state must not be tracked.

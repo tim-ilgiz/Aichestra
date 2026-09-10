@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+import sys
 import json
 import re
 from pathlib import Path
@@ -9,6 +11,7 @@ from typing import Any, Mapping
 
 from aichestra.config.roles import (
     ROLE_KEYS,
+    configured_runtimes,
     default_quota_policy,
     default_role_bindings,
     load_quota_policy,
@@ -92,9 +95,8 @@ def init_project(
     cfg = default_project_config(project_root=root)
     if sets:
         cfg = apply_settings_sets(cfg, sets)
-    elif not yes:
-        # Non-interactive default when stdin not a TTY; keep defaults.
-        pass
+    if not yes and sys.stdin.isatty():
+        cfg = interactive_settings(root, config=cfg, save=False)
     save_project_config(root, cfg)
     _ensure_gitignore_user_local(root)
     return {"ok": True, "created": True, "path": str(path), "config": cfg}
@@ -120,7 +122,7 @@ def show_settings(project_root: Path | str) -> dict[str, Any]:
 
 
 def apply_settings_sets(config: dict[str, Any], pairs: list[str]) -> dict[str, Any]:
-    out = dict(config)
+    out = copy.deepcopy(config)
     for pair in pairs:
         match = _SET_PAIR.match(pair.strip())
         if not match:
@@ -180,7 +182,7 @@ def _assign_dotted(target: dict[str, Any], dotted: str, value: Any) -> None:
         and parts[1] in ROLE_KEYS
         and isinstance(value, str)
     ):
-        binding = parse_role_binding(value, field=dotted)
+        binding = parse_role_binding(value, field=dotted, known=configured_runtimes(target))
         roles = target.setdefault("roles", {})
         if not isinstance(roles, dict):
             raise ValueError("roles must be an object")
@@ -192,7 +194,7 @@ def _assign_dotted(target: dict[str, Any], dotted: str, value: Any) -> None:
         and parts[1] == "implement_fallback"
         and isinstance(value, str)
     ):
-        binding = parse_role_binding(value, field=dotted)
+        binding = parse_role_binding(value, field=dotted, known=configured_runtimes(target))
         quota = target.setdefault("quota", {})
         if not isinstance(quota, dict):
             raise ValueError("quota must be an object")
@@ -227,3 +229,88 @@ def _ensure_gitignore_user_local(project_root: Path) -> None:
             f"# Aichestra personal overlay\n{marker}\n",
             encoding="utf-8",
         )
+
+
+def resolve_project_root(override=None) -> Path:
+    if override is not None:
+        return Path(override).expanduser().resolve()
+    cwd = Path.cwd().resolve()
+    return next((p for p in (cwd, *cwd.parents)
+                 if project_config_path(p).is_file()), cwd)
+
+
+def interactive_settings(project_root, *, config=None, save=True):
+    """Small console editor using discovered runtimes/models; writes on Save."""
+    if not sys.stdin.isatty():
+        raise ValueError("Interactive settings requires a terminal; use settings show or settings set KEY=VALUE")
+    from aichestra.config.layering import resolve_config
+    from aichestra.repo import resolve_aichestra_config_root
+    from aichestra.execution.discovery import discover_execution_facts
+    root = Path(project_root).resolve()
+    cfg = copy.deepcopy(config if config is not None else load_project_config(root))
+    if not cfg:
+        raise ValueError("Run aichestra init first")
+    layered = resolve_config(repo_root=resolve_aichestra_config_root(project_root=root), project_root=root)
+    facts = discover_execution_facts(layered)
+    runtimes = [r for r in facts.runtimes if r.available and r.enabled]
+
+    def choose(label, options):
+        if not options:
+            raise ValueError(f"No discovered {label}; install/configure a runtime, then retry")
+        print(label)
+        for i, (name, _) in enumerate(options, 1):
+            print(f"  {i}. {name}")
+        raw = input("Choose number (Enter cancels): ").strip()
+        if not raw:
+            return None
+        if not raw.isdigit() or not 1 <= int(raw) <= len(options):
+            raise ValueError("Invalid selection")
+        return options[int(raw) - 1][1]
+
+    def binding():
+        runtime = choose("Available runtimes", [(r.id, r.id) for r in runtimes])
+        if runtime is None:
+            return None
+        options = [("Runtime default model", {"runtime": runtime})]
+        # Only present compatible discovered models, not a cross-product.
+        from aichestra.execution.compatibility import load_compatibility_bindings
+        from aichestra.execution.targets import resolve_targets
+        for t in resolve_targets(facts, load_compatibility_bindings(layered)):
+            if t.runtime.id == runtime and t.model and t.enabled and t.available and t.capable:
+                options.append((f"{t.provider.id + '/' if t.provider else ''}{t.model.id}", {
+                    "runtime": runtime, "model": t.model.id,
+                    **({"provider": t.provider.id} if t.provider else {})}))
+        return choose("Models", options)
+
+    while True:
+        print("\n1. Coding  2. Research  3. Tests  4. Documentation  5. Quota fallback  6. Verification  7. Save  0. Cancel")
+        action = input("Settings: ").strip()
+        if action == "0":
+            return config if config is not None else load_project_config(root)
+        if action == "7":
+            load_role_bindings(cfg)
+            load_quota_policy(cfg)
+            if save:
+                save_project_config(root, cfg)
+            return cfg
+        if action in {"1", "2", "3", "4"}:
+            value = binding()
+            if value:
+                cfg.setdefault("roles", {})[ROLE_KEYS[int(action) - 1]] = value
+        elif action == "5":
+            mode = choose("Quota mode", [("Manual: stop and notify", "manual"), ("Auto: continue same Run", "auto")])
+            if mode:
+                cfg.setdefault("quota", {})["mode"] = mode
+                if mode == "auto":
+                    value = binding()
+                    if value:
+                        cfg["quota"]["implement_fallback"] = value
+        elif action == "6":
+            raw = input('Verification argv JSON (e.g. [["python", "-m", "pytest"]]): ').strip()
+            if raw:
+                value = json.loads(raw)
+                from aichestra.orchestration.verification import verification_commands_from_config
+                if not verification_commands_from_config({"verify": value, "verification": {"enabled": True}}):
+                    raise ValueError("Verification requires non-empty commands")
+                cfg["verify"] = value
+                cfg["verification"] = {"enabled": True}
