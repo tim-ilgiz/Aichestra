@@ -43,8 +43,10 @@ task + project root
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
+import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from enum import Enum
@@ -378,6 +380,8 @@ class ModeCRunController:
             self.state.metadata["orca_run_id"] = self.bindings.resume_run_id.strip()
             self.state.metadata["orca_run_resumed"] = True
         self._attach_stage_root: str | None = None
+        self._bootstrap_target = None
+        self._prepared_bootstrap_launch = None
 
     def apply_maintenance_review(self, **kwargs: Any) -> MaintenanceReviewDecision:
         decision = review_change(**kwargs)
@@ -408,20 +412,80 @@ class ModeCRunController:
             if not self._gate_attachments():
                 return self.state
 
-            from aichestra.execution.launch_strategies import select_bootstrap
-            bootstrap = select_bootstrap(self.bindings.execution_targets)
-            if bootstrap is None:
+            from aichestra.execution.launch_strategies import (
+                LaunchContext,
+                abort_prepared,
+                prove_bootstrap_launch,
+                select_bootstrap_candidate,
+                serialize_prepared_launch,
+            )
+            from aichestra.providers.orca import resolve_orca_binary
+
+            candidate = select_bootstrap_candidate(self.bindings.execution_targets)
+            if candidate is None:
                 self._fail_gate(GateKind.ORCA_HANDOFF,
                     detail="Mode C has no runnable bootstrap ExecutionTarget",
                     result={"ok": False, "failure": FailureClass.UNAVAILABLE.value})
                 return self.state
+
+            orca = self.bindings.orca
+            assert orca is not None
+            status = orca.probe()
+            binary = status.binary_path or resolve_orca_binary()
+            if not binary:
+                self._fail_gate(
+                    GateKind.ORCA_HANDOFF,
+                    detail="Mode C requires Orca binary for bootstrap launch proof",
+                    result={"ok": False, "failure": FailureClass.UNAVAILABLE.value},
+                )
+                return self.state
+
+            # candidate → prepare/attest → runnable → only then create/resume Run
+            launch_ctx = LaunchContext(
+                binary=binary,
+                worktree="current",
+                terminal_handle=(
+                    str(
+                        os.environ.get("ORCA_WORKER_TERMINAL_HANDLE") or ""
+                    ).strip()
+                    or None
+                ),
+                run=subprocess.run,
+            )
+            try:
+                bootstrap, prepared = prove_bootstrap_launch(candidate, launch_ctx)
+            except ValueError as exc:
+                self._fail_gate(
+                    GateKind.ORCA_HANDOFF,
+                    detail=f"Mode C bootstrap launch proof failed: {exc}",
+                    result={"ok": False, "failure": FailureClass.UNAVAILABLE.value},
+                )
+                return self.state
+
+            if not bootstrap.runnable:
+                abort_prepared(prepared, launch_ctx)
+                self._fail_gate(
+                    GateKind.ORCA_HANDOFF,
+                    detail="Mode C has no runnable bootstrap ExecutionTarget",
+                    result={"ok": False, "failure": FailureClass.UNAVAILABLE.value},
+                )
+                return self.state
+
             self._bootstrap_target = bootstrap
-            self.state.metadata["bootstrap_execution_target"] = serialize_execution_target(bootstrap)
+            self._prepared_bootstrap_launch = prepared
+            self.state.metadata["bootstrap_execution_target"] = serialize_execution_target(
+                bootstrap
+            )
+            self.state.metadata["bootstrap_prepared_launch"] = serialize_prepared_launch(
+                prepared
+            )
 
             ensure = self._ensure_orca_run(
                 objective=self.bindings.task_prompt or "Aichestra Mode C run"
             )
             if ensure is not None:
+                abort_prepared(prepared, launch_ctx)
+                self._prepared_bootstrap_launch = None
                 self._fail_gate(
                     GateKind.ORCA_HANDOFF,
                     detail=str(ensure.get("detail", "Orca Run missing")),
@@ -431,6 +495,8 @@ class ModeCRunController:
 
             run_id = self.state.metadata.get("orca_run_id")
             if not (isinstance(run_id, str) and run_id.strip()):
+                abort_prepared(prepared, launch_ctx)
+                self._prepared_bootstrap_launch = None
                 self._fail_gate(
                     GateKind.ORCA_HANDOFF,
                     detail=(
@@ -521,8 +587,8 @@ class ModeCRunController:
             )
             self._record(outcome, stop=True)
             return outcome
-        from aichestra.execution.launch_strategies import select_bootstrap
-        if select_bootstrap(self.bindings.execution_targets) is None:
+        from aichestra.execution.launch_strategies import select_bootstrap_candidate
+        if select_bootstrap_candidate(self.bindings.execution_targets) is None:
             outcome = GateOutcome(
                 gate=GateKind.ORCA_HANDOFF,
                 status=GateStatus.FAILED,
@@ -718,6 +784,8 @@ class ModeCRunController:
 
     def _handoff_to_orca(self, run_id: str) -> bool:
         """ONE orchestration handoff — Orca owns Run lifecycle; coordinator owns DAG."""
+        from aichestra.execution.launch_strategies import serialize_prepared_launch
+
         package = self._build_policy_package(run_id)
         self.state.metadata["mode_c_policy_package"] = package.to_dict()
 
@@ -730,6 +798,11 @@ class ModeCRunController:
                 # Canonical ExecutionTarget facts for the coordinator (T172).
                 "execution_targets": list(package.execution_targets),
                 "bootstrap_execution_target": serialize_execution_target(self._bootstrap_target),
+                "prepared_bootstrap_launch": (
+                    serialize_prepared_launch(self._prepared_bootstrap_launch)
+                    if self._prepared_bootstrap_launch is not None
+                    else None
+                ),
                 "execution_policy": dict(package.execution_policy),
                 "execution_target_contract_version": (
                     package.execution_target_contract_version
@@ -773,6 +846,10 @@ class ModeCRunController:
                 "instructions from project_context with stated precedence. "
                 "For inner workers, use only ExecutionTargets that are "
                 "enabled, available, capable, allowed, and runnable. "
+                "Provisionable terminal-bridge targets include launch_recipe; "
+                "they become runnable only after structured process attestation "
+                "(pid/argv/effective config) exact-matches expected_binding — "
+                "never screen/tail substring text. "
                 "Target locality may be local, remote, or cloud according to "
                 "ExecutionPolicy. "
                 "Do not infer workers from raw providers. "

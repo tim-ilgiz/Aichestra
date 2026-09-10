@@ -237,7 +237,7 @@ class ExecutionTarget:
 
     @property
     def dispatchable(self) -> bool:
-        """Selectable for bootstrap/dispatch attempt (proven or provisionable bridge)."""
+        """May attempt prepare/dispatch (proven runnable or provisionable bridge)."""
         return self.runnable or self.provisionable
 
 

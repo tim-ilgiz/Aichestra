@@ -27,6 +27,11 @@ from aichestra.execution.launch_strategies import (
     abort_prepared,
     bridge_command_for,
     discover_launches,
+    expected_binding,
+    prove_bootstrap_launch,
+    select_bootstrap,
+    select_bootstrap_candidate,
+    structured_binding_matches,
 )
 from aichestra.execution.targets import resolve_targets
 
@@ -62,13 +67,38 @@ def _opencode_target(*, endpoint: str = "http://127.0.0.1:11434"):
     return resolve_targets(facts, bindings)[0]
 
 
-def _binding_tail() -> list[str]:
-    return [
-        "env OPENCODE_CONFIG_CONTENT='{\"model\":\"ollama/qwen\","
-        "\"provider\":{\"ollama\":{\"options\":"
-        "{\"baseURL\":\"http://127.0.0.1:11434/v1\"}}}}' "
-        "/usr/bin/opencode"
-    ]
+def _opencode_config(*, model: str = "qwen", provider: str = "ollama") -> dict:
+    return {
+        "$schema": "https://opencode.ai/config.json",
+        "model": f"{provider}/{model}",
+        "provider": {
+            provider: {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": f"{provider} (Aichestra ExecutionTarget)",
+                "options": {"baseURL": "http://127.0.0.1:11434/v1"},
+                "models": {model: {"name": model}},
+            }
+        },
+    }
+
+
+def _process_argv(*, model: str = "qwen") -> list[str]:
+    config = json.dumps(_opencode_config(model=model), separators=(",", ":"))
+    return ["env", f"OPENCODE_CONFIG_CONTENT={config}", "/usr/bin/opencode"]
+
+
+def _structured_terminal(handle: str, *, model: str = "qwen", with_screen_decoy: bool = True) -> dict:
+    terminal = {
+        "handle": handle,
+        "process": {"pid": 4242, "argv": _process_argv(model=model)},
+    }
+    if with_screen_decoy:
+        # Screen text that would falsely satisfy substring proof — must be ignored.
+        terminal["tail"] = [
+            "ollama/qwen http://127.0.0.1:11434/v1 /usr/bin/opencode OPENCODE_CONFIG_CONTENT"
+        ]
+        terminal["preview"] = "ollama/qwen"
+    return {"ok": True, "result": {"terminal": terminal}}
 
 
 def test_native_rejects_provider_model_endpoint_claim():
@@ -130,6 +160,9 @@ def test_discover_launches_native_proven_bridge_only_provisionable(monkeypatch):
     assert resolved.provisionable
     assert resolved.dispatchable
     assert resolved.launch_strategy is LaunchStrategy.ORCA_TERMINAL_BRIDGE
+    # Bootstrap selection must not treat provisionable as selected-before-proof.
+    assert select_bootstrap([resolved]) is None
+    assert select_bootstrap_candidate([resolved]) is resolved
 
 
 def test_prompt_metadata_is_not_launch_proof():
@@ -149,7 +182,7 @@ def test_bridge_command_embeds_binding_in_orca_process_argv():
     assert "/usr/bin/opencode" in bridge.command
 
 
-def test_terminal_bridge_prepare_and_confirm_require_process_evidence():
+def test_terminal_bridge_prepare_and_confirm_require_structured_process_evidence():
     target = _opencode_target()
     adapter = TerminalBridgeLaunch()
     assert adapter.prove(target, _schema())
@@ -164,21 +197,10 @@ def test_terminal_bridge_prepare_and_confirm_require_process_evidence():
             )
         if argv[1:3] == ["terminal", "wait"]:
             return SimpleNamespace(returncode=0, stdout=json.dumps({"ok": True}))
-        if argv[1:3] == ["terminal", "read"]:
-            # Actual process echo must contain binding tokens.
+        if argv[1:3] in (["terminal", "show"], ["terminal", "read"]):
             return SimpleNamespace(
                 returncode=0,
-                stdout=json.dumps(
-                    {
-                        "ok": True,
-                        "result": {
-                            "terminal": {
-                                "handle": "term_1",
-                                "tail": _binding_tail(),
-                            }
-                        },
-                    }
-                ),
+                stdout=json.dumps(_structured_terminal("term_1")),
             )
         raise AssertionError(argv)
 
@@ -188,6 +210,8 @@ def test_terminal_bridge_prepare_and_confirm_require_process_evidence():
     assert prepared.arguments == ["--terminal", "term_1"]
     assert prepared.owns_terminal is True
     assert any(c[1:3] == ["terminal", "create"] for c in calls)
+    assert any(c[1:3] == ["terminal", "show"] for c in calls)
+    assert "process" in prepared.evidence
     assert adapter.confirms(
         target,
         {
@@ -204,8 +228,33 @@ def test_terminal_bridge_prepare_and_confirm_require_process_evidence():
     )
 
 
+def test_screen_substring_is_not_binding_proof():
+    """qwen must not match via substring of qwen2 / screen decoy text."""
+    target = _opencode_target()
+    # Screen text contains exact tokens; without structured process → fail.
+    assert not structured_binding_matches(
+        target,
+        {
+            "text": "ollama/qwen http://127.0.0.1:11434/v1 /usr/bin/opencode",
+            "tail": ["ollama/qwen"],
+            "proof_tokens": ["ollama/qwen", "http://127.0.0.1:11434/v1"],
+        },
+    )
+    # Structured argv with wrong model qwen2 must not satisfy expected qwen.
+    wrong = {
+        "process": {"pid": 1, "argv": _process_argv(model="qwen2")},
+        "handle": "term_x",
+    }
+    assert not structured_binding_matches(target, wrong)
+    # Exact structured argv for qwen succeeds.
+    assert structured_binding_matches(
+        target,
+        {"process": {"pid": 1, "argv": _process_argv(model="qwen")}, "handle": "term_x"},
+    )
+
+
 def test_terminal_bridge_rejects_create_receipt_as_process_proof():
-    """startupCommand on create must not satisfy binding; live read must."""
+    """startupCommand on create must not satisfy binding; live structured show must."""
     target = _opencode_target()
     adapter = TerminalBridgeLaunch()
     bridge = bridge_command_for(target)
@@ -231,14 +280,18 @@ def test_terminal_bridge_rejects_create_receipt_as_process_proof():
             )
         if argv[1:3] == ["terminal", "wait"]:
             return SimpleNamespace(returncode=0, stdout="{}")
-        if argv[1:3] == ["terminal", "read"]:
+        if argv[1:3] in (["terminal", "show"], ["terminal", "read"]):
             return SimpleNamespace(
                 returncode=0,
                 stdout=json.dumps(
                     {
                         "ok": True,
                         "result": {
-                            "terminal": {"handle": "term_leak", "tail": ["shell"]}
+                            "terminal": {
+                                "handle": "term_leak",
+                                "tail": [bridge.command],
+                                "startupCommand": bridge.command,
+                            }
                         },
                     }
                 ),
@@ -251,6 +304,39 @@ def test_terminal_bridge_rejects_create_receipt_as_process_proof():
     with pytest.raises(ValueError, match="did not prove"):
         adapter.prepare(target, LaunchContext(binary="orca", worktree="current", run=run))
     assert closed == ["term_leak"]
+
+
+def test_terminal_bridge_rejects_failed_read_returncode():
+    target = _opencode_target()
+    adapter = TerminalBridgeLaunch()
+    closed: list[str] = []
+
+    def run(argv, **_kwargs):
+        if argv[1:3] == ["terminal", "create"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"ok": True, "result": {"terminal": {"handle": "term_rc"}}}),
+            )
+        if argv[1:3] == ["terminal", "wait"]:
+            return SimpleNamespace(returncode=0, stdout="{}")
+        if argv[1:3] == ["terminal", "show"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(_structured_terminal("term_rc")),
+            )
+        if argv[1:3] == ["terminal", "read"]:
+            return SimpleNamespace(
+                returncode=1,
+                stdout=json.dumps(_structured_terminal("term_rc")),
+            )
+        if argv[1:3] == ["terminal", "close"]:
+            closed.append(argv[argv.index("--terminal") + 1])
+            return SimpleNamespace(returncode=0, stdout="{}")
+        raise AssertionError(argv)
+
+    with pytest.raises(ValueError, match="observation failed|did not prove"):
+        adapter.prepare(target, LaunchContext(binary="orca", worktree="current", run=run))
+    assert closed == ["term_rc"]
 
 
 def test_terminal_bridge_rejects_unproven_process_and_closes_owned_terminal():
@@ -266,7 +352,7 @@ def test_terminal_bridge_rejects_unproven_process_and_closes_owned_terminal():
             )
         if argv[1:3] == ["terminal", "wait"]:
             return SimpleNamespace(returncode=0, stdout="{}")
-        if argv[1:3] == ["terminal", "read"]:
+        if argv[1:3] in (["terminal", "show"], ["terminal", "read"]):
             return SimpleNamespace(
                 returncode=0,
                 stdout=json.dumps(
@@ -308,20 +394,7 @@ def test_existing_terminal_requires_attested_handle():
     def run(argv, **_kwargs):
         return SimpleNamespace(
             returncode=0,
-            stdout=json.dumps(
-                {
-                    "ok": True,
-                    "result": {
-                        "terminal": {
-                            "handle": "term_live",
-                            "tail": [
-                                "OPENCODE_CONFIG_CONTENT ollama/qwen "
-                                "http://127.0.0.1:11434/v1 /usr/bin/opencode"
-                            ],
-                        }
-                    },
-                }
-            ),
+            stdout=json.dumps(_structured_terminal("term_live")),
         )
 
     prepared = adapter.prepare(
@@ -363,17 +436,7 @@ def test_discover_launches_attests_existing_terminal_from_live_handle(monkeypatc
         if argv[1:3] in (["terminal", "show"], ["terminal", "read"]):
             return SimpleNamespace(
                 returncode=0,
-                stdout=json.dumps(
-                    {
-                        "ok": True,
-                        "result": {
-                            "terminal": {
-                                "handle": "term_prod",
-                                "tail": _binding_tail(),
-                            }
-                        },
-                    }
-                ),
+                stdout=json.dumps(_structured_terminal("term_prod")),
             )
         raise AssertionError(argv)
 
@@ -397,3 +460,49 @@ def test_discover_launches_attests_existing_terminal_from_live_handle(monkeypatc
     )[0]
     assert resolved.runnable
     assert not resolved.provisionable
+
+
+def test_prove_bootstrap_launch_promotes_bridge_before_run(monkeypatch):
+    target = _opencode_target()
+    monkeypatch.setattr(
+        "aichestra.execution.launch_strategies.load_orca_schema",
+        lambda binary=None: _schema(),
+    )
+    launches = discover_launches([target], binary="orca-test")
+    resolved = resolve_targets(
+        DiscoveryFacts(
+            runtimes=(target.runtime,),
+            providers=(target.provider,),
+            models=(target.model,),
+        ),
+        (Compatibility("opencode", "ollama", "qwen"),),
+        known_launches=launches,
+    )[0]
+    assert resolved.provisionable
+    assert select_bootstrap([resolved]) is None
+
+    def run(argv, **_kwargs):
+        if argv[1:3] == ["terminal", "create"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"ok": True, "result": {"terminal": {"handle": "term_boot"}}}),
+            )
+        if argv[1:3] == ["terminal", "wait"]:
+            return SimpleNamespace(returncode=0, stdout="{}")
+        if argv[1:3] in (["terminal", "show"], ["terminal", "read"]):
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(_structured_terminal("term_boot")),
+            )
+        raise AssertionError(argv)
+
+    proven, prepared = prove_bootstrap_launch(
+        resolved,
+        LaunchContext(binary="orca", worktree="current", run=run),
+    )
+    assert proven.runnable
+    assert not proven.provisionable
+    assert prepared.terminal_handle == "term_boot"
+    assert prepared.owns_terminal is True
+    assert expected_binding(proven)["model"] == "qwen"
+    assert select_bootstrap([proven]) is proven

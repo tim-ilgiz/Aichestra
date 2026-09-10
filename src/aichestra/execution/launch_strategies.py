@@ -11,8 +11,9 @@ import json
 import os
 import shlex
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Mapping, Protocol
+from urllib.parse import urlsplit, urlunsplit
 
 from .domain import ExecutionTarget, LaunchCapability, LaunchStrategy
 
@@ -53,7 +54,41 @@ def _effective(receipt: Mapping[str, Any]) -> dict[str, Any] | None:
 def _normalize_endpoint(endpoint: str | None) -> str | None:
     if not endpoint:
         return None
-    return endpoint.rstrip("/")
+    text = endpoint.strip().rstrip("/")
+    if not text:
+        return None
+    try:
+        parts = urlsplit(text)
+    except ValueError:
+        return text
+    if not parts.scheme or not parts.netloc:
+        return text
+    path = parts.path.rstrip("/") or ""
+    return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+
+
+def expected_binding(target: ExecutionTarget) -> dict[str, str | None]:
+    """Exact dimensions the live process must attest (no substring matching)."""
+    return {
+        "runtime": target.runtime.id,
+        "provider": target.provider.id if target.provider else None,
+        "model": target.model.id if target.model else None,
+        "endpoint": _normalize_endpoint(target.endpoint),
+        "binary": target.runtime.binary_path or target.runtime.id,
+    }
+
+
+def _endpoints_equal(left: str | None, right: str | None) -> bool:
+    a = _normalize_endpoint(left)
+    b = _normalize_endpoint(right)
+    if a is None or b is None:
+        return a is None and b is None
+    if a == b:
+        return True
+    # OpenCode baseURL may include a trailing /v1 the discovery endpoint omitted.
+    a_v1 = a if a.endswith("/v1") else f"{a}/v1"
+    b_v1 = b if b.endswith("/v1") else f"{b}/v1"
+    return a_v1 == b_v1
 
 
 @dataclass(frozen=True)
@@ -220,7 +255,7 @@ class ExistingTerminalLaunch:
         evidence = receipt.get("aichestra_terminal_evidence")
         if not isinstance(evidence, Mapping):
             return False
-        if not _terminal_evidence_matches(target, evidence):
+        if not structured_binding_matches(target, evidence):
             return False
         expected = evidence.get("handle")
         if not isinstance(expected, str) or not expected.strip():
@@ -250,8 +285,8 @@ class ExistingTerminalLaunch:
             text=True,
             timeout=30,
         )
-        evidence = {**_merge_process_evidence(show, read), "handle": handle}
-        if not _terminal_evidence_matches(target, evidence):
+        evidence = {**merge_process_evidence(show, read), "handle": handle}
+        if not structured_binding_matches(target, evidence):
             raise ValueError("Existing terminal does not prove the requested binding")
         # Never owns a foreign terminal — cleanup must not close this handle.
         return PreparedLaunch(
@@ -292,7 +327,7 @@ class TerminalBridgeLaunch:
         evidence = receipt.get("aichestra_terminal_evidence")
         if not isinstance(evidence, Mapping):
             return False
-        if not _terminal_evidence_matches(target, evidence):
+        if not structured_binding_matches(target, evidence):
             return False
         expected = evidence.get("handle")
         if not isinstance(expected, str) or not expected.strip():
@@ -351,23 +386,31 @@ class TerminalBridgeLaunch:
                 timeout=130,
             )
             if getattr(wait, "returncode", 1) not in (0, None):
-                # Still attempt read-based proof; some agents never report tui-idle.
+                # Still attempt structured show/read proof; some agents never report tui-idle.
                 pass
+            # Prefer terminal show for process metadata; read alone is screen stream.
+            show = ctx.run(
+                [ctx.binary, "terminal", "show", "--terminal", handle, "--json"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
             read = ctx.run(
                 [ctx.binary, "terminal", "read", "--terminal", handle, "--json"],
                 capture_output=True,
                 text=True,
                 timeout=30,
             )
-            # Process proof must come from live read/show observations — never from
-            # the terminal-create receipt's startupCommand echo of our own argv.
+            # Process proof must come from structured live observations — never from
+            # the terminal-create receipt's startupCommand echo of our own argv,
+            # and never from screen/tail substring matching.
             evidence = {
-                **_merge_process_evidence(read),
+                **merge_process_evidence(show, read),
                 "handle": handle,
                 "bridge_command": bridge.command,
-                "proof_tokens": list(bridge.proof_tokens),
+                "expected_binding": expected_binding(target),
             }
-            if not _terminal_evidence_matches(target, evidence):
+            if not structured_binding_matches(target, evidence):
                 raise ValueError("Terminal bridge did not prove the requested binding")
             return PreparedLaunch(
                 arguments=["--terminal", handle],
@@ -384,7 +427,6 @@ class TerminalBridgeLaunch:
 @dataclass(frozen=True)
 class BridgeCommand:
     command: str
-    proof_tokens: tuple[str, ...]
 
 
 def bridge_command_for(target: ExecutionTarget) -> BridgeCommand | None:
@@ -423,10 +465,7 @@ def _opencode_bridge_command(target: ExecutionTarget) -> BridgeCommand | None:
         f"env OPENCODE_CONFIG_CONTENT={shlex.quote(json.dumps(config, separators=(',', ':')))} "
         f"{shlex.quote(binary)}"
     )
-    return BridgeCommand(
-        command=command,
-        proof_tokens=(model_ref, base, binary, "OPENCODE_CONFIG_CONTENT"),
-    )
+    return BridgeCommand(command=command)
 
 
 BRIDGE_COMMAND_BUILDERS: dict[str, Callable[[ExecutionTarget], BridgeCommand | None]] = {
@@ -441,6 +480,10 @@ def _json_payload(result: Any) -> dict[str, Any]:
     except ValueError:
         payload = {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _observation_ok(result: Any) -> bool:
+    return getattr(result, "returncode", 1) in (0, None)
 
 
 def _receipt_terminal_handle(data: Mapping[str, Any]) -> str | None:
@@ -476,15 +519,44 @@ def _dig_handle(payload: Mapping[str, Any]) -> str | None:
     return handle.strip() if isinstance(handle, str) and handle.strip() else None
 
 
-def _merge_process_evidence(*results: Any) -> dict[str, Any]:
-    """Collect live process observations only.
+def _as_argv(value: Any) -> list[str] | None:
+    if isinstance(value, list) and value and all(isinstance(item, str) for item in value):
+        return list(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return list(shlex.split(value))
+        except ValueError:
+            return [value]
+    return None
 
-    Ignores ``command`` / ``startupCommand`` so a create receipt that merely
-    echoes Aichestra's requested argv cannot satisfy binding proof.
+
+def _merge_process_dict(into: dict[str, Any], process: Mapping[str, Any]) -> None:
+    """Accumulate structured process fields; never screen preview/tail text."""
+    for key in ("pid", "argv", "command", "commandLine", "executable", "cwd", "env"):
+        if key in process and process[key] is not None and key not in into:
+            into[key] = process[key]
+    # Nested effective / config blocks from the live process, not create echoes.
+    for key in ("effective", "effectiveConfig", "config", "binding"):
+        value = process.get(key)
+        if isinstance(value, Mapping) and key not in into:
+            into[key] = dict(value)
+
+
+def merge_process_evidence(*results: Any) -> dict[str, Any]:
+    """Collect structured live process observations only.
+
+    Ignores ``command`` / ``startupCommand`` on the terminal object when they are
+    create-receipt echoes, ignores screen ``preview`` / ``tail`` text, and
+    requires every observation to return success.
     """
-    text_parts: list[str] = []
+    if not results:
+        raise ValueError("terminal observation failed (no results)")
     handle = None
+    process: dict[str, Any] = {}
+    effective: dict[str, Any] = {}
     for result in results:
+        if not _observation_ok(result):
+            raise ValueError("terminal observation failed (non-zero returncode)")
         payload = _json_payload(result)
         handle = handle or _dig_handle(payload)
         data = payload.get("result", payload)
@@ -493,33 +565,182 @@ def _merge_process_evidence(*results: Any) -> dict[str, Any]:
         terminal = data.get("terminal", data)
         if not isinstance(terminal, dict):
             continue
-        preview = terminal.get("preview")
-        if isinstance(preview, str):
-            text_parts.append(preview)
-        tail = terminal.get("tail")
-        if isinstance(tail, list):
-            text_parts.extend(str(item) for item in tail)
-        elif isinstance(tail, str):
-            text_parts.append(tail)
-    return {"handle": handle, "text": "\n".join(text_parts)}
+        # Structured process attestation from Orca (pid/argv/env/effective).
+        for key in ("process", "proc", "runtimeProcess"):
+            proc = terminal.get(key)
+            if isinstance(proc, Mapping):
+                _merge_process_dict(process, proc)
+        launch = terminal.get("launch")
+        if isinstance(launch, Mapping):
+            eff = launch.get("effective")
+            if isinstance(eff, Mapping):
+                effective.update(dict(eff))
+        for key in ("effective", "effectiveConfig", "binding"):
+            value = terminal.get(key)
+            if isinstance(value, Mapping):
+                if key == "effective":
+                    effective.update(dict(value))
+                elif key not in process:
+                    process[key] = dict(value)
+        # Live argv may also appear as processArgv without a process wrapper.
+        for key in ("processArgv", "argv"):
+            if key in terminal and "argv" not in process:
+                argv = _as_argv(terminal.get(key))
+                if argv is not None:
+                    process["argv"] = argv
+        if "pid" in terminal and "pid" not in process:
+            process["pid"] = terminal["pid"]
+    out: dict[str, Any] = {"handle": handle}
+    if process:
+        out["process"] = process
+    if effective:
+        out["effective"] = effective
+    return out
 
 
-def _terminal_evidence_matches(target: ExecutionTarget, evidence: Mapping[str, Any]) -> bool:
-    text = str(evidence.get("text") or "")
-    tokens = list(evidence.get("proof_tokens") or ())
-    if not tokens:
-        tokens = [target.runtime.id]
-        if target.model is not None:
-            tokens.append(target.model.id)
-            if target.provider is not None:
-                tokens.append(f"{target.provider.id}/{target.model.id}")
-        if target.endpoint:
-            tokens.append(_normalize_endpoint(target.endpoint) or target.endpoint)
-            if not str(tokens[-1]).endswith("/v1"):
-                tokens.append(f"{_normalize_endpoint(target.endpoint)}/v1")
-    if target.runtime.binary_path:
-        tokens.append(target.runtime.binary_path)
-    return all(token and token in text for token in tokens)
+def _binding_from_opencode_config(config: Mapping[str, Any], *, binary: str | None) -> dict[str, str | None]:
+    model_ref = config.get("model")
+    provider = None
+    model = None
+    if isinstance(model_ref, str) and "/" in model_ref:
+        provider, model = model_ref.split("/", 1)
+    providers = config.get("provider")
+    endpoint = None
+    if isinstance(providers, Mapping) and provider:
+        entry = providers.get(provider)
+        if isinstance(entry, Mapping):
+            options = entry.get("options")
+            if isinstance(options, Mapping):
+                base = options.get("baseURL") or options.get("base_url")
+                if isinstance(base, str):
+                    endpoint = _normalize_endpoint(base)
+            models = entry.get("models")
+            if model is None and isinstance(models, Mapping) and len(models) == 1:
+                model = next(iter(models))
+    return {
+        "runtime": "opencode",
+        "provider": provider,
+        "model": model,
+        "endpoint": endpoint,
+        "binary": binary,
+    }
+
+
+def _binding_from_process_argv(argv: list[str]) -> dict[str, str | None] | None:
+    """Parse machine-readable OpenCode effective config from process argv."""
+    config_raw = None
+    binary = argv[-1] if argv else None
+    for item in argv:
+        if item.startswith("OPENCODE_CONFIG_CONTENT="):
+            config_raw = item.split("=", 1)[1]
+            break
+    if config_raw is None:
+        # ``env KEY=VAL binary`` form produced by the bridge builder.
+        for index, item in enumerate(argv):
+            if item == "OPENCODE_CONFIG_CONTENT" and index + 1 < len(argv):
+                config_raw = argv[index + 1]
+                break
+    if not config_raw:
+        return None
+    try:
+        config = json.loads(config_raw)
+    except ValueError:
+        return None
+    if not isinstance(config, Mapping):
+        return None
+    return _binding_from_opencode_config(config, binary=binary if isinstance(binary, str) else None)
+
+
+def _binding_from_effective(effective: Mapping[str, Any]) -> dict[str, str | None]:
+    runtime = effective.get("agent") or effective.get("runtime")
+    provider = effective.get("provider")
+    model = effective.get("model")
+    endpoint = effective.get("endpoint") or effective.get("baseURL") or effective.get("base_url")
+    binary = effective.get("binary") or effective.get("executable")
+    return {
+        "runtime": runtime if isinstance(runtime, str) else None,
+        "provider": provider if isinstance(provider, str) else None,
+        "model": model if isinstance(model, str) else None,
+        "endpoint": _normalize_endpoint(endpoint) if isinstance(endpoint, str) else None,
+        "binary": binary if isinstance(binary, str) else None,
+    }
+
+
+def extract_attested_binding(evidence: Mapping[str, Any]) -> dict[str, str | None] | None:
+    """Derive an exact binding from structured process/launch metadata only."""
+    # Explicit attested binding object (tests / future Orca process metadata).
+    for key in ("binding", "attested_binding"):
+        raw = evidence.get(key)
+        if isinstance(raw, Mapping):
+            return {
+                "runtime": raw.get("runtime") if isinstance(raw.get("runtime"), str) else None,
+                "provider": raw.get("provider") if isinstance(raw.get("provider"), str) else None,
+                "model": raw.get("model") if isinstance(raw.get("model"), str) else None,
+                "endpoint": _normalize_endpoint(raw["endpoint"])
+                if isinstance(raw.get("endpoint"), str)
+                else None,
+                "binary": raw.get("binary") if isinstance(raw.get("binary"), str) else None,
+            }
+
+    effective = evidence.get("effective")
+    if isinstance(effective, Mapping):
+        attested = _binding_from_effective(effective)
+        if attested.get("runtime"):
+            return attested
+
+    process = evidence.get("process")
+    if isinstance(process, Mapping):
+        for key in ("effective", "effectiveConfig", "config", "binding"):
+            cfg = process.get(key)
+            if isinstance(cfg, Mapping):
+                if key in {"effective", "binding"}:
+                    attested = _binding_from_effective(cfg)
+                else:
+                    binary = process.get("executable") or process.get("binary")
+                    if not isinstance(binary, str):
+                        argv = _as_argv(process.get("argv"))
+                        binary = argv[-1] if argv else None
+                    attested = _binding_from_opencode_config(cfg, binary=binary)
+                if attested.get("runtime") or attested.get("model"):
+                    return attested
+        argv = _as_argv(process.get("argv") or process.get("command") or process.get("commandLine"))
+        if argv:
+            from_argv = _binding_from_process_argv(argv)
+            if from_argv is not None:
+                return from_argv
+    return None
+
+
+def structured_binding_matches(target: ExecutionTarget, evidence: Mapping[str, Any]) -> bool:
+    """Exact structural compare — never ``token in screen_text``."""
+    attested = extract_attested_binding(evidence)
+    if attested is None:
+        return False
+    expected = expected_binding(target)
+
+    attested_runtime = attested.get("runtime")
+    if attested_runtime is not None and attested_runtime != expected["runtime"]:
+        return False
+    if attested_runtime is None:
+        if not (
+            expected["binary"]
+            and attested.get("binary")
+            and attested["binary"] == expected["binary"]
+        ):
+            return False
+
+    if expected["provider"] is not None:
+        if attested.get("provider") != expected["provider"]:
+            return False
+    if expected["model"] is not None:
+        if attested.get("model") != expected["model"]:
+            return False
+    if expected["endpoint"] is not None:
+        if not _endpoints_equal(attested.get("endpoint"), expected["endpoint"]):
+            return False
+    if expected["binary"] and attested.get("binary") not in {None, expected["binary"]}:
+        return False
+    return True
 
 
 # Product support is adapter data, never workflow routing.
@@ -670,15 +891,128 @@ def adapter_for(target: ExecutionTarget) -> LaunchAdapter:
 
 
 def select_bootstrap(targets) -> ExecutionTarget | None:
-    """Select one bootstrap only; the coordinator selects every inner worker.
+    """Select one proven runnable bootstrap target.
 
-    Prefer proven runnable targets. A provisionable terminal-bridge target may be
-    selected only when nothing proven is available; prepare() remains the
-    process-binding gate before worker-start.
+    Provisionable bridge targets are NOT selectable here. Call
+    ``prove_bootstrap_launch`` first so prepare/attest happens before Run
+    creation and the resulting target is runnable.
     """
+    candidates = [t for t in targets if t.runnable]
+    return next(
+        iter(sorted(candidates, key=lambda t: (not t.preferred, t.id))),
+        None,
+    )
+
+
+def select_bootstrap_candidate(targets) -> ExecutionTarget | None:
+    """Candidate for preflight prove: runnable preferred, else provisionable bridge."""
     proven = [t for t in targets if t.runnable]
     candidates = proven or [t for t in targets if t.provisionable]
     return next(
         iter(sorted(candidates, key=lambda t: (not t.preferred, t.id))),
         None,
     )
+
+
+def mark_launch_proven(target: ExecutionTarget) -> ExecutionTarget:
+    """Advertise a target as runnable after successful prepare/attest."""
+    return replace(target, launch_proven=True)
+
+
+def serialize_prepared_launch(prepared: PreparedLaunch) -> dict[str, Any]:
+    return {
+        "arguments": list(prepared.arguments),
+        "terminal_handle": prepared.terminal_handle,
+        "evidence": dict(prepared.evidence),
+        "owns_terminal": prepared.owns_terminal,
+    }
+
+
+def deserialize_prepared_launch(payload: Mapping[str, Any]) -> PreparedLaunch:
+    return PreparedLaunch(
+        arguments=[str(item) for item in list(payload.get("arguments") or ())],
+        terminal_handle=(
+            str(payload["terminal_handle"]).strip()
+            if isinstance(payload.get("terminal_handle"), str)
+            and str(payload["terminal_handle"]).strip()
+            else None
+        ),
+        evidence=dict(payload.get("evidence") or {}),
+        owns_terminal=bool(payload.get("owns_terminal")),
+    )
+
+
+def prove_bootstrap_launch(
+    target: ExecutionTarget,
+    ctx: LaunchContext,
+) -> tuple[ExecutionTarget, PreparedLaunch]:
+    """Prepare/attest before Orca Run creation.
+
+    On success the returned target is ``launch_proven`` / runnable. On failure
+    no Run must be created; owned bridge terminals are closed by prepare().
+    """
+    if not target.dispatchable:
+        raise ValueError("No dispatchable bootstrap ExecutionTarget")
+
+    if target.runnable:
+        try:
+            adapter = adapter_for(target)
+            prepared = adapter.prepare(target, ctx)
+        except ValueError:
+            # Already-proven native/existing targets may use arbitrary agent ids
+            # outside the built-in adapter table (tests / project agents).
+            if target.launch_strategy is LaunchStrategy.ORCA_NATIVE:
+                arguments = ["--agent", target.runtime.id]
+                if (
+                    target.model is not None
+                    and target.provider is None
+                    and target.endpoint is None
+                ):
+                    arguments.extend(["--model", target.model.id])
+                prepared = PreparedLaunch(arguments=arguments)
+            elif target.launch_strategy is LaunchStrategy.ORCA_EXISTING_TERMINAL:
+                handle = (ctx.terminal_handle or "").strip()
+                if not handle:
+                    raise ValueError("Existing-terminal launch requires terminal_handle")
+                prepared = PreparedLaunch(
+                    arguments=["--terminal", handle],
+                    terminal_handle=handle,
+                    owns_terminal=False,
+                )
+            else:
+                raise
+        return target, prepared
+
+    # Provisionable bridge: must prepare/attest before any Orca Run exists.
+    adapter = adapter_for(target)
+    prepared = adapter.prepare(target, ctx)
+    if not structured_binding_matches(target, prepared.evidence):
+        abort_prepared(prepared, ctx)
+        raise ValueError("Bootstrap launch did not prove the requested binding")
+    return mark_launch_proven(target), prepared
+
+
+def launch_recipe_for(target: ExecutionTarget) -> dict[str, Any] | None:
+    """Coordinator-facing recipe for provisionable bridge targets.
+
+    Inner workers remain coordinator-owned: they must prepare/attest via Orca
+    using this recipe (structured process evidence) before treating the target
+    as runnable. Screen/tail text is never sufficient proof.
+    """
+    if not target.provisionable:
+        return None
+    bridge = bridge_command_for(target)
+    if bridge is None:
+        return None
+    return {
+        "kind": LaunchStrategy.ORCA_TERMINAL_BRIDGE.value,
+        "proof": "structured_process_attestation",
+        "create_command": bridge.command,
+        "expected_binding": expected_binding(target),
+        "steps": [
+            "orca terminal create --command <create_command> --worktree <wt> --json",
+            "orca terminal show --terminal <handle> --json  # require process argv/effective",
+            "exact-compare expected_binding to structured process metadata",
+            "orca orchestration worker-start --terminal <handle> ...",
+        ],
+    }

@@ -110,7 +110,9 @@ def safe_endpoint_for_context(endpoint: str | None) -> str | None:
 
 def serialize_execution_target(target: ExecutionTarget) -> dict[str, Any]:
     """Neutral bounded representation for the generic coordinator."""
-    return {
+    from .launch_strategies import launch_recipe_for
+
+    payload = {
         "id": target.id,
         "runtime": target.runtime.id,
         "provider": target.provider.id if target.provider else None,
@@ -129,6 +131,11 @@ def serialize_execution_target(target: ExecutionTarget) -> dict[str, Any]:
         "provisionable": target.provisionable,
         "reasons": list(target.reasons),
     }
+    recipe = launch_recipe_for(target)
+    if recipe is not None:
+        # Coordinator may prepare provisionable bridges via Orca; screen text ≠ proof.
+        payload["launch_recipe"] = recipe
+    return payload
 
 
 def serialize_execution_policy(policy: ExecutionPolicy) -> dict[str, Any]:

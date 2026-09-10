@@ -14,7 +14,9 @@ description: "Task list for portable Aichestra platform implementation"
 Orca owns canonical Run/Task/Dispatch/worker/terminal/worktree lifecycle;
 Aichestra owns discovery, ExecutionTarget resolution, policy, security,
 deterministic gates and verification. Phase 24: T169–T173 and T176 landed;
-**T174/T175** remain open for launch-proof/lifecycle reviewer acceptance;
+**T174/T175** remain open for launch-proof/lifecycle reviewer acceptance
+(bootstrap prepare-before-Run + structured process attestation landed;
+substring screen proof removed — still pending reviewer re-acceptance);
 umbrella **T163** plus validation gates **T167–T168** remain open.
 **Do not merge** until fresh GitHub CI matrix is green on current HEAD (T167)
 and live Mode C smoke (T168) passes.
@@ -700,7 +702,14 @@ security, deterministic gates and verification.
       builder, existing-terminal attestation via live handle
       (`ORCA_WORKER_TERMINAL_HANDLE` / `terminal_handle`), bridge-owned terminal
       cleanup on prepare/dispatch failure, and fail-closed unsupported bindings.
-      Remains open pending reviewer re-acceptance of proof/lifecycle semantics.
+      Bootstrap preflight: `prove_bootstrap_launch` prepare/attest runs before
+      any Orca Run create/resume; `PreparedLaunch` is reused at worker-start
+      (no second bridge terminal); Run-create failure aborts owned terminals.
+      `select_bootstrap` returns only runnable targets; provisionable bridges
+      are candidates for preflight only. Provisionable targets serialize a
+      `launch_recipe` (expected_binding + structured proof steps) for
+      coordinator inner-worker prepare. Remains open pending reviewer
+      re-acceptance of proof/lifecycle semantics.
 
 - [ ] T175 CRITICAL: An ExecutionTarget may be advertised as runnable only when
       its launch strategy is proven to bind the actual agent process to the
@@ -726,10 +735,13 @@ security, deterministic gates and verification.
 
       Progress: native schema → `launch_proven` / runnable; terminal-bridge
       schema+builder → provisionable only (not runnable) until prepare() proves
-      live `terminal read` process evidence (create-receipt `startupCommand` is
-      ignored); existing-terminal requires attested handle evidence to become
-      runnable; prompt/discovery/client-env alone cannot mark runnable.
-      Remains open pending reviewer re-acceptance.
+      structured live process attestation (create-receipt `startupCommand` and
+      screen/tail substring tokens are ignored); existing-terminal requires
+      attested handle + structured process evidence to become runnable;
+      prompt/discovery/client-env alone cannot mark runnable. Exact compare of
+      runtime/provider/model/endpoint from process argv / effective config /
+      binding metadata; non-zero terminal show/read fails closed. Remains open
+      pending reviewer re-acceptance.
 
 - [x] T176 HIGH: Implement Orca worker-release recovery semantics.
 
@@ -856,7 +868,8 @@ are complete.
 - Phase 23 (T145–T153) closes corrective alignment follow-up
 - Phase 24 workflow-ownership slice (T158–T162, T164–T166) and ExecutionTarget
   foundation (T169–T173, T176) landed; **T174/T175** open for launch-proof
-  reviewer acceptance; umbrella T163, fresh CI (T167), and live smoke (T168)
+  reviewer acceptance (prepare-before-Run + structured attestation in tree);
+  umbrella T163, fresh CI (T167), and live smoke (T168)
   remain open
 - T108–T124 depend on T103–T107; T167 gates merge on current HEAD CI
 - Converge / “feature complete” only after Phase 24 T163 + T167–T176

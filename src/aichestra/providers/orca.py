@@ -17,7 +17,7 @@ import subprocess
 from dataclasses import replace
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from aichestra.platform_detect import OperatingSystem, detect_os
 from aichestra.providers.attachments import orca_attach_flags, stage_attachments
@@ -475,13 +475,15 @@ class OrcaProvider(ProviderAdapter):
                 session_id=session.session_id)
         agent = str(request.context.get("agent") or _DEFAULT_AGENT)
         if role == "mode_c_handoff":
-            from aichestra.execution.launch_strategies import adapter_for
-            try:
-                launch_adapter = adapter_for(request.execution_target)
-                agent = request.execution_target.runtime.id
-            except (ValueError, AttributeError) as exc:
-                return ProviderTaskResult(ok=False, failure=FailureClass.UNAVAILABLE,
-                    detail=f"No proven coordinator ExecutionTarget: {exc}", session_id=session.session_id)
+            target = request.execution_target
+            if target is None or not target.runnable:
+                return ProviderTaskResult(
+                    ok=False,
+                    failure=FailureClass.UNAVAILABLE,
+                    detail="No proven coordinator ExecutionTarget",
+                    session_id=session.session_id,
+                )
+            agent = target.runtime.id
             # Preserve the complete policy; generic bounded_prompt truncates context.
             contract = (
                 "Target:\nYou are the explicit Mode C coordinator for project_root in ProjectContext. "
@@ -496,6 +498,9 @@ class OrcaProvider(ProviderAdapter):
                 "execution_policy (execution_target_contract_version). "
                 "For inner workers, use only ExecutionTargets that are enabled, available, "
                 "capable, allowed, and runnable. "
+                "Provisionable terminal-bridge targets include launch_recipe and become "
+                "runnable only after structured process attestation exact-matches "
+                "expected_binding (never screen/tail substring text). "
                 "Target locality may be local, remote, or cloud according to ExecutionPolicy. "
                 "Do not infer workers from raw providers. "
                 "Do not impose product-name phase routing. "
@@ -869,25 +874,36 @@ class OrcaProvider(ProviderAdapter):
                 LaunchContext,
                 abort_prepared,
                 adapter_for,
+                deserialize_prepared_launch,
             )
 
+            launch_ctx = LaunchContext(
+                binary=binary,
+                worktree=worktree,
+                terminal_handle=str(
+                    request.context.get("terminal_handle")
+                    or os.environ.get("ORCA_WORKER_TERMINAL_HANDLE")
+                    or ""
+                ).strip()
+                or None,
+                run=subprocess.run,
+            )
+            preflight = request.context.get("prepared_bootstrap_launch")
             try:
-                launch_adapter = adapter_for(request.execution_target)
-                launch_ctx = LaunchContext(
-                    binary=binary,
-                    worktree=worktree,
-                    terminal_handle=str(
-                        request.context.get("terminal_handle")
-                        or os.environ.get("ORCA_WORKER_TERMINAL_HANDLE")
-                        or ""
-                    ).strip()
-                    or None,
-                    run=subprocess.run,
-                )
-                prepared = launch_adapter.prepare(
-                    request.execution_target,
-                    launch_ctx,
-                )
+                if isinstance(preflight, Mapping) and preflight.get("arguments") is not None:
+                    # Bootstrap already prepared/attested before Run creation —
+                    # reuse exact launch; do not create a second bridge terminal.
+                    prepared = deserialize_prepared_launch(preflight)
+                    try:
+                        launch_adapter = adapter_for(request.execution_target)
+                    except ValueError:
+                        launch_adapter = None
+                else:
+                    launch_adapter = adapter_for(request.execution_target)
+                    prepared = launch_adapter.prepare(
+                        request.execution_target,
+                        launch_ctx,
+                    )
             except ValueError as exc:
                 return ProviderTaskResult(
                     ok=False,
