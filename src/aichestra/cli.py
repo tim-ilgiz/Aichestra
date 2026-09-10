@@ -1,4 +1,4 @@
-"""Aichestra CLI — doctor / profile / bootstrap / update / handoff / prove-launch / abort-launch / orchestrate."""
+"""Aichestra CLI — doctor / profile / bootstrap / update / init / settings / handoff / orchestrate."""
 
 from __future__ import annotations
 
@@ -61,6 +61,54 @@ def build_parser() -> argparse.ArgumentParser:
     staging_p.add_argument("--dry-run", action="store_true")
     staging_p.add_argument("--repo-root", type=Path, default=None)
     staging_p.add_argument("--json", action="store_true")
+
+    init_p = sub.add_parser(
+        "init",
+        help="Create .aichestra/project.json in a target project",
+    )
+    init_p.add_argument(
+        "--project-root",
+        type=Path,
+        default=None,
+        help="Target project root (default: cwd)",
+    )
+    init_p.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Accept defaults without prompts",
+    )
+    init_p.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing project.json",
+    )
+    init_p.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Set config key (repeatable), e.g. roles.research=cursor",
+    )
+    init_p.add_argument("--json", action="store_true")
+
+    settings_p = sub.add_parser(
+        "settings",
+        help="Show or set project .aichestra role/quota/verify settings",
+    )
+    settings_sub = settings_p.add_subparsers(dest="settings_command", required=True)
+    settings_show = settings_sub.add_parser("show", help="Print project settings")
+    settings_show.add_argument("--project-root", type=Path, default=None)
+    settings_show.add_argument("--json", action="store_true", default=True)
+    settings_set_p = settings_sub.add_parser("set", help="Set KEY=VALUE in project.json")
+    settings_set_p.add_argument(
+        "pairs",
+        nargs="+",
+        metavar="KEY=VALUE",
+        help="e.g. roles.implement=codex quota.mode=auto",
+    )
+    settings_set_p.add_argument("--project-root", type=Path, default=None)
+    settings_set_p.add_argument("--json", action="store_true", default=True)
 
     research_p = sub.add_parser(
         "research",
@@ -298,6 +346,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stdout.write(json.dumps(result.to_dict(), indent=2) + "\n")
         return 0 if result.ok or args.dry_run else 1
 
+    if args.command == "init":
+        return _cmd_init(args)
+
+    if args.command == "settings":
+        return _cmd_settings(args)
+
     if args.command == "research":
         from aichestra.config.layering import resolve_config
         from aichestra.orchestration.research_compact import research_paths
@@ -331,6 +385,44 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     parser.error(f"unknown command: {args.command}")
     return 2
+
+
+def _cmd_init(args: argparse.Namespace) -> int:
+    from aichestra.config.project_settings import init_project
+
+    root = Path(args.project_root or Path.cwd()).resolve()
+    try:
+        result = init_project(
+            root,
+            yes=bool(args.yes),
+            sets=list(args.set or []),
+            force=bool(args.force),
+        )
+    except (OSError, ValueError, NotADirectoryError) as exc:
+        sys.stderr.write(str(exc) + "\n")
+        return 2
+    if args.json:
+        sys.stdout.write(json.dumps(result, indent=2) + "\n")
+    else:
+        action = "created" if result.get("created") else "updated/existing"
+        sys.stdout.write(f"aichestra init ({action}): {result.get('path')}\n")
+    return 0 if result.get("ok") else 1
+
+
+def _cmd_settings(args: argparse.Namespace) -> int:
+    from aichestra.config.project_settings import settings_set, show_settings
+
+    root = Path(args.project_root or Path.cwd()).resolve()
+    try:
+        if args.settings_command == "show":
+            payload = show_settings(root)
+        else:
+            payload = settings_set(root, list(args.pairs or []))
+    except (OSError, ValueError, FileNotFoundError) as exc:
+        sys.stderr.write(str(exc) + "\n")
+        return 2
+    sys.stdout.write(json.dumps(payload, indent=2) + "\n")
+    return 0
 
 
 def _cmd_prove_launch(args: argparse.Namespace) -> int:
@@ -453,7 +545,10 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
     )
     from aichestra.orchestration.modes import Mode
     from aichestra.orchestration.roles import select_lead
-    from aichestra.orchestration.verification import verification_commands_from_config
+    from aichestra.orchestration.verification import (
+        verification_commands_from_config,
+        verification_enabled,
+    )
     from aichestra.orchestration.workflow import ModeCRunController, WorkflowBindings
     from aichestra.providers.discovery import discover_providers, enabled_map_from_config
     from aichestra.providers.fakes import fake_orca
@@ -499,6 +594,62 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
     preferred = preferred_lead_name(cfg)
     fallback = fallback_lead_name(cfg)
     enabled = enabled_map_from_config(cfg)
+
+    from aichestra.config.roles import (
+        RoleBinding,
+        load_quota_policy,
+        load_role_bindings,
+        role_bindings_to_dict,
+    )
+
+    try:
+        role_bindings_map = load_role_bindings(cfg)
+        quota_policy_obj = load_quota_policy(cfg)
+    except ValueError as exc:
+        sys.stderr.write(f"Invalid project role/quota config: {exc}\n")
+        return 2
+
+    preferred = preferred_lead_name(cfg)
+    fallback = fallback_lead_name(cfg)
+    disabled = frozenset(execution_policy.disabled_runtimes or ())
+    implement = role_bindings_map["implement"]
+    if implement.runtime not in disabled:
+        preferred = implement.runtime
+    else:
+        # CLI/policy disabled the bound implement runtime — remap for this
+        # invocation to preferred_lead / fallback / research / quota fallback.
+        candidates = [
+            preferred,
+            fallback,
+            role_bindings_map["research"].runtime,
+            quota_policy_obj.implement_fallback.runtime,
+        ]
+        remapped = next(
+            (c for c in candidates if c and str(c) not in disabled),
+            None,
+        )
+        if remapped is None:
+            sys.stderr.write(
+                "Mode C fail closed: roles.implement is bound to "
+                f"{implement.runtime!r} but that runtime is disabled and no "
+                "allowed fallback remains. Change roles via "
+                "`aichestra settings set` or remove the disable flag.\n"
+            )
+            return 2
+        role_bindings_map = dict(role_bindings_map)
+        role_bindings_map["implement"] = RoleBinding(
+            runtime=str(remapped),
+            provider=implement.provider,
+            model=implement.model,
+        )
+        preferred = str(remapped)
+    fallback = (
+        quota_policy_obj.implement_fallback.runtime
+        if quota_policy_obj.implement_fallback.runtime not in disabled
+        else fallback
+    )
+    role_bindings_dict = role_bindings_to_dict(role_bindings_map)
+    quota_policy_dict = quota_policy_obj.to_dict()
 
     providers = discover_providers(
         local_enabled=enabled_local,
@@ -583,6 +734,7 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         attachments=attachments,
         resume_run_id=getattr(args, "resume_run_id", None),
         verification_commands=verification_commands_from_config(cfg),
+        verification_enabled=verification_enabled(cfg),
         preferred_lead=preferred,
         fallback_lead=fallback,
         local_enabled=enabled_local,
@@ -594,6 +746,8 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         execution_targets=execution_targets,
         execution_policy=execution_policy,
         aichestra_repo_root=str(repo_root),
+        role_bindings=role_bindings_dict,
+        quota_policy=quota_policy_dict,
     )
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
@@ -613,11 +767,14 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         "providers_enabled": enabled,
         "fake_providers": use_fakes,
         "verification_commands": bindings.verification_commands,
+        "verification_enabled": bindings.verification_enabled,
         "attachments": list(attachments),
         "orca_run_id": state.metadata.get("orca_run_id"),
         "resume_run_id": bindings.resume_run_id,
         "execution_target_count": len(execution_targets),
         "execution_target_contract_version": EXECUTION_TARGET_CONTRACT_VERSION,
+        "role_bindings": role_bindings_dict,
+        "quota_policy": quota_policy_dict,
     }
     sys.stdout.write(json.dumps(payload, indent=2, default=str) + "\n")
     return 0 if not state.failed and not state.stopped else 1

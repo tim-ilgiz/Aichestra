@@ -77,7 +77,7 @@ from aichestra.orchestration.speckit_policy import (
 )
 from aichestra.orchestration.verification import (
     VerificationReport,
-    detect_verification_commands,
+    VerificationResult,
     run_verification,
 )
 from aichestra.providers.base import (
@@ -280,6 +280,7 @@ class WorkflowBindings:
     classify_fn: Callable[[WorkflowState], dict[str, Any]] | None = None
     maintenance_kwargs: dict[str, Any] = field(default_factory=dict)
     verification_commands: list[list[str]] = field(default_factory=list)
+    verification_enabled: bool = False
     preferred_lead: str = "codex"
     fallback_lead: str = "cursor"
     local_enabled: bool = False
@@ -292,6 +293,8 @@ class WorkflowBindings:
     execution_targets: tuple[ExecutionTarget, ...] = ()
     execution_policy: ExecutionPolicy = field(default_factory=ExecutionPolicy)
     aichestra_repo_root: str | None = None
+    role_bindings: dict[str, Any] = field(default_factory=dict)
+    quota_policy: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -329,6 +332,8 @@ class ModeCPolicyPackage:
     classify: dict[str, Any] = field(default_factory=dict)
     media_routing: dict[str, Any] | None = None
     precedence: tuple[str, ...] = ()
+    role_bindings: dict[str, Any] = field(default_factory=dict)
+    quota_policy: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -351,6 +356,9 @@ class ModeCPolicyPackage:
                 project_root=self.project_root or "<root>",
                 repo_root=self.aichestra_repo_root or None,
             ),
+            # Explicit project/user role policy (002) — not hard-coded core routing.
+            "role_bindings": dict(self.role_bindings),
+            "quota_policy": dict(self.quota_policy),
             # Legacy compatibility seams — secondary; not inner-worker SoT.
             "preferred_lead": self.preferred_lead,
             "fallback_lead": self.fallback_lead,
@@ -1020,37 +1028,60 @@ class ModeCRunController:
             return False
 
         bindings = self.bindings
-        commands = list(bindings.verification_commands or [])
         root = self._effective_project_root()
-        detected = False
-        if not commands:
-            commands = detect_verification_commands(root or bindings.project_root)
-            detected = bool(commands)
-            if commands:
-                self.state.metadata["verification_commands_detected"] = True
-                self.state.metadata["verification_commands"] = commands
+        # Single toggle: bindings.verification_enabled (from verification.enabled).
+        # Disabled ≠ soft-pass: return non-zero so Orca finishes the coordinator
+        # with worker_done failed (Verify, don't claim — no LLM bypass).
+        if not bindings.verification_enabled:
+            report = VerificationReport(
+                results=[
+                    VerificationResult(
+                        command=(),
+                        cwd=str(root or ""),
+                        exit_code=1,
+                        stdout="",
+                        stderr=(
+                            "verification.enabled=false; no verify commands run"
+                        ),
+                    )
+                ]
+            )
+            self.state.metadata["verification"] = report.to_dict()
+            self.state.metadata["verification_disabled"] = True
+            self._fail_gate(
+                GateKind.VERIFICATION,
+                detail=(
+                    "verification.enabled=false: returning non-zero exit code "
+                    "without running checks (enable via aichestra settings set "
+                    "verification.enabled=true and configure verify)"
+                ),
+                result={
+                    "ok": False,
+                    "disabled": True,
+                    "verification": report.to_dict(),
+                },
+            )
+            return False
+        commands = list(bindings.verification_commands or [])
         if not commands:
             report = VerificationReport(results=[])
             self.state.metadata["verification"] = report.to_dict()
             self._fail_gate(
                 GateKind.VERIFICATION,
                 detail=(
-                    "verification not configured: no verify commands in "
-                    "project config and no safe auto-detect match"
+                    "verification.enabled=true but no verify commands configured"
                 ),
                 result={
                     "ok": False,
-                    "verification": report.to_dict(),
                     "missing_verification": True,
+                    "verification": report.to_dict(),
                 },
             )
             return False
-        report = run_verification(commands, cwd=root)
+        report = run_verification(commands, cwd=root, timeout=480.0)
         self.state.metadata["verification"] = report.to_dict()
         self.state.metadata["verification_cwd"] = root
         detail = "verification ok" if report.ok else "verification failed"
-        if detected:
-            detail = f"{detail} (auto-detected commands)"
         if not report.ok:
             self._fail_gate(
                 GateKind.VERIFICATION,
@@ -1160,6 +1191,8 @@ class ModeCRunController:
             if isinstance(self.state.metadata.get("media_routing"), dict)
             else None,
             precedence=tuple(project_ctx.get("precedence") or ()),
+            role_bindings=dict(self.bindings.role_bindings or {}),
+            quota_policy=dict(self.bindings.quota_policy or {}),
         )
 
     def _effective_project_root(self) -> str | None:
@@ -1340,7 +1373,7 @@ class ModeCRunController:
                     role=role,
                     context=ctx,
                     cwd=root,
-                    timeout_seconds=600.0,
+                    timeout_seconds=3600.0,
                     read_only=read_only,
                     attachments=tuple(self.bindings.attachments or ()),
                     execution_target=self._bootstrap_target if role == MODE_C_HANDOFF_ROLE else None,

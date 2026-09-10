@@ -35,11 +35,20 @@ from tests.fakes.providers import fake_codex, fake_orca
 
 def test_verification_commands_from_project_shape() -> None:
     assert verification_commands_from_config(
-        {"verify": ["python", "-m", "pytest", "-q"]}
+        {
+            "verification": {"enabled": True},
+            "verify": ["python", "-m", "pytest", "-q"],
+        }
     ) == [["python", "-m", "pytest", "-q"]]
     assert verification_commands_from_config(
-        {"verify": [["npm", "test"], ["npm", "run", "lint"]]}
+        {
+            "verification": {"enabled": True},
+            "verify": [["npm", "test"], ["npm", "run", "lint"]],
+        }
     ) == [["npm", "test"], ["npm", "run", "lint"]]
+    assert verification_commands_from_config(
+        {"verify": ["pytest"]}  # toggle off by default
+    ) == []
 
 
 def test_verification_failure_fails_workflow(tmp_path: Path) -> None:
@@ -53,6 +62,7 @@ def test_verification_failure_fails_workflow(tmp_path: Path) -> None:
             project_root=str(tmp_path),
             task_prompt="noop",
             maintenance_kwargs={"change_summary": "noop", "touches_behavior": False},
+            verification_enabled=True,
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(23)"]],
         ),
     )
@@ -147,6 +157,7 @@ def test_maintenance_uses_change_signals_not_defaults(tmp_path: Path) -> None:
             project_root=str(tmp_path),
             task_prompt="change authorization behavior",
             # No maintenance_kwargs — must infer from summary / paths.
+            verification_enabled=True,
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
@@ -178,6 +189,7 @@ def test_maintenance_gate_records_required_tests_without_writer_roles(
                 "existing_tests_cover": False,
                 "risk": "high",
             },
+            verification_enabled=True,
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
@@ -206,6 +218,7 @@ def test_orchestrate_separates_repo_and_project_roots(
             {
                 "project_id": "target",
                 "local": {"enabled": True},
+                "verification": {"enabled": True},
                 "verify": [sys.executable, "-c", "import sys; sys.exit(0)"],
             }
         )
@@ -238,7 +251,7 @@ def test_orchestrate_separates_repo_and_project_roots(
     assert GateKind.VERIFICATION.value in payload["completed"]
 
 
-def test_orchestrate_without_verify_does_not_claim_success(
+def test_orchestrate_with_verification_disabled_fails_closed(
     fake_aichestra_root: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -249,7 +262,14 @@ def test_orchestrate_without_verify_does_not_claim_success(
     project.mkdir()
     (project / ".aichestra").mkdir()
     (project / ".aichestra" / "project.json").write_text(
-        json.dumps({"project_id": "bare", "local": {"enabled": False}}) + "\n",
+        json.dumps(
+            {
+                "project_id": "bare",
+                "local": {"enabled": False},
+                "verification": {"enabled": False},
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
     code = main(
@@ -265,6 +285,10 @@ def test_orchestrate_without_verify_does_not_claim_success(
         ]
     )
     payload = json.loads(capsys.readouterr().out)
-    assert code == 1
+    assert code != 0
     assert GateKind.VERIFICATION.value in payload["failed"]
-    assert payload["metadata"]["verification"]["ok"] is False
+    assert payload["config_roots"]["verification_enabled"] is False
+    assert payload["metadata"].get("verification_disabled") is True
+    report = payload["metadata"].get("verification") or {}
+    assert report.get("ok") is False
+    assert int(report.get("exit_code") or 0) != 0

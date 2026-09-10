@@ -129,6 +129,7 @@ def test_vision_attachment_delivered_and_wired(tmp_path: Path) -> None:
             task_prompt="fix UI from screenshot",
             attachments=(str(img),),
             maintenance_kwargs={"touches_behavior": False},
+            verification_enabled=True,
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
@@ -170,6 +171,7 @@ def test_orchestrate_honors_preferred_lead_and_no_codex(
         json.dumps(
             {
                 "project_id": "app",
+                "verification": {"enabled": True},
                 "verify": [sys.executable, "-c", "import sys; sys.exit(0)"],
             }
         )

@@ -775,7 +775,21 @@ class OrcaProvider(ProviderAdapter):
                 "Never pass a raw terminal handle to abort-launch. "
                 "Target locality may be local, remote, or cloud according to ExecutionPolicy. "
                 "Do not infer workers from raw providers. "
-                "Do not impose product-name phase routing. "
+                "When POLICY_PACKAGE.role_bindings is present, it is explicit "
+                "project/user policy: for each child Task declare role in "
+                "{implement,research,tests,docs} and Dispatch ONLY the bound "
+                "runtime (and provider/model when set) from execution_targets. "
+                "Do not silently substitute another product. If the bound "
+                "runtime is missing/disabled/unavailable, settle failed — do "
+                "not invent a replacement. "
+                "Quota policy (POLICY_PACKAGE.quota_policy): on implement "
+                "quota/rate-limit, if mode=manual escalate/ask the operator to "
+                "change roles via `aichestra settings` (or set quota.mode=auto) "
+                "and finish with worker_done failed if blocked; if mode=auto, "
+                "same-Run handoff/Dispatch to quota_policy.implement_fallback "
+                "via Orca (never call Cursor/Codex outside Orca). "
+                "Do not invent additional hard-coded phase→product maps beyond "
+                "role_bindings. "
                 "Unsupported targets MUST NOT be dispatched. "
                 "Legacy preferred_lead/local_* fields are secondary compatibility seams only. "
                 "Ownership:\nYou own the dynamic DAG: create arbitrary Tasks/Dispatches through Orca. "
@@ -824,6 +838,8 @@ class OrcaProvider(ProviderAdapter):
                         "execution_target_contract_version",
                         "launch_proof_operation",
                         "launch_proof_invocation",
+                        "role_bindings",
+                        "quota_policy",
                         "aichestra_repo_root",
                         "attachments",
                         "classify",

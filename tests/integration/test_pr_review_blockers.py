@@ -96,6 +96,7 @@ def test_workflow_classify_uses_speckit_and_binds_orca_run(tmp_path: Path) -> No
             project_root=str(tmp_path),
             task_prompt="fix one-line typo",
             maintenance_kwargs={"change_summary": "typo", "touches_behavior": False},
+            verification_enabled=True,
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
@@ -148,6 +149,7 @@ def test_mode_c_handoff_includes_task_without_lead_review_role(tmp_path: Path) -
                 "touches_public_api": False,
                 "risk": "low",
             },
+            verification_enabled=True,
             verification_commands=[
                 [
                     sys.executable,
@@ -201,6 +203,7 @@ def test_quota_failure_prepares_manual_handoff(tmp_path: Path) -> None:
             project_root=str(proj),
             task_prompt="continue feature",
             maintenance_kwargs={"change_summary": "x"},
+            verification_enabled=True,
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )

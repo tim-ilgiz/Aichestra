@@ -618,6 +618,7 @@ def _controller_bindings(tmp_path, *, orca, targets):
         project_root=str(tmp_path),
         task_prompt="bridge bootstrap",
         maintenance_kwargs={"change_summary": "x", "touches_behavior": False},
+        verification_enabled=True,
         verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         execution_targets=tuple(targets),
     )

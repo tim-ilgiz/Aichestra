@@ -41,11 +41,82 @@ Large local model downloads require explicit approval
 ## Daily commands
 
 ```bash
-python -m aichestra doctor          # PASS/WARN/FAIL health check
-python -m aichestra profile         # deterministic machine profile (JSON)
-python -m aichestra bootstrap       # idempotent setup
-python -m aichestra update          # after git pull; preserves machine-local
+# Platform
+python -m aichestra doctor            # PASS/WARN/FAIL health check
+python -m aichestra profile           # deterministic machine profile (JSON)
+python -m aichestra bootstrap         # idempotent setup
+python -m aichestra update            # after git pull; preserves machine-local
+
+# Target project
+aichestra init --yes                  # create .aichestra/project.json
+aichestra settings show               # print roles / quota / verification
+aichestra settings set KEY=VALUE …    # mutate project.json (see below)
+
+# Mode C / research / handoff (require Orca where noted)
+python -m aichestra orchestrate --prompt "…" --project-root /path/to/target
+python -m aichestra handoff --prompt "…" --run-id <run_id>
+python -m aichestra research /path/to/target-project --query "auth"
+python -m aichestra prove-launch --project-root /path/to/target --candidate-id <id>
+python -m aichestra abort-launch --token <cleanup_lease>
+
+# Staging diagnostics (typed, allowlist-gated)
+python -m aichestra staging STAGE_ALIAS --op uptime --dry-run
+python -m aichestra staging STAGE_ALIAS --op disk_usage
 ```
+
+(`aichestra …` and `python -m aichestra …` are equivalent after install.)
+
+### Target project init + role settings
+
+After `pip install -e .` (or `pip install .`), from any target project:
+
+```bash
+cd /path/to/your-project
+aichestra init --yes
+aichestra init --yes --force                          # overwrite existing project.json
+aichestra init --yes --set roles.implement=cursor     # init + one-shot sets
+aichestra settings show
+```
+
+All `aichestra settings set` keys:
+
+```bash
+# Roles (implement | research | tests | docs)
+aichestra settings set roles.implement=codex
+aichestra settings set roles.research=cursor
+aichestra settings set roles.tests=cursor
+aichestra settings set roles.docs=cursor
+aichestra settings set roles.tests.runtime=opencode
+aichestra settings set roles.tests.model=qwen2.5-coder:14b
+aichestra settings set roles.tests.provider=ollama
+aichestra settings set 'roles.tests={"runtime":"opencode","model":"qwen2.5-coder:14b"}'
+
+# Quota (manual | auto)
+aichestra settings set quota.mode=manual
+aichestra settings set quota.mode=auto
+aichestra settings set quota.implement_fallback=cursor
+
+# Verification gate (fail-closed when disabled)
+aichestra settings set verification.enabled=false
+aichestra settings set verification.enabled=true
+aichestra settings set verify='["pytest","-q"]'
+aichestra settings set verify='[["npm","test"],["npm","run","lint"]]'
+aichestra settings set verify=null
+```
+
+Works in **any** target project directory (not tied to a specific app). Role
+values are AgentRuntime ids (`codex`, `cursor`, `gemini`, `claude`, `opencode`)
+with optional `provider` / `model` (OpenCode + local/Ollama). Aliases `local` /
+`local-worker` map to `opencode`. Config lives in `.aichestra/project.json`.
+`verify` is separate from the toggle. Init sets `verification.enabled=false`;
+until enabled, the verification gate returns non-zero to Orca (no soft-pass).
+Machine-local prefs for a global install use the portable user config home
+(`AICHESTRA_CONFIG_HOME` override supported).
+
+Mode C reads these bindings into `POLICY_PACKAGE.role_bindings` /
+`quota_policy`. The Orca coordinator MUST Dispatch by role; `quota.mode=auto`
+means same-Run fallback on implement quota; `manual` notifies the operator to
+change settings.
 
 ### Modes in practice
 
@@ -68,7 +139,7 @@ python -m aichestra update          # after git pull; preserves machine-local
    after successful `run-use`. Use `--prepare-only` for packet-only output.
    Without `--run-id` / resolvable recent run, execute fails closed.
 5. **Disable local inference** — keep `local.enabled: false` in
-   `.local/machine.local.json` (default).
+   machine-local config (default).
 6. **Local repository research** —
    `python -m aichestra research /path/to/target-project --query "auth"`
 7. **Machine/local AI** — `python -m aichestra profile` and doctor local-AI section.
@@ -142,6 +213,7 @@ Do not treat CI green as live OS smoke for Windows/Linux.
 - Spec: [`specs/001-portable-ai-orchestration/spec.md`](specs/001-portable-ai-orchestration/spec.md)
 - Plan: [`specs/001-portable-ai-orchestration/plan.md`](specs/001-portable-ai-orchestration/plan.md)
 - Tasks: [`specs/001-portable-ai-orchestration/tasks.md`](specs/001-portable-ai-orchestration/tasks.md)
+- Project init / role routing: [`specs/002-project-init-role-routing/spec.md`](specs/002-project-init-role-routing/spec.md)
 - Constitution: [`.specify/memory/constitution.md`](.specify/memory/constitution.md)
 - Agent contract: [`AGENTS.md`](AGENTS.md)
 

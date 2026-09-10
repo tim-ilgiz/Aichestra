@@ -113,6 +113,7 @@ def _bindings(root: Path, *, orca, targets=(), policy=None) -> WorkflowBindings:
         project_root=str(root),
         task_prompt="implement safely",
         maintenance_kwargs={"change_summary": "x", "touches_behavior": False},
+        verification_enabled=True,
         verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         execution_targets=tuple(targets),
         execution_policy=policy or ExecutionPolicy(),

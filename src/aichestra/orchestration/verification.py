@@ -124,6 +124,24 @@ def run_verification(
     return report
 
 
+def verification_enabled(config: Mapping[str, Any] | None) -> bool:
+    """Single on/off switch for Mode C verification (default: off).
+
+    Canonical key: ``verification.enabled`` in layered / project config.
+    When false, the verification gate fails closed (non-zero exit, no
+    subprocesses) so Orca cannot soft-pass on LLM opinion. Turn on with
+    ``aichestra settings set verification.enabled=true`` and configure
+    ``verify``.
+    """
+    if not config:
+        return False
+    block = config.get("verification")
+    if isinstance(block, Mapping) and "enabled" in block:
+        return bool(block.get("enabled"))
+    # Legacy: bare verify list present does not auto-enable; require the toggle.
+    return False
+
+
 def verification_commands_from_config(config: Mapping[str, Any] | None) -> list[list[str]]:
     """Normalize project ``verify`` config into argv lists for the runner.
 
@@ -131,8 +149,10 @@ def verification_commands_from_config(config: Mapping[str, Any] | None) -> list[
     - ``["python", "-m", "pytest"]`` — one command
     - ``[["npm", "test"], ["npm", "run", "lint"]]`` — multiple commands
     - ``"pytest -q"`` — split with shlex (POSIX-friendly; Windows paths quoted)
+
+    Returns [] when ``verification.enabled`` is false.
     """
-    if not config:
+    if not config or not verification_enabled(config):
         return []
     raw = config.get("verify")
     if raw is None:

@@ -66,6 +66,7 @@ def test_one_run_id_reused_across_handoff(tmp_path: Path) -> None:
             project_root=str(tmp_path),
             task_prompt="small fix",
             maintenance_kwargs={"touches_behavior": False},
+            verification_enabled=True,
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
@@ -94,6 +95,7 @@ def test_speckit_policy_without_competing_tree(tmp_path: Path) -> None:
             project_root=str(tmp_path),
             task_prompt="refactor across 12 files in multi-package monorepo",
             maintenance_kwargs={"touches_behavior": False},
+            verification_enabled=True,
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
@@ -190,6 +192,7 @@ def test_worktree_adoption_switches_effective_root(tmp_path: Path) -> None:
             project_root=str(parent),
             task_prompt="implement",
             maintenance_kwargs={"touches_behavior": False},
+            verification_enabled=True,
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )

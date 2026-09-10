@@ -69,6 +69,7 @@ def _small_bindings(
         research_query=research_query,
         attachments=attachments,
         maintenance_kwargs={"change_summary": "typo", "touches_behavior": False},
+        verification_enabled=True,
         verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
     )
 
@@ -371,6 +372,7 @@ def test_disabled_lead_never_dispatched(tmp_path: Path) -> None:
             preferred_lead="codex",
             fallback_lead="cursor",
             maintenance_kwargs={"touches_behavior": False},
+            verification_enabled=True,
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
@@ -672,6 +674,7 @@ def test_disabled_codex_is_never_dispatched(tmp_path: Path) -> None:
             preferred_lead="codex",
             fallback_lead="cursor",
             maintenance_kwargs={"touches_behavior": False},
+            verification_enabled=True,
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
@@ -698,6 +701,7 @@ def test_disabled_cursor_is_never_dispatched(tmp_path: Path) -> None:
             preferred_lead="codex",
             fallback_lead="cursor",
             maintenance_kwargs={"touches_behavior": False},
+            verification_enabled=True,
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
@@ -724,6 +728,7 @@ def test_no_available_lead_does_not_default_to_codex(tmp_path: Path) -> None:
             preferred_lead="codex",
             fallback_lead="cursor",
             maintenance_kwargs={"touches_behavior": False},
+            verification_enabled=True,
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )

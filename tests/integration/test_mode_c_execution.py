@@ -50,6 +50,7 @@ def test_handoff_failed_does_not_complete_or_bypass_lead(tmp_path: Path) -> None
             task_prompt="implement feature",
             project_root=str(proj),
             maintenance_kwargs={"change_summary": "feature"},
+            verification_enabled=True,
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
@@ -119,6 +120,7 @@ def test_mode_c_resume_run_id(tmp_path: Path) -> None:
             project_root=str(proj),
             resume_run_id="existing-orca-run-42",
             maintenance_kwargs={"change_summary": "x"},
+            verification_enabled=True,
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
@@ -150,6 +152,7 @@ def test_maintenance_is_gate_not_writer_scheduler(tmp_path: Path) -> None:
                 "touches_behavior": True,
                 "touches_public_api": True,
             },
+            verification_enabled=True,
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
@@ -184,6 +187,7 @@ def test_mode_c_wires_orca_only_end_to_end(fixture_project_a: Path) -> None:
                 "change_summary": "bootstrap",
                 "touches_behavior": False,
             },
+            verification_enabled=True,
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
