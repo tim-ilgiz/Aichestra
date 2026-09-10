@@ -147,6 +147,58 @@ def abort_prepared(prepared: PreparedLaunch, ctx: LaunchContext) -> dict[str, An
         return {"skipped": False, "handle": handle, "ok": False, "error": str(exc)}
 
 
+def abort_launch_by_ref(
+    launch_ref: str,
+    *,
+    binary: str | None = None,
+    run: Callable[..., Any] | None = None,
+) -> dict[str, Any]:
+    """Owner-side cleanup for a prove-launch bridge that never reached Dispatch.
+
+    ``launch_ref`` is the opaque terminal handle returned as
+    ``prepared_launch.terminal_handle``. Safe only for Aichestra-owned bridges
+    (``owns_terminal=true``); callers must not pass foreign terminals.
+    """
+    from aichestra.providers.orca import resolve_orca_binary
+
+    from .serialize import LAUNCH_ABORT_OPERATION
+
+    handle = str(launch_ref or "").strip()
+    if not handle:
+        return {
+            "ok": False,
+            "operation": LAUNCH_ABORT_OPERATION,
+            "error": "launch_ref is required",
+        }
+    orca_binary = (binary or "").strip() or resolve_orca_binary() or ""
+    if not orca_binary:
+        return {
+            "ok": False,
+            "operation": LAUNCH_ABORT_OPERATION,
+            "launch_ref": handle,
+            "error": "Orca binary required for abort-launch",
+        }
+    prepared = PreparedLaunch(
+        arguments=[],
+        terminal_handle=handle,
+        owns_terminal=True,
+    )
+    result = abort_prepared(
+        prepared,
+        LaunchContext(
+            binary=orca_binary,
+            worktree="current",
+            run=run if run is not None else subprocess.run,
+        ),
+    )
+    return {
+        "ok": bool(result.get("ok")) and not result.get("skipped"),
+        "operation": LAUNCH_ABORT_OPERATION,
+        "launch_ref": handle,
+        "result": result,
+    }
+
+
 def _close_owned_terminal(ctx: LaunchContext, handle: str) -> None:
     abort_prepared(
         PreparedLaunch(arguments=[], terminal_handle=handle, owns_terminal=True),
@@ -685,10 +737,31 @@ def _binding_from_opencode_config(config: Mapping[str, Any], *, binary: str | No
     }
 
 
+def _binary_from_powershell_command(command: str) -> str | None:
+    """Extract ``& 'runtime'`` / ``& \"runtime\"`` from a PowerShell wrapper script."""
+    import re
+
+    match = re.search(r"&\s+'([^']+)'", command)
+    if match:
+        return match.group(1)
+    match = re.search(r'&\s+"([^"]+)"', command)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _looks_like_powershell_wrapper(argv: list[str]) -> bool:
+    joined = " ".join(argv).lower()
+    return "powershell" in joined and "frombase64string" in joined
+
+
 def _binding_from_process_argv(argv: list[str]) -> dict[str, str | None] | None:
     """Parse machine-readable OpenCode effective config from process argv."""
     config_raw = None
-    binary = argv[-1] if argv else None
+    # PowerShell wrapper argv ends with the script string, not the runtime binary.
+    binary: str | None = None
+    if argv and not _looks_like_powershell_wrapper(argv):
+        binary = argv[-1]
     for item in argv:
         if item.startswith("OPENCODE_CONFIG_CONTENT="):
             config_raw = item.split("=", 1)[1]
@@ -700,7 +773,7 @@ def _binding_from_process_argv(argv: list[str]) -> dict[str, str | None] | None:
                 config_raw = argv[index + 1]
                 break
     if config_raw is None:
-        # Windows PowerShell wrapper: FromBase64String('...')
+        # Windows PowerShell wrapper: FromBase64String('...'); & 'runtime'
         joined = " ".join(argv)
         marker = "FromBase64String('"
         if marker in joined:
@@ -711,6 +784,7 @@ def _binding_from_process_argv(argv: list[str]) -> dict[str, str | None] | None:
                     config_raw = base64.b64decode(joined[start:end]).decode("utf-8")
                 except (ValueError, UnicodeDecodeError):
                     config_raw = None
+            binary = _binary_from_powershell_command(joined)
     if not config_raw:
         return None
     try:
@@ -1216,6 +1290,8 @@ def prove_launch_by_candidate_id(
 
 def _coordinator_prepared_launch(prepared: PreparedLaunch) -> dict[str, Any]:
     """Attestation for coordinator: handle + argv fragment; no DIY command/env."""
+    from .serialize import LAUNCH_ABORT_OPERATION, abort_launch_invocation
+
     evidence = {
         key: value
         for key, value in dict(prepared.evidence).items()
@@ -1227,11 +1303,17 @@ def _coordinator_prepared_launch(prepared: PreparedLaunch) -> dict[str, Any]:
             **evidence,
             "process": {k: v for k, v in process.items() if k != "env"},
         }
-    return sanitize_mapping(
-        {
-            "arguments": list(prepared.arguments),
-            "terminal_handle": prepared.terminal_handle,
-            "evidence": evidence,
-            "owns_terminal": prepared.owns_terminal,
+    handle = prepared.terminal_handle
+    payload: dict[str, Any] = {
+        "arguments": list(prepared.arguments),
+        "terminal_handle": handle,
+        "evidence": evidence,
+        "owns_terminal": prepared.owns_terminal,
+    }
+    if prepared.owns_terminal and isinstance(handle, str) and handle.strip():
+        payload["cleanup"] = {
+            "operation": LAUNCH_ABORT_OPERATION,
+            "required_if": "owns_terminal and not dispatched",
+            "invocation": abort_launch_invocation(launch_ref=handle.strip()),
         }
-    )
+    return sanitize_mapping(payload)

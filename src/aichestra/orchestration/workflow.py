@@ -97,6 +97,7 @@ from aichestra.execution.serialize import (
     LEGACY_COMPATIBILITY_FIELDS,
     OWNERSHIP_METADATA,
     prove_launch_invocation,
+    render_cli_invocation,
     safe_endpoint_for_context,
     serialize_execution_policy,
     serialize_execution_target,
@@ -346,6 +347,10 @@ class ModeCPolicyPackage:
             "execution_policy": dict(self.execution_policy),
             "canonical_execution_fields": list(CANONICAL_EXECUTION_FIELDS),
             "launch_proof_operation": LAUNCH_PROOF_OPERATION,
+            "launch_proof_invocation": prove_launch_invocation(
+                project_root=self.project_root or "<root>",
+                repo_root=self.aichestra_repo_root or None,
+            ),
             # Legacy compatibility seams — secondary; not inner-worker SoT.
             "preferred_lead": self.preferred_lead,
             "fallback_lead": self.fallback_lead,
@@ -808,10 +813,11 @@ class ModeCRunController:
 
         package = self._build_policy_package(run_id)
         self.state.metadata["mode_c_policy_package"] = package.to_dict()
-        prove_cmd = prove_launch_invocation(
+        prove_invocation = prove_launch_invocation(
             project_root=package.project_root or "<root>",
             repo_root=package.aichestra_repo_root or None,
         )
+        prove_display = render_cli_invocation(prove_invocation)
 
         context = sanitize_mapping(
             {
@@ -835,6 +841,7 @@ class ModeCRunController:
                     package.execution_target_contract_version
                 ),
                 "launch_proof_operation": LAUNCH_PROOF_OPERATION,
+                "launch_proof_invocation": prove_invocation,
                 "aichestra_repo_root": package.aichestra_repo_root,
                 # Capability hints — ExecutionTargets are canonical; legacy secondary.
                 "capabilities": {
@@ -880,12 +887,16 @@ class ModeCRunController:
                 "execution_targets (enabled, available, capable, allowed, and "
                 "runnable). execution_target_candidates are NOT dispatchable; "
                 f"promote a candidate only via `{LAUNCH_PROOF_OPERATION}` / "
-                f"`{prove_cmd}` (deterministic structured process attestation; Aichestra "
+                f"structured launch_proof_invocation `{prove_display}` "
+                "(argv contract — never shell-concatenate paths or JSON "
+                "candidate ids; Aichestra "
                 "re-resolves binding from trusted config using --repo-root) which returns a proven "
                 "runnable target + prepared_launch handle — never DIY terminal "
                 "show/tail recipes, embedded shell launch strings, or screen "
                 "substring matching. "
                 "Reuse the returned terminal_handle exactly (no second bridge). "
+                "If prove-launch succeeds but Dispatch does not start, call "
+                "aichestra abort-launch --launch-ref <terminal_handle>. "
                 "orca-existing-terminal targets are dispatchable only with launch_ref. "
                 "Target locality may be local, remote, or cloud according to "
                 "ExecutionPolicy. "

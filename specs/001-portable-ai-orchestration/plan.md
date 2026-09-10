@@ -7,11 +7,13 @@
 **Status**: Architecture source of truth: coordinator under Orca owns the
 concrete workflow/DAG; Orca owns canonical Run/Task/Dispatch/worker/terminal
 lifecycle; Aichestra owns discovery, ExecutionTarget resolution, policy,
-security, and deterministic gates. Phase 24 (T163, T169–T176) and Phase 25
-(T177–T181) are implemented, including in-Run `AICHESTRA_GATE:verification`.
-Fresh GitHub CI on current HEAD (T167) remains open. T168 live smoke is
-accepted for the pre-T180 handshake. T180 in-Run verification live smoke is
-accepted on `run_27377a46c199`.
+security, and deterministic gates. Phase 24 (T163, T169–T176), Phase 25
+(T177–T181), and review residual T182–T185 are implemented, including
+structured `launch_proof_invocation`, Windows bridge attestation pipeline,
+`abort-launch`, and in-Run `AICHESTRA_GATE:verification`. Fresh GitHub CI on
+current HEAD (T167) remains open. T168 live smoke is accepted for the
+pre-T180 handshake. T180 in-Run verification live smoke is accepted on
+`run_27377a46c199`.
 
 ## Summary
 

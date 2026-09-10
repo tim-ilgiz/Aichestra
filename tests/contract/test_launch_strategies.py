@@ -1175,3 +1175,139 @@ def test_windows_bridge_command_is_powershell_not_posix_env():
     posix = _opencode_bridge_command(target, os_name="macos")
     assert posix is not None
     assert posix.command.startswith("env OPENCODE_CONFIG_CONTENT=")
+
+
+def _windows_process_argv_from_bridge(command: str) -> list[str]:
+    """Orca-shaped PowerShell process argv (last token is the script, not binary)."""
+    marker = "-Command "
+    assert marker in command
+    script = command[command.index(marker) + len(marker) :]
+    if script.startswith('"') and script.endswith('"'):
+        script = script[1:-1]
+    return [
+        "powershell.exe",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        script,
+    ]
+
+
+def test_windows_bridge_attestation_pipeline_matches_binding():
+    """T181: builder → Windows process argv → extract → structured_binding_matches."""
+    from aichestra.execution.launch_strategies import (
+        TerminalBridgeLaunch,
+        _opencode_bridge_command,
+        extract_attested_binding,
+        structured_binding_matches,
+    )
+
+    target = _opencode_target()
+    bridge = _opencode_bridge_command(target, os_name="windows")
+    assert bridge is not None
+    argv = _windows_process_argv_from_bridge(bridge.command)
+    assert argv[-1] != "/usr/bin/opencode"
+    assert "FromBase64String" in argv[-1]
+    evidence = {"process": {"pid": 4242, "argv": argv}}
+    attested = extract_attested_binding(evidence)
+    assert attested is not None
+    assert attested["binary"] == "/usr/bin/opencode"
+    assert attested["provider"] == "ollama"
+    assert attested["model"] == "qwen"
+    assert structured_binding_matches(target, evidence)
+
+    adapter = TerminalBridgeLaunch()
+    calls: list[list[str]] = []
+
+    def run(cmd, **_kwargs):
+        calls.append(list(cmd))
+        if cmd[1:3] == ["terminal", "create"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {"ok": True, "result": {"terminal": {"handle": "term_win"}}}
+                ),
+            )
+        if cmd[1:3] == ["terminal", "wait"]:
+            return SimpleNamespace(returncode=0, stdout=json.dumps({"ok": True}))
+        if cmd[1:3] in (["terminal", "show"], ["terminal", "read"]):
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "terminal": {
+                                "handle": "term_win",
+                                "process": {"pid": 4242, "argv": argv},
+                            }
+                        },
+                    }
+                ),
+            )
+        raise AssertionError(cmd)
+
+    prepared = adapter.prepare(
+        target, LaunchContext(binary="orca", worktree="current", run=run)
+    )
+    assert prepared.terminal_handle == "term_win"
+    assert structured_binding_matches(target, prepared.evidence)
+
+
+def test_prove_launch_invocation_is_structured_argv_not_shell_string():
+    from aichestra.execution.serialize import (
+        prove_launch_invocation,
+        render_cli_invocation,
+    )
+
+    repo = "/Users/ilgiz/Aichestra Dev"
+    project = "/tmp/Kate Rent Bot"
+    candidate_id = '["opencode","ollama","qwen"]'
+    invocation = prove_launch_invocation(
+        project_root=project,
+        repo_root=repo,
+        candidate_id=candidate_id,
+    )
+    assert invocation["command"] == "aichestra"
+    assert invocation["args"] == [
+        "prove-launch",
+        "--repo-root",
+        repo,
+        "--project-root",
+        project,
+        "--candidate-id",
+        candidate_id,
+        "--json",
+    ]
+    # Spaces and JSON id remain intact as argv elements — never shell-split.
+    assert invocation["args"][2] == repo
+    assert invocation["args"][4] == project
+    assert invocation["args"][6] == candidate_id
+    rendered = render_cli_invocation(invocation, os_name="macos")
+    assert "Aichestra Dev" in rendered
+    assert "Kate Rent Bot" in rendered
+    assert candidate_id in rendered
+    # Naive space-join would be unsafe; renderer must quote.
+    assert '"/Users/ilgiz/Aichestra Dev"' in rendered or "'/Users/ilgiz/Aichestra Dev'" in rendered
+
+
+def test_abort_launch_cli_closes_owned_terminal(monkeypatch):
+    from aichestra.cli import build_parser, main
+    from aichestra.execution import launch_strategies as ls
+
+    closes: list[str] = []
+
+    def fake_abort(launch_ref, **_kwargs):
+        closes.append(launch_ref)
+        return {
+            "ok": True,
+            "operation": "aichestra.abort_launch",
+            "launch_ref": launch_ref,
+            "result": {"skipped": False, "ok": True, "handle": launch_ref},
+        }
+
+    monkeypatch.setattr(ls, "abort_launch_by_ref", fake_abort)
+    code = main(["abort-launch", "--launch-ref", "term_owned", "--json"])
+    assert code == 0
+    assert closes == ["term_owned"]
+    assert "abort-launch" in build_parser().format_help()

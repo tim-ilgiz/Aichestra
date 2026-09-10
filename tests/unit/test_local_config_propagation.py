@@ -243,3 +243,20 @@ def test_orchestrate_passes_layered_config_into_discover_providers() -> None:
     src = inspect.getsource(_cmd_orchestrate)
     assert "discover_providers(" in src
     assert "config=cfg" in src
+    assert "resolve_aichestra_config_root" in src
+    assert "find_repo_root()" not in src
+
+
+def test_research_uses_aichestra_config_root_not_foreign_cwd() -> None:
+    import inspect
+
+    from aichestra import cli as cli_mod
+
+    src = inspect.getsource(cli_mod.main)
+    assert "resolve_aichestra_config_root" in src
+    # research branch must not fall back to bare find_repo_root().
+    research_block = src.split('if args.command == "research":', 1)[1].split(
+        'if args.command == "handoff":', 1
+    )[0]
+    assert "resolve_aichestra_config_root" in research_block
+    assert "find_repo_root()" not in research_block

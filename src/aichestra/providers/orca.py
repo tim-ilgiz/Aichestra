@@ -644,9 +644,12 @@ class OrcaProvider(ProviderAdapter):
                     session_id=session.session_id,
                 )
             agent = target.runtime.id
-            from aichestra.execution.serialize import prove_launch_invocation
+            from aichestra.execution.serialize import (
+                prove_launch_invocation,
+                render_cli_invocation,
+            )
 
-            prove_cmd = prove_launch_invocation(
+            prove_invocation = prove_launch_invocation(
                 project_root=str(request.context.get("project_root") or "<root>"),
                 repo_root=(
                     str(request.context.get("aichestra_repo_root")).strip()
@@ -655,6 +658,7 @@ class OrcaProvider(ProviderAdapter):
                     else None
                 ),
             )
+            prove_display = render_cli_invocation(prove_invocation)
             # Preserve the complete policy; generic bounded_prompt truncates context.
             contract = (
                 "Target:\nYou are the explicit Mode C coordinator for project_root in ProjectContext. "
@@ -675,7 +679,9 @@ class OrcaProvider(ProviderAdapter):
                 "orca-existing-terminal targets include launch_ref; Dispatch that "
                 "handle — do not invent a terminal. "
                 "Candidates require aichestra.prove_launch via "
-                f"`{prove_cmd}` (deterministic structured process "
+                f"structured launch_proof_invocation `{prove_display}` "
+                "(argv contract — never shell-concatenate paths or JSON "
+                "candidate ids; deterministic structured process "
                 "attestation; Aichestra re-resolves binding from trusted config "
                 "using --repo-root) "
                 "before they become runnable — never DIY terminal show/tail "
@@ -684,6 +690,8 @@ class OrcaProvider(ProviderAdapter):
                 "--project-root <root> --candidate-id <id> --json. "
                 "Use the returned prepared_launch.terminal_handle exactly; "
                 "do not create a second bridge terminal. "
+                "If prove-launch succeeds but Dispatch does not start, call "
+                "aichestra abort-launch --launch-ref <terminal_handle>. "
                 "Target locality may be local, remote, or cloud according to ExecutionPolicy. "
                 "Do not infer workers from raw providers. "
                 "Do not impose product-name phase routing. "
@@ -734,6 +742,7 @@ class OrcaProvider(ProviderAdapter):
                         "execution_policy",
                         "execution_target_contract_version",
                         "launch_proof_operation",
+                        "launch_proof_invocation",
                         "aichestra_repo_root",
                         "attachments",
                         "classify",

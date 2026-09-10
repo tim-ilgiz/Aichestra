@@ -828,5 +828,10 @@ def test_provisionable_targets_are_candidates_not_dispatchable(tmp_path, monkeyp
     assert "expected_binding" not in candidates[0]
     handoff = next(r for r in orca.sent if (r.role or "") == MODE_C_HANDOFF_ROLE)
     assert (handoff.context or {}).get("execution_target_candidates")
+    inv = (handoff.context or {}).get("launch_proof_invocation")
+    assert isinstance(inv, dict)
+    assert inv.get("command") == "aichestra"
+    assert "prove-launch" in list(inv.get("args") or [])
+    assert "--repo-root" in list(inv.get("args") or [])
     assert LAUNCH_PROOF_OPERATION in (handoff.prompt or "")
     assert "prove-launch" in (handoff.prompt or "")

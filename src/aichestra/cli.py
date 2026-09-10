@@ -1,4 +1,4 @@
-"""Aichestra CLI — doctor / profile / bootstrap / update / handoff / prove-launch / orchestrate."""
+"""Aichestra CLI — doctor / profile / bootstrap / update / handoff / prove-launch / abort-launch / orchestrate."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from aichestra import __version__
 from aichestra.bootstrap.core import bootstrap, update
 from aichestra.doctor import doctor_json, format_doctor_report, run_doctor
 from aichestra.machine_profiler import profile_machine
-from aichestra.repo import find_repo_root
+from aichestra.repo import find_repo_root, resolve_aichestra_config_root
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -157,6 +157,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     prove_p.add_argument("--json", action="store_true", default=True)
 
+    abort_p = sub.add_parser(
+        "abort-launch",
+        help=(
+            "Close an owned prove-launch bridge terminal that was never "
+            "Dispatched (launch_ref = prepared_launch.terminal_handle)"
+        ),
+    )
+    abort_p.add_argument(
+        "--launch-ref",
+        required=True,
+        help="Opaque terminal handle from prepared_launch.terminal_handle",
+    )
+    abort_p.add_argument("--json", action="store_true", default=True)
+
     orch_p = sub.add_parser(
         "orchestrate",
         help=(
@@ -277,7 +291,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         from aichestra.orchestration.research_compact import research_paths
 
         project_root = Path(args.project_root).resolve()
-        repo_root = Path(args.repo_root).resolve() if args.repo_root else find_repo_root()
+        try:
+            repo_root = resolve_aichestra_config_root(
+                repo_root=args.repo_root,
+                project_root=project_root,
+            )
+        except ValueError as exc:
+            sys.stderr.write(str(exc) + "\n")
+            return 2
         cfg = resolve_config(repo_root=repo_root, project_root=project_root)
         summary = research_paths(project_root, query=args.query, config=cfg)
         payload = summary.to_dict()
@@ -289,6 +310,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "prove-launch":
         return _cmd_prove_launch(args)
+
+    if args.command == "abort-launch":
+        return _cmd_abort_launch(args)
 
     if args.command == "orchestrate":
         return _cmd_orchestrate(args)
@@ -309,6 +333,15 @@ def _cmd_prove_launch(args: argparse.Namespace) -> int:
         repo_root=repo_root,
         worktree=str(getattr(args, "worktree", "current") or "current"),
     )
+    sys.stdout.write(json.dumps(payload, indent=2, default=str) + "\n")
+    return 0 if payload.get("ok") else 1
+
+
+def _cmd_abort_launch(args: argparse.Namespace) -> int:
+    """Owner-side cleanup for owned bridge terminals that never reached Dispatch."""
+    from aichestra.execution.launch_strategies import abort_launch_by_ref
+
+    payload = abort_launch_by_ref(str(args.launch_ref))
     sys.stdout.write(json.dumps(payload, indent=2, default=str) + "\n")
     return 0 if payload.get("ok") else 1
 
@@ -407,7 +440,14 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         sys.stderr.write(f"Mode C --project-root is not a directory: {project_root}\n")
         return 2
 
-    repo_root = Path(args.repo_root).resolve() if args.repo_root else find_repo_root()
+    try:
+        repo_root = resolve_aichestra_config_root(
+            repo_root=args.repo_root,
+            project_root=project_root,
+        )
+    except ValueError as exc:
+        sys.stderr.write(str(exc) + "\n")
+        return 2
     cfg = resolve_config(repo_root=repo_root, project_root=project_root)
     cfg = apply_provider_enable_overrides(
         cfg,

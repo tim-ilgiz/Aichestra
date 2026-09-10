@@ -31,6 +31,8 @@ EXECUTION_TARGET_CONTRACT_VERSION = 2
 # Deterministic promotion op: candidate → proven runnable ExecutionTarget.
 # Coordinator may request this; it must NOT DIY attestation from text recipes.
 LAUNCH_PROOF_OPERATION = "aichestra.prove_launch"
+# Owner-side cleanup when prove-launch created a bridge that was never Dispatched.
+LAUNCH_ABORT_OPERATION = "aichestra.abort_launch"
 
 # Coordinator-owned ask/reply gates answered by Aichestra during the live Run.
 COORDINATOR_GATES: tuple[str, ...] = ("maintenance", "verification")
@@ -179,23 +181,53 @@ def prove_launch_invocation(
     project_root: str = "<root>",
     repo_root: str | None = None,
     candidate_id: str = "<id>",
+) -> dict[str, Any]:
+    """Trusted structured CLI the coordinator must invoke (never a shell string).
+
+    Paths and JSON-shaped candidate ids MUST remain intact as argv elements.
+    If a host requires a display string, use ``render_cli_invocation``.
+    """
+    args = [
+        "prove-launch",
+        "--repo-root",
+        str(repo_root) if repo_root else "<aichestra_repo_root>",
+        "--project-root",
+        str(project_root or "<root>"),
+        "--candidate-id",
+        str(candidate_id or "<id>"),
+        "--json",
+    ]
+    return {"command": "aichestra", "args": args}
+
+
+def abort_launch_invocation(*, launch_ref: str = "<launch_ref>") -> dict[str, Any]:
+    """Structured cleanup for an owned bridge terminal that was never Dispatched."""
+    return {
+        "command": "aichestra",
+        "args": ["abort-launch", "--launch-ref", str(launch_ref or "<launch_ref>")],
+    }
+
+
+def render_cli_invocation(
+    invocation: Mapping[str, Any],
+    *,
+    os_name: str | None = None,
 ) -> str:
-    """Trusted CLI the coordinator must invoke — includes Aichestra config root."""
-    parts = ["aichestra", "prove-launch"]
-    if repo_root:
-        parts.extend(["--repo-root", str(repo_root)])
-    else:
-        parts.extend(["--repo-root", "<aichestra_repo_root>"])
-    parts.extend(
-        [
-            "--project-root",
-            str(project_root or "<root>"),
-            "--candidate-id",
-            str(candidate_id or "<id>"),
-            "--json",
-        ]
-    )
-    return " ".join(parts)
+    """OS-specific display string for prompts — not the coordinator contract."""
+    import shlex
+
+    from aichestra.platform_detect import OperatingSystem, detect_os
+
+    command = str(invocation.get("command") or "aichestra")
+    args = [str(item) for item in list(invocation.get("args") or ())]
+    argv = [command, *args]
+    platform = (os_name or detect_os().value).lower()
+    if platform == OperatingSystem.WINDOWS.value:
+        def _ps_quote(value: str) -> str:
+            return "'" + value.replace("'", "''") + "'"
+
+        return "& " + " ".join(_ps_quote(part) for part in argv)
+    return shlex.join(argv)
 
 
 def coordinator_gate_from_event(event: Mapping[str, Any] | None) -> str | None:

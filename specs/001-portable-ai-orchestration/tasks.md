@@ -19,13 +19,17 @@ Phase 24 T163/T169–T176 remains the ExecutionTarget/launch-proof foundation.
 Phase 25 (T177–T181) closes the post-c3de84f review blockers: prove-launch
 secret boundary, stable Aichestra `--repo-root`, existing-terminal `launch_ref`,
 in-Run `AICHESTRA_GATE:verification`, and Windows-native terminal-bridge.
+Review residual T182–T185: orchestrate/research config-root safety, structured
+`launch_proof_invocation` argv contract, Windows attestation pipeline proof,
+and `abort-launch` owner-side cleanup.
 
-Validation: **T167** was green on `c3de84f` (GitHub Actions run #70) and is
-**reopened** by this production follow-up. **T168** live smoke on
-`run_3d12b2f31039` remains historical evidence for the pre-T180 handshake.
-**T180** in-Run verification live smoke is ACCEPTED on `run_27377a46c199`
-(2026-09-10). Local-only live validation remains NOT VALIDATED. **Do not
-merge** until a fresh GitHub CI matrix is green on current HEAD (T167).
+Validation: **T167** was green on `c3de84f` (GitHub Actions run #70) and on
+`10831fc` (run #72) but is **reopened** by any subsequent production-code
+follow-up. **T168** live smoke on `run_3d12b2f31039` remains historical
+evidence for the pre-T180 handshake. **T180** in-Run verification live smoke
+is ACCEPTED on `run_27377a46c199` (2026-09-10). Local-only live validation
+remains NOT VALIDATED. **Do not merge** until a fresh GitHub CI matrix is
+green on current HEAD (T167).
 
 **Tests**: Included where required by success criteria (SC-001–SC-016) and
 architecture contract tests (MODE-C-001–010, MODE-C-017–020). Prefer minimal
@@ -802,6 +806,9 @@ security, deterministic gates and verification.
       root (`--repo-root` / `aichestra_repo_root` in the trusted package).
       `prove_launch_by_candidate_id` MUST NOT `find_repo_root()` from a foreign
       target-project cwd. T163/T175 remain accepted only with this seam.
+      <!-- Residual (2026-09-10 review): `orchestrate` / `research` CLI also
+           MUST use `resolve_aichestra_config_root()` (not bare
+           `find_repo_root()` from a foreign target cwd). -->
 - [x] T179 CRITICAL: `orca-existing-terminal` is dispatchable only with a
       transferable opaque `launch_ref` (attested terminal handle). Proven
       without a handle MUST NOT appear in canonical `execution_targets`.
@@ -827,6 +834,25 @@ security, deterministic gates and verification.
 - [x] T181 HIGH: `orca-terminal-bridge` command builder is OS-specific.
       Windows uses PowerShell + base64 config; POSIX keeps `env KEY=VAL`.
       Binding proof still uses structured process evidence, not screen text.
+      <!-- Residual (2026-09-10 review): full Windows process-argv →
+           extract_attested_binding → structured_binding_matches pipeline
+           covered; PowerShell wrapper must not treat script argv[-1] as
+           runtime binary. -->
+
+### Review residual — config root / argv / abort (COMPLETE)
+
+- [x] T182 CRITICAL: Mode C `orchestrate` and `research` resolve Aichestra
+      config root via `resolve_aichestra_config_root()` (same as prove-launch);
+      never treat a foreign target project as the platform config root.
+- [x] T183 CRITICAL: `launch_proof_invocation` is a structured
+      `{command, args}` argv contract (not a shell-concatenated string).
+      Spaces in paths and JSON-shaped candidate ids remain intact; OS-specific
+      `render_cli_invocation` is display-only.
+- [x] T184 HIGH: Windows bridge attestation proven end-to-end for PowerShell
+      process argv (builder → argv → extract → binding match → prepare).
+- [x] T185 MEDIUM: Owner-side `aichestra abort-launch --launch-ref` cleans up
+      owned prove-launch bridges that never reach Dispatch; success payload
+      includes structured cleanup invocation when `owns_terminal=true`.
 
 ### Validation gates (OPEN)
 

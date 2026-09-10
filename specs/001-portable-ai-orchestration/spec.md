@@ -4,12 +4,13 @@
 
 **Created**: 2026-09-09
 
-**Status**: Architecture source of truth strengthened (coordinator under Orca
-owns the concrete workflow/DAG; Orca owns canonical orchestration
-lifecycle/state; Aichestra is a project-execution control plane;
-provider/runtime/model agnostic via ExecutionTargets). Production Mode C
-realignment against MODE-C-011–020 / Phase 24 is **not** complete —
-architecture docs lead; code must follow.
+**Status**: Architecture source of truth: coordinator under Orca owns the
+concrete workflow/DAG; Orca owns canonical orchestration lifecycle/state;
+Aichestra is a project-execution control plane (provider/runtime/model
+agnostic via ExecutionTargets). Phase 24 (T163, T169–T176) and Phase 25
+(T177–T181) production Mode C realignment is **implemented**. T180 in-Run
+verification live smoke is accepted (`run_27377a46c199`). Fresh GitHub CI
+on current HEAD (T167) remains the merge gate.
 
 **Input**: User description: "A developer can clone this repository onto macOS, Windows or Linux, execute the platform bootstrap, authenticate required providers, and receive an equivalent Orca-based AI development environment."
 
