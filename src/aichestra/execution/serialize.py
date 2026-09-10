@@ -7,7 +7,7 @@ machine dumps. Does not launch workers or invent LaunchCapability proofs.
 from __future__ import annotations
 
 from typing import Any, Mapping
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from .compatibility import load_compatibility_bindings
 from .discovery import discover_execution_facts
@@ -52,44 +52,14 @@ OWNERSHIP_METADATA: dict[str, str] = {
 
 _REDACTED_ENDPOINT = "[REDACTED_ENDPOINT]"
 
-_SENSITIVE_QUERY_KEYS = frozenset(
-    {
-        "api_key",
-        "apikey",
-        "api-key",
-        "access_token",
-        "access-token",
-        "refresh_token",
-        "refresh-token",
-        "auth_token",
-        "auth-token",
-        "token",
-        "password",
-        "passwd",
-        "secret",
-        "client_secret",
-        "client-secret",
-        "authorization",
-        "auth",
-        "key",
-        "private_key",
-        "private-key",
-        "session",
-        "session_id",
-        "session-id",
-        "sig",
-        "signature",
-        "credential",
-        "credentials",
-    }
-)
-
 
 def safe_endpoint_for_context(endpoint: str | None) -> str | None:
     """Return a coordinator-safe endpoint representation (never mutate internals).
 
-    Keeps ordinary loopback URLs useful. Strips URL userinfo, credential-bearing
-    query parameters and fragments. Malformed or suspicious values fail closed.
+    Keeps ordinary loopback URLs useful. Drops URL userinfo, *all* query
+    parameters, and the fragment by construction — no credential-key denylist.
+    Malformed or suspicious values fail closed. Internal exact endpoints
+    (ExecutionTarget.endpoint / LaunchBindingKey) remain unchanged.
     """
     if endpoint is None:
         return None
@@ -134,51 +104,8 @@ def safe_endpoint_for_context(endpoint: str | None) -> str | None:
     if port is not None:
         netloc = f"{host_part}:{port}"
 
-    safe_query_pairs: list[tuple[str, str]] = []
-    for key, value in parse_qsl(parts.query, keep_blank_values=True):
-        if _sensitive_query_key(key):
-            continue
-        safe_query_pairs.append((key, value))
-
-    fragment = parts.fragment
-    if fragment and _sensitive_fragment(fragment):
-        fragment = ""
-
-    return urlunsplit(
-        (
-            parts.scheme,
-            netloc,
-            parts.path,
-            urlencode(safe_query_pairs, doseq=True),
-            fragment,
-        )
-    )
-
-
-def _sensitive_query_key(key: str) -> bool:
-    lowered = key.strip().lower().replace(" ", "_")
-    if lowered in _SENSITIVE_QUERY_KEYS:
-        return True
-    return any(
-        part in lowered
-        for part in ("password", "token", "secret", "credential", "apikey", "api_key")
-    )
-
-
-def _sensitive_fragment(fragment: str) -> bool:
-    lowered = fragment.lower()
-    return any(
-        part in lowered
-        for part in (
-            "password",
-            "token",
-            "secret",
-            "credential",
-            "api_key",
-            "apikey",
-            "access_token",
-        )
-    ) or ("=" in fragment and _sensitive_query_key(fragment.split("=", 1)[0]))
+    # Query-safe by construction: scheme://host[:port]/path only.
+    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
 
 
 def serialize_execution_target(target: ExecutionTarget) -> dict[str, Any]:

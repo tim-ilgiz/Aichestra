@@ -144,29 +144,41 @@ def apply_provider_enable_overrides(
 ) -> dict[str, Any]:
     """Return a deep-copied config with CLI disable flags applied as runtime override.
 
-    ``--no-local`` is the highest invocation override for local execution:
+    Invocation flags have highest precedence for canonical ExecutionTargets:
 
-    * legacy ``local.enabled=false`` (migration seam)
-    * remove ``local`` from canonical ``execution.policy.allowed_localities``
-      so *all* ExecutionTargets with ``locality=local`` are forbidden for this
-      invocation (product/provider-agnostic; remote/cloud unaffected)
+    * ``--no-codex`` / ``--no-cursor`` — legacy ``providers.*.enabled=false``
+      plus union into ``execution.policy.disabled_runtimes`` so explicit
+      ``execution.runtimes.<id>.enabled=true`` cannot re-enable the runtime
+      for this invocation (CLI override wins; existing disabled_runtimes preserved).
+    * ``--no-local`` — legacy ``local.enabled=false`` plus strip ``local`` from
+      ``execution.policy.allowed_localities`` so *all* locality=local targets
+      are forbidden (product/provider-agnostic; remote/cloud unaffected).
     """
     override: dict[str, Any] = {"providers": {}, "local": {}}
+    policy_override: dict[str, Any] = {}
     if no_orca:
         override["providers"]["orca"] = {"enabled": False}
     if no_codex:
         override["providers"]["codex"] = {"enabled": False}
+        policy_override["disabled_runtimes"] = _union_disabled_runtimes(
+            config, "codex"
+        )
     if no_cursor:
         override["providers"]["cursor"] = {"enabled": False}
+        policy_override["disabled_runtimes"] = _union_disabled_runtimes(
+            config,
+            "cursor",
+            extra=policy_override.get("disabled_runtimes"),
+        )
     if no_local:
         override["local"]["enabled"] = False
         # Highest invocation override: strip LOCAL even if config explicitly
         # listed it under execution.policy.allowed_localities.
-        override["execution"] = {
-            "policy": {
-                "allowed_localities": _allowed_localities_without_local(config),
-            }
-        }
+        policy_override["allowed_localities"] = _allowed_localities_without_local(
+            config
+        )
+    if policy_override:
+        override["execution"] = {"policy": policy_override}
     if (
         not override["providers"]
         and "enabled" not in override["local"]
@@ -178,6 +190,30 @@ def apply_provider_enable_overrides(
     if "enabled" not in override["local"]:
         del override["local"]
     return deep_merge(config, override)
+
+
+def _union_disabled_runtimes(
+    config: Mapping[str, Any] | dict[str, Any],
+    runtime_id: str,
+    *,
+    extra: list[str] | None = None,
+) -> list[str]:
+    """Union existing disabled_runtimes with an invocation-disabled runtime id."""
+    execution = config.get("execution") if isinstance(config.get("execution"), dict) else {}
+    policy = (
+        execution.get("policy") if isinstance(execution.get("policy"), dict) else {}
+    )
+    existing = policy.get("disabled_runtimes") if isinstance(policy, dict) else None
+    merged: list[str] = []
+    seen: set[str] = set()
+    for source in (existing or (), extra or (), (runtime_id,)):
+        for item in source:
+            name = str(item).strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            merged.append(name)
+    return merged
 
 
 def _allowed_localities_without_local(config: Mapping[str, Any] | dict[str, Any]) -> list[str]:

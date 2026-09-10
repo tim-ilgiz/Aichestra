@@ -69,6 +69,37 @@ def test_no_local_override_strips_local_locality_from_execution_policy() -> None
     assert "remote" in localities
 
 
+def test_no_codex_no_cursor_union_disabled_runtimes() -> None:
+    cfg = {
+        "providers": {"codex": {"enabled": True}, "cursor": {"enabled": True}},
+        "execution": {
+            "runtimes": {
+                "codex": {"enabled": True},
+                "cursor": {"enabled": True},
+            },
+            "policy": {"disabled_runtimes": ["other-rt"]},
+        },
+    }
+    no_codex = apply_provider_enable_overrides(cfg, no_codex=True)
+    assert no_codex["providers"]["codex"]["enabled"] is False
+    assert set(no_codex["execution"]["policy"]["disabled_runtimes"]) == {
+        "other-rt",
+        "codex",
+    }
+    no_cursor = apply_provider_enable_overrides(cfg, no_cursor=True)
+    assert no_cursor["providers"]["cursor"]["enabled"] is False
+    assert set(no_cursor["execution"]["policy"]["disabled_runtimes"]) == {
+        "other-rt",
+        "cursor",
+    }
+    both = apply_provider_enable_overrides(cfg, no_codex=True, no_cursor=True)
+    assert set(both["execution"]["policy"]["disabled_runtimes"]) == {
+        "other-rt",
+        "codex",
+        "cursor",
+    }
+
+
 def test_discover_respects_enabled_map(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AICHESTRA_FAKE_PROVIDERS", "1")
     statuses = discover_providers(
