@@ -125,6 +125,68 @@ def _worker_record(payload):
     return data, worker
 
 
+def _parse_object(value):
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip().startswith("{"):
+        try:
+            import json
+            data = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        return data if isinstance(data, dict) else None
+    return None
+
+
+def receipt_timestamp(row, *keys):
+    """Parse canonical receipt timestamps (snake_case or Orca camelCase)."""
+    from datetime import datetime
+
+    for key in keys:
+        value = row.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        text = value.strip().replace("Z", "+00:00")
+        if "T" not in text and " " in text:
+            text = text.replace(" ", "T", 1)
+        try:
+            return datetime.fromisoformat(text)
+        except ValueError:
+            continue
+    return None
+
+
+def receipt_failure_code(row):
+    """Typed failure class from a worker receipt — never body/subject prose.
+
+    Accepts top-level ``failure`` and Orca ``lastFailure`` JSON when that object
+    carries an explicit failure/code field. ``rate_limit`` / ``quota_exhausted``
+    normalize to ``quota`` for the same Mode C policy gate.
+    """
+    candidates = []
+    direct = row.get("failure")
+    if isinstance(direct, str):
+        candidates.append(direct)
+    elif isinstance(direct, dict):
+        for key in ("code", "failure"):
+            value = direct.get(key)
+            if isinstance(value, str):
+                candidates.append(value)
+    parsed = _parse_object(row.get("lastFailure") or row.get("last_failure"))
+    if parsed:
+        for key in ("failure", "failureCode", "code"):
+            value = parsed.get(key)
+            if isinstance(value, str):
+                candidates.append(value)
+    for raw in candidates:
+        code = raw.strip().lower()
+        if code in {"quota", "rate_limit", "quota_exhausted"}:
+            return "quota"
+        if code:
+            return code
+    return None
+
+
 def _task_role(task):
     return task.get("role") or task.get("task_title") or task.get("title")
 
@@ -147,7 +209,6 @@ def validate_role_receipts(run_id, tasks, workers, receipts, role_targets,
     observed = set()
     superseded = set()
     quota_tasks = set()
-    from datetime import datetime
     # Receipt order must be canonical; fallback is accepted only with a prior
     # failed attempt whose completion precedes the replacement's creation.
     for worker in workers:
@@ -198,11 +259,13 @@ def validate_role_receipts(run_id, tasks, workers, receipts, role_targets,
                 same_work = prior_task_id == task_id or (
                     role == "implement" and _task_role(prior_task) == "implement")
                 try:
-                    ordered = datetime.fromisoformat(w["completed_at"]) <= datetime.fromisoformat(row["created_at"])
-                except (KeyError, TypeError, ValueError):
+                    prior_done = receipt_timestamp(w, "completed_at", "completedAt")
+                    current_created = receipt_timestamp(row, "created_at", "createdAt")
+                    ordered = bool(prior_done and current_created and prior_done <= current_created)
+                except (TypeError, ValueError):
                     return False
                 return (same_work and (w.get("run_id") or w.get("runId")) == run_id
-                        and w.get("failure") == "quota" and ordered)
+                        and receipt_failure_code(w) == "quota" and ordered)
             if not (role == "implement" and quota_mode == "auto"
                     and quota_target is not None and matches(quota_target)
                     and any(quota_before(p) for p in prior)):
@@ -212,7 +275,7 @@ def validate_role_receipts(run_id, tasks, workers, receipts, role_targets,
                     if quota_before(p):
                         _, w = _worker_record(p)
                         superseded.add(w.get("task_id") or w.get("taskId"))
-        if row.get("failure") == "quota":
+        if receipt_failure_code(row) == "quota":
             quota_tasks.add(task_id)
     dispatched_tasks = {(_worker_record(p)[1].get("task_id") or _worker_record(p)[1].get("taskId"))
                         for p in receipts.values()}

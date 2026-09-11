@@ -179,8 +179,12 @@ new Run with the remaining objective/context; it cannot retarget the old Run.
 structured primary-worker quota receipt. Use `dispatch-role --role implement
 --reason quota-fallback --run <run_id> --task <task_id> --project-root <root>`;
 this selects the Run contract fallback only in auto mode and checks canonical
-quota evidence before starting a worker. Live quota recovery via dispatch-role and durable
-receipts remain NOT VALIDATED end-to-end.
+quota evidence before starting a worker. Evidence must be typed
+(`failure=quota` or durable `lastFailure.failure=quota`); body/subject prose
+is not enough. Live probe on Orca 1.4.200: primary can settle failed with
+`completedAt`/`lastFailure`, but typed quota class is still missing →
+`authorize_task` correctly refuses fallback. End-to-end live quota recovery
+remains NOT VALIDATED until Orca emits that typed class.
 
 From a project or subdirectory, use `aichestra orchestrate --prompt "..."`.
 The nearest ancestor `.aichestra/project.json` selects the project root, with
@@ -267,7 +271,7 @@ are rejected **before** execution. Production SSH has **no** integration path.
 | macOS live smoke | May be live-validated separately via `scripts/smoke_mac.py` for components actually present |
 | Windows live smoke | **NOT VALIDATED** until a real Windows smoke run |
 | Linux live smoke | **NOT VALIDATED** until a real Linux smoke run |
-| Live Codex→Cursor quota fallback via `dispatch-role` | **PARTIAL** (infra present; end-to-end live NOT VALIDATED) |
+| Live Codex→Cursor quota fallback via `dispatch-role` | **NOT VALIDATED** (Aichestra ready; blocked on Orca typed `failure`/`lastFailure.failure`) |
 
 Do not treat CI green as live OS smoke for Windows/Linux.
 

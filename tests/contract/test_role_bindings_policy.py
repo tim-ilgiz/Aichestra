@@ -310,6 +310,7 @@ def test_dispatch_role_pins_exact_bound_target(tmp_path, monkeypatch):
         config=cfg,
         targets=fake_execution_targets() + fake_execution_targets("cursor"),
         binary="orca-test",
+        from_handle="term-coordinator",
         run=fake_run,
     )
     assert payload["ok"] is True
@@ -320,6 +321,9 @@ def test_dispatch_role_pins_exact_bound_target(tmp_path, monkeypatch):
     assert "--agent" in start
     assert start[start.index("--agent") + 1] == "cursor"
     assert start[start.index("--task") + 1] == "task-1"
+    assert start[start.index("--run") + 1] == "run-1"
+    assert start[start.index("--from") + 1] == "term-coordinator"
+    assert "run-use" not in {c[2] for c in calls if len(c) > 2}
 
     wrong = dispatch_role(
         role="research",
@@ -401,6 +405,148 @@ def test_quota_fallback_authorized_before_worker_start(tmp_path, monkeypatch, fa
     assert "run-use" not in calls
     if fault is None:
         assert result["execution_target_id"] == fallback.id
+
+
+def test_quota_fallback_accepts_nested_start_options_launch(tmp_path, monkeypatch):
+    """Orca 1.4+ nests durable effective under startOptions.launch — authorize_task
+    must use receipt_launch, not top-level launch only."""
+    import json
+    from types import SimpleNamespace
+    from aichestra.execution.dispatch_role import dispatch_role
+    from aichestra.execution.run_contract import save_contract
+    from aichestra.execution.roles import target_contract_entry
+    monkeypatch.setenv("AICHESTRA_CONFIG_HOME", str(tmp_path))
+    primary = fake_execution_targets("codex")[0]
+    fallback = fake_execution_targets("cursor")[0]
+    contract = {"bindings": {"implement": target_contract_entry(primary)},
+                "quota": {"mode": "auto",
+                          "roles": {"implement": target_contract_entry(fallback)}}}
+    save_contract(tmp_path, "r1", tmp_path, contract)
+    task = {"id": "t1", "run_id": "r1", "title": "implement"}
+    worker = {"dispatch_id": "d1", "task_id": "t1", "run_id": "r1",
+              "failure": "quota", "completed_at": "2026-01-01T00:00:00Z"}
+    nested_ok = {
+        "worker": {
+            **worker,
+            "startOptions": {
+                "agent": "codex",
+                "launch": {
+                    "requested": {"agent": "codex"},
+                    "effective": {"agent": "codex", "model": None},
+                },
+            },
+        },
+    }
+    bare_preference = {
+        "worker": {**worker, "startOptions": {"agent": "codex"}},
+    }
+
+    def run_factory(payload):
+        calls = []
+
+        def run(argv, **kwargs):
+            command = argv[2]
+            calls.append(command)
+            if command == "run-use":
+                raise AssertionError("dispatch-role must not call run-use")
+            data = {"task-list": {"tasks": [task]},
+                    "worker-list": {"workers": [worker]},
+                    "worker-show": payload,
+                    "worker-start": {"dispatchId": "fallback"}}[command]
+            return SimpleNamespace(returncode=0, stdout=json.dumps(data), stderr="")
+
+        return run, calls
+
+    run_ok, calls_ok = run_factory(nested_ok)
+    ok = dispatch_role(role="implement", reason="quota-fallback", run_id="r1", task_id="t1",
+                       project_root=tmp_path, repo_root=tmp_path, config={},
+                       targets=(primary, fallback), binary="orca-test", run=run_ok)
+    assert ok["ok"] is True, ok
+    assert "worker-start" in calls_ok
+    assert ok["execution_target_id"] == fallback.id
+
+    run_bare, calls_bare = run_factory(bare_preference)
+    bare = dispatch_role(role="implement", reason="quota-fallback", run_id="r1", task_id="t1",
+                         project_root=tmp_path, repo_root=tmp_path, config={},
+                         targets=(primary, fallback), binary="orca-test", run=run_bare)
+    assert bare["ok"] is False
+    assert "worker-start" not in calls_bare
+
+
+def test_quota_fallback_accepts_orca_last_failure_json(tmp_path, monkeypatch):
+    """Live Orca stores completedAt + lastFailure JSON; typed failure must be explicit."""
+    import json
+    from types import SimpleNamespace
+    from aichestra.execution.dispatch_role import dispatch_role
+    from aichestra.execution.run_contract import save_contract
+    from aichestra.execution.roles import target_contract_entry
+    monkeypatch.setenv("AICHESTRA_CONFIG_HOME", str(tmp_path))
+    primary = fake_execution_targets("codex")[0]
+    fallback = fake_execution_targets("cursor")[0]
+    contract = {"bindings": {"implement": target_contract_entry(primary)},
+                "quota": {"mode": "auto",
+                          "roles": {"implement": target_contract_entry(fallback)}}}
+    save_contract(tmp_path, "r1", tmp_path, contract)
+    task = {"id": "t1", "run_id": "r1", "title": "implement"}
+    worker = {"dispatchId": "d1", "taskId": "t1", "runId": "r1",
+              "completedAt": "2026-01-01T00:00:00Z",
+              "lastFailure": json.dumps({
+                  "provenance": "worker_report",
+                  "outcome": "failed",
+                  "failure": "quota",
+                  "completedAt": "2026-01-01T00:00:00Z",
+              })}
+    prose_only = {
+        "worker": {
+            "dispatchId": "d1", "taskId": "t1", "runId": "r1", "state": "failed",
+            "startOptions": {"launch": {"effective": {"agent": "codex"}}},
+        },
+        "dispatch": {
+            "id": "d1", "taskId": "t1", "runId": "r1", "status": "failed",
+            "completedAt": "2026-01-01T00:00:00Z",
+            "lastFailure": json.dumps({
+                "provenance": "worker_report",
+                "outcome": "failed",
+                "subject": "primary implement quota",
+                "body": "hit provider quota",
+            }),
+        },
+    }
+    typed = {
+        "worker": {
+            "dispatchId": "d1", "taskId": "t1", "runId": "r1", "state": "failed",
+            "startOptions": {"launch": {"effective": {"agent": "codex"}}},
+        },
+        "dispatch": {**worker, "id": "d1", "status": "failed"},
+    }
+
+    def run_factory(payload):
+        calls = []
+
+        def run(argv, **kwargs):
+            command = argv[2]
+            calls.append(command)
+            data = {"task-list": {"tasks": [task]},
+                    "worker-list": {"workers": [worker]},
+                    "worker-show": payload,
+                    "worker-start": {"dispatchId": "fallback"}}[command]
+            return SimpleNamespace(returncode=0, stdout=json.dumps(data), stderr="")
+
+        return run, calls
+
+    run_typed, calls_typed = run_factory(typed)
+    ok = dispatch_role(role="implement", reason="quota-fallback", run_id="r1", task_id="t1",
+                       project_root=tmp_path, repo_root=tmp_path, config={},
+                       targets=(primary, fallback), binary="orca-test", run=run_typed)
+    assert ok["ok"] is True, ok
+    assert "worker-start" in calls_typed
+
+    run_prose, calls_prose = run_factory(prose_only)
+    bare = dispatch_role(role="implement", reason="quota-fallback", run_id="r1", task_id="t1",
+                         project_root=tmp_path, repo_root=tmp_path, config={},
+                         targets=(primary, fallback), binary="orca-test", run=run_prose)
+    assert bare["ok"] is False
+    assert "worker-start" not in calls_prose
 
 
 @pytest.mark.parametrize("changed_role", ["cursor", {"runtime": "opencode", "provider": "beeline", "model": "new-model"}])

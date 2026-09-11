@@ -71,6 +71,7 @@ def dispatch_role(
     repo_root: str | Path | None = None,
     reason: str = "primary",
     worktree: str = "current",
+    from_handle: str | None = None,
     binary: str | None = None,
     config: Mapping[str, Any] | None = None,
     targets=None,
@@ -263,6 +264,8 @@ def dispatch_role(
         "worker-start",
         "--task",
         tid,
+        "--run",
+        rid,
         "--worktree",
         wt,
         "--name",
@@ -273,6 +276,9 @@ def dispatch_role(
         "skip",
         "--json",
     ]
+    sender = (from_handle or "").strip()
+    if sender:
+        worker_argv.extend(["--from", sender])
     index = worker_argv.index("--agent")
     worker_argv[index : index + 2] = list(prepared.arguments)
     if wt not in {"new-child", "new-top-level"}:
@@ -289,11 +295,13 @@ def dispatch_role(
         timeout=120,
     )
     start_payload = _parse_json(start.stdout or "")
+    # Never treat Orca envelope id ("local"/UUID) as a Dispatch id.
     dispatch_id = (
         _dig_id(start_payload, "result", "dispatchId")
-        or _dig_id(start_payload, "result", "id")
+        or _dig_id(start_payload, "result", "dispatch_id")
+        or _dig_id(start_payload, "result", "dispatch", "id")
         or _dig_id(start_payload, "dispatchId")
-        or _dig_id(start_payload, "id")
+        or _dig_id(start_payload, "dispatch_id")
     )
     ok = start.returncode == 0 and bool(dispatch_id)
     if not ok:

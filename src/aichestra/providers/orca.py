@@ -820,7 +820,11 @@ class OrcaProvider(ProviderAdapter):
                 "and handoff context (the current Run contract is immutable); "
                 "finish with worker_done failed if blocked; "
                 "if mode=auto, same-Run Dispatch of quota.roles.implement "
-                "execution_target_id via dispatch-role --reason quota-fallback (requires canonical primary quota evidence), or Orca (never call Cursor/Codex outside Orca, "
+                "execution_target_id via dispatch-role --reason quota-fallback "
+                "(requires durable typed primary quota evidence: worker-show "
+                "`failure=quota` or `lastFailure.failure=quota` — never body/subject "
+                "prose alone; Orca worker_done payload may omit typed failure), "
+                "or Orca (never call Cursor/Codex outside Orca, "
                 "and never replace this coordinator). "
                 "Do not invent additional hard-coded phase→product maps beyond "
                 "role_dispatch_contract. "
@@ -1736,13 +1740,28 @@ class OrcaProvider(ProviderAdapter):
             if "cleanup" not in meta:
                 _, cleanup = self._release_worker(binary, session, request, dispatch_id, run_id)
                 meta["cleanup"] = cleanup
-            event = done_meta.get("event") or {}
-            failure_code = event.get("failure")
-            if isinstance(failure_code, dict):
-                failure_code = failure_code.get("code")
-            quota_failure = failure_code in {"quota", "rate_limit", "quota_exhausted"}
+            # Typed failure only — never body/subject prose. Prefer the
+            # worker_done event, then durable worker-show / wait envelopes
+            # (top-level failure or lastFailure.failure) once Orca emits them.
+            from aichestra.execution.roles import _worker_record, receipt_failure_code
+
+            event = done_meta.get("event") if isinstance(done_meta.get("event"), Mapping) else {}
+            failure_code = receipt_failure_code(event)
+            if failure_code is None:
+                for envelope in (wait_payload, worker_payload, meta.get("receipt")):
+                    if not isinstance(envelope, Mapping):
+                        continue
+                    _, row = _worker_record(envelope)
+                    failure_code = receipt_failure_code(row)
+                    if failure_code:
+                        break
+            quota_failure = failure_code == "quota"
             cleanup = meta.get("cleanup") or {}
-            quota_failure = quota_failure and cleanup.get("state") in {"released", "already_released"} and not cleanup.get("unresolved_resources", True)
+            quota_failure = (
+                quota_failure
+                and cleanup.get("state") in {"released", "already_released"}
+                and not cleanup.get("unresolved_resources", True)
+            )
             return ProviderTaskResult(
                 ok=False,
                 output=wait_result.output or worker_result.output,

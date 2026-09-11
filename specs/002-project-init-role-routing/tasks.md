@@ -29,11 +29,16 @@
 
 - [x] T011 Resolve role runtime/provider/model into an exact preparable target
 - [x] T012 Audit all canonical role dispatch receipts; fail closed on mismatch
-- [ ] T013 BLOCKED by T022: Same-Run configured auto quota retry is described by
-  `role_dispatch_contract.quota` / `aichestra dispatch-role --reason quota-fallback`; Aichestra no longer
-  auto-retries coding workers itself. Live automatic implement fallback still
-  requires coordinator (or operator) to call dispatch-role for the fallback
-  target, plus durable launch receipts where Orca provides them.
+- [ ] T013 BLOCKED by T022 / live Orca typed quota: Same-Run configured auto quota
+  retry is described by `role_dispatch_contract.quota` /
+  `aichestra dispatch-role --reason quota-fallback`; Aichestra no longer
+  auto-retries coding workers itself. Live probe on Orca 1.4.200 (2026-09-11):
+  primary implement can settle `worker.state=failed` with durable
+  `lastFailure` JSON, but worker_done payload only carries
+  `taskId`/`dispatchId`/`outcome` — **no typed `failure=quota`**. Body/subject
+  prose is not evidence. `authorize_task` correctly refuses quota-fallback.
+  Remaining: durable typed quota class on Orca receipts (or lastFailure.failure)
+  plus coordinator/operator dispatch-role adoption after that signal.
 - [x] T014 Remove disabled implement remap; preserve exact provider/model binding
 - [x] T015 Infer project root from nearest project config or resolved cwd
 - [x] T016 Interactive settings and init editor using runtime/model discovery
@@ -44,8 +49,11 @@
 - [x] T021 Complete regression tests and local installed-wheel smoke
 - [ ] T022 PARTIAL: `aichestra dispatch-role` provides policy-enforced
   worker-start for the immutable Run role binding (pre-dispatch pin without making
-  Aichestra a scheduler). Remaining: durable Orca `launch.effective` receipts
-  for post-dispatch audit, and live coordinator adoption of dispatch-role.
+  Aichestra a scheduler). Live probe (Orca 1.4.200, run_159901bf6cfb): primary
+  `dispatch-role` produced `ctx_*` dispatch and settled worker; quota-fallback
+  correctly refused without typed failure. Remaining: durable Orca
+  `launch.effective` receipts for post-dispatch audit, typed quota class on
+  receipts (unblocks T013), and live coordinator adoption of dispatch-role.
   Fake CI is not live evidence. Do not mark this feature fully implemented
   while T022 is open.
 
@@ -90,8 +98,9 @@
 - [x] T034 Extend isolated wheel smoke to orchestrate/prove-launch/dispatch-role
   config boundaries and add contract drift / negative quota regressions.
 
-T013/T022 still require live coordinator adoption and durable Orca launch receipts;
-these deterministic corrections do not claim live integration acceptance.
+T013/T022 still require Orca typed quota class, live coordinator adoption, and
+durable Orca launch receipts; these deterministic corrections do not claim live
+integration acceptance.
 
 ## Resume / immutable target review corrections
 
@@ -126,5 +135,16 @@ these deterministic corrections do not claim live integration acceptance.
   missing the implement key (including empty `roles: {}`); explicit
   `quota.roles.implement` wins.
 
-T013/T022 still require live coordinator adoption and durable Orca launch receipts;
-these deterministic corrections do not claim live integration acceptance.
+T013/T022 still require Orca typed quota class (`failure` /
+`lastFailure.failure`), live coordinator adoption, and durable Orca launch
+receipts; these deterministic corrections do not claim live integration
+acceptance.
+
+## Live Orca typed-quota readiness (2026-09-11)
+
+- [x] T046 Accept Orca camelCase `completedAt` and typed `lastFailure.failure`
+  (also `rate_limit` / `quota_exhausted` → `quota`) in authorize + receipt
+  audit; refuse prose-only subject/body. Contract tests cover nested
+  `startOptions.launch.effective` and lastFailure JSON.
+- [x] T047 `dispatch-role --from` + `--run` on worker-start; never treat Orca
+  envelope id as Dispatch id; never call `run-use` from dispatch-role.

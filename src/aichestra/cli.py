@@ -275,6 +275,15 @@ def build_parser() -> argparse.ArgumentParser:
         default="current",
         help="Orca worktree context for worker-start (default: current)",
     )
+    dispatch_p.add_argument(
+        "--from",
+        dest="from_handle",
+        default=None,
+        help=(
+            "Orca terminal handle for worker-start --from (required outside a "
+            "live Orca terminal; does not call run-use)"
+        ),
+    )
     dispatch_p.add_argument("--json", action="store_true", default=True)
 
     orch_p = sub.add_parser(
@@ -538,6 +547,7 @@ def _cmd_dispatch_role(args: argparse.Namespace) -> int:
         project_root=Path(args.project_root).resolve(),
         repo_root=Path(args.repo_root).resolve() if args.repo_root else None,
         worktree=str(getattr(args, "worktree", "current") or "current"),
+        from_handle=getattr(args, "from_handle", None),
     )
     sys.stdout.write(json.dumps(payload, indent=2, default=str) + "\n")
     return 0 if payload.get("ok") else 1

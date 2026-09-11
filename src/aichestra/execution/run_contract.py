@@ -9,8 +9,14 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from aichestra.execution.launch_strategies import extract_attested_binding
-from aichestra.execution.roles import _task_role, _worker_record, contract_endpoint_matches
+from aichestra.execution.launch_strategies import extract_attested_binding, receipt_launch
+from aichestra.execution.roles import (
+    _task_role,
+    _worker_record,
+    contract_endpoint_matches,
+    receipt_failure_code,
+    receipt_timestamp,
+)
 from aichestra.providers.orca import _receipt_rows
 
 
@@ -77,20 +83,24 @@ def authorize_task(binary, run, run_id, task_id, role, contract, reason):
         dispatch = worker.get("dispatch_id") or worker.get("dispatchId")
         if not isinstance(dispatch, str) or not dispatch:
             raise ValueError("Missing canonical dispatch id")
-        data, row = _worker_record(call("worker-show", "--dispatch", dispatch))
+        payload = call("worker-show", "--dispatch", dispatch)
+        data, row = _worker_record(payload)
         prior_task = task_map.get(row.get("task_id") or row.get("taskId"), {})
-        launch = data.get("launch") or row.get("launch") or {}
+        # Same nesting as validate_role_receipts / Orca 1.4+ startOptions.launch.
+        launch = (
+            receipt_launch(payload)
+            or receipt_launch(data)
+            or receipt_launch({"worker": row})
+            or {}
+        )
         actual = extract_attested_binding({"effective": launch.get("effective", {})})
-        try:
-            completed = datetime.fromisoformat(row["completed_at"])
-            ordered = completed <= datetime.now(timezone.utc)
-        except (KeyError, ValueError, TypeError):
-            ordered = False
+        completed = receipt_timestamp(row, "completed_at", "completedAt")
+        ordered = bool(completed and completed <= datetime.now(timezone.utc))
         if ((row.get("dispatch_id") or row.get("dispatchId") or data.get("dispatchId")) == dispatch
                 and (row.get("run_id") or row.get("runId")) == run_id
                 and (prior_task.get("run_id") or prior_task.get("runId")) == run_id
                 and _task_role(prior_task) == "implement"
-                and row.get("failure") == "quota" and ordered and actual
+                and receipt_failure_code(row) == "quota" and ordered and actual
                 and all(actual.get(k) == primary.get(k) for k in ("runtime", "provider", "model"))
                 and contract_endpoint_matches(primary, actual.get("endpoint"))):
             return
