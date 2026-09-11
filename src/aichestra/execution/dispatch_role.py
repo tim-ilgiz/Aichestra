@@ -205,7 +205,16 @@ def dispatch_role(
         # run-use here: Orca run-use transfers Run ownership to the calling
         # terminal and can fence the coordinator that still owns the DAG.
         # worker-start --task is sufficient for an already-associated Task.
-        authorize_task(orca_binary, run_fn, rid, tid, role_key, contract, reason)
+        authorize_task(
+            orca_binary,
+            run_fn,
+            rid,
+            tid,
+            role_key,
+            contract,
+            reason,
+            from_handle=from_handle,
+        )
     except (ValueError, TypeError, KeyError, OSError, subprocess.SubprocessError) as exc:
         return {"ok": False, "operation": ROLE_DISPATCH_OPERATION, "error": str(exc)}
 

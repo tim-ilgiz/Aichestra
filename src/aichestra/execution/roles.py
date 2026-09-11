@@ -159,8 +159,10 @@ def receipt_timestamp(row, *keys):
 def receipt_failure_code(row):
     """Typed failure class from a worker receipt — never body/subject prose.
 
-    Accepts top-level ``failure`` and Orca ``lastFailure`` JSON when that object
-    carries an explicit failure/code field. ``rate_limit`` / ``quota_exhausted``
+    Accepts top-level ``failure``, Orca ``lastFailure`` JSON when that object
+    carries an explicit failure/code field, and durable ``worker_done`` message
+    ``payload.failure`` (Orca 1.4.200 stores the typed class on the message even
+    when ``lastFailure`` omits it). ``rate_limit`` / ``quota_exhausted``
     normalize to ``quota`` for the same Mode C policy gate.
     """
     candidates = []
@@ -172,8 +174,14 @@ def receipt_failure_code(row):
             value = direct.get(key)
             if isinstance(value, str):
                 candidates.append(value)
-    parsed = _parse_object(row.get("lastFailure") or row.get("last_failure"))
-    if parsed:
+    for blob in (
+        row.get("lastFailure"),
+        row.get("last_failure"),
+        row.get("payload"),
+    ):
+        parsed = _parse_object(blob)
+        if not parsed:
+            continue
         for key in ("failure", "failureCode", "code"):
             value = parsed.get(key)
             if isinstance(value, str):
@@ -184,6 +192,18 @@ def receipt_failure_code(row):
             return "quota"
         if code:
             return code
+    return None
+
+
+def last_failure_message_id(row):
+    """Return durable worker_done message id from lastFailure, if present."""
+    parsed = _parse_object(row.get("lastFailure") or row.get("last_failure"))
+    if not parsed:
+        return None
+    for key in ("messageId", "message_id"):
+        value = parsed.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
     return None
 
 

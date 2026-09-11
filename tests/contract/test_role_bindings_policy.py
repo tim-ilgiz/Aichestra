@@ -526,6 +526,23 @@ def test_quota_fallback_accepts_orca_last_failure_json(tmp_path, monkeypatch):
         def run(argv, **kwargs):
             command = argv[2]
             calls.append(command)
+            if command == "run-use":
+                raise AssertionError("dispatch-role must not call run-use")
+            if command == "run-show":
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps({
+                        "ok": True,
+                        "result": {"run": {"id": "r1", "coordinator_handle": "term-c"}},
+                    }),
+                    stderr="",
+                )
+            if command == "check":
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps({"ok": True, "result": {"messages": []}}),
+                    stderr="",
+                )
             data = {"task-list": {"tasks": [task]},
                     "worker-list": {"workers": [worker]},
                     "worker-show": payload,
@@ -545,6 +562,123 @@ def test_quota_fallback_accepts_orca_last_failure_json(tmp_path, monkeypatch):
     bare = dispatch_role(role="implement", reason="quota-fallback", run_id="r1", task_id="t1",
                          project_root=tmp_path, repo_root=tmp_path, config={},
                          targets=(primary, fallback), binary="orca-test", run=run_prose)
+    assert bare["ok"] is False
+    assert "worker-start" not in calls_prose
+
+
+def test_quota_fallback_accepts_worker_done_payload_failure(tmp_path, monkeypatch):
+    """Orca 1.4.200 stores failure=quota on worker_done payload but omits it from
+    lastFailure — authorize_task must read check --all mail without run-use."""
+    import json
+    from types import SimpleNamespace
+    from aichestra.execution.dispatch_role import dispatch_role
+    from aichestra.execution.run_contract import save_contract
+    from aichestra.execution.roles import target_contract_entry
+    monkeypatch.setenv("AICHESTRA_CONFIG_HOME", str(tmp_path))
+    primary = fake_execution_targets("codex")[0]
+    fallback = fake_execution_targets("cursor")[0]
+    contract = {"bindings": {"implement": target_contract_entry(primary)},
+                "quota": {"mode": "auto",
+                          "roles": {"implement": target_contract_entry(fallback)}}}
+    save_contract(tmp_path, "r1", tmp_path, contract)
+    task = {"id": "t1", "run_id": "r1", "title": "implement"}
+    worker = {"dispatchId": "d1", "taskId": "t1", "runId": "r1",
+              "completedAt": "2026-01-01T00:00:00Z",
+              "lastFailure": json.dumps({
+                  "provenance": "worker_report",
+                  "outcome": "failed",
+                  "messageId": "msg_1",
+                  "subject": "primary implement quota",
+                  "body": "hit provider quota",
+                  "completedAt": "2026-01-01T00:00:00Z",
+              })}
+    show = {
+        "worker": {
+            "dispatchId": "d1", "taskId": "t1", "runId": "r1", "state": "failed",
+            "startOptions": {"launch": {"effective": {"agent": "codex"}}},
+        },
+        "dispatch": {**worker, "id": "d1", "status": "failed"},
+    }
+    mail = {
+        "ok": True,
+        "result": {
+            "messages": [{
+                "id": "msg_1",
+                "type": "worker_done",
+                "payload": json.dumps({
+                    "taskId": "t1",
+                    "dispatchId": "d1",
+                    "outcome": "failed",
+                    "failure": "quota",
+                }),
+            }],
+        },
+    }
+    prose_mail = {
+        "ok": True,
+        "result": {
+            "messages": [{
+                "id": "msg_1",
+                "type": "worker_done",
+                "payload": json.dumps({
+                    "taskId": "t1",
+                    "dispatchId": "d1",
+                    "outcome": "failed",
+                }),
+            }],
+        },
+    }
+
+    def run_factory(check_payload):
+        calls = []
+
+        def run(argv, **kwargs):
+            command = argv[2]
+            calls.append(command)
+            if command == "run-use":
+                raise AssertionError("dispatch-role must not call run-use")
+            if command == "check":
+                assert "--all" in argv and "worker_done" in argv
+                assert "--terminal" in argv
+                return SimpleNamespace(
+                    returncode=0, stdout=json.dumps(check_payload), stderr=""
+                )
+            if command == "run-show":
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=json.dumps({
+                        "ok": True,
+                        "result": {"run": {"id": "r1", "coordinator_handle": "term-c"}},
+                    }),
+                    stderr="",
+                )
+            data = {"task-list": {"tasks": [task]},
+                    "worker-list": {"workers": [worker]},
+                    "worker-show": show,
+                    "worker-start": {"dispatchId": "fallback"}}[command]
+            return SimpleNamespace(returncode=0, stdout=json.dumps(data), stderr="")
+
+        return run, calls
+
+    run_ok, calls_ok = run_factory(mail)
+    ok = dispatch_role(
+        role="implement", reason="quota-fallback", run_id="r1", task_id="t1",
+        project_root=tmp_path, repo_root=tmp_path, config={},
+        targets=(primary, fallback), binary="orca-test", run=run_ok,
+        from_handle="term-c",
+    )
+    assert ok["ok"] is True, ok
+    assert "worker-start" in calls_ok
+    assert "check" in calls_ok
+    assert "run-use" not in calls_ok
+
+    run_prose, calls_prose = run_factory(prose_mail)
+    bare = dispatch_role(
+        role="implement", reason="quota-fallback", run_id="r1", task_id="t1",
+        project_root=tmp_path, repo_root=tmp_path, config={},
+        targets=(primary, fallback), binary="orca-test", run=run_prose,
+        from_handle="term-c",
+    )
     assert bare["ok"] is False
     assert "worker-start" not in calls_prose
 
