@@ -33,6 +33,9 @@ EXECUTION_TARGET_CONTRACT_VERSION = 2
 LAUNCH_PROOF_OPERATION = "aichestra.prove_launch"
 # Owner-side cleanup when prove-launch created a bridge that was never Dispatched.
 LAUNCH_ABORT_OPERATION = "aichestra.abort_launch"
+# Policy-enforced Dispatch for a configured worker role on an existing Orca Task.
+# Coordinator owns Task creation; this entrypoint pins the exact ExecutionTarget.
+ROLE_DISPATCH_OPERATION = "aichestra.dispatch_role"
 
 # Coordinator-owned ask/reply gates answered by Aichestra during the live Run.
 COORDINATOR_GATES: tuple[str, ...] = ("maintenance", "verification")
@@ -60,6 +63,8 @@ OWNERSHIP_METADATA: dict[str, str] = {
     "workflow_dag_owner": "coordinator_under_orca",
     "canonical_lifecycle_owner": "orca",
     "inner_worker_selection_owner": "coordinator_under_orca",
+    "role_dispatch_contract_owner": "aichestra_policy",
+    "role_dispatch_enforcer": "aichestra.dispatch_role",
     "aichestra_role": "policy_context_gates",
 }
 
@@ -200,6 +205,32 @@ def prove_launch_invocation(
     return {"command": "aichestra", "args": args}
 
 
+def dispatch_role_invocation(
+    *,
+    role: str = "<role>",
+    run_id: str = "<run-id>",
+    task_id: str = "<task-id>",
+    project_root: str = "<root>",
+    repo_root: str | None = None,
+) -> dict[str, Any]:
+    """Trusted structured CLI for policy-enforced role Dispatch."""
+    args = [
+        "dispatch-role",
+        "--role",
+        str(role or "<role>"),
+        "--run",
+        str(run_id or "<run-id>"),
+        "--task",
+        str(task_id or "<task-id>"),
+        "--repo-root",
+        str(repo_root) if repo_root else "<aichestra_repo_root>",
+        "--project-root",
+        str(project_root or "<root>"),
+        "--json",
+    ]
+    return {"command": "aichestra", "args": args}
+
+
 def abort_launch_invocation(
     *,
     token: str = "<cleanup_lease>",
@@ -335,6 +366,7 @@ def build_execution_policy(config: Mapping[str, Any]) -> ExecutionPolicy:
 def resolve_mode_c_execution(
     config: Mapping[str, Any],
     *,
+    required_bindings=(),
     known_launches: tuple[LaunchCapability, ...] | None = None,
     machine=None,
     runtime_binaries: Mapping[str, tuple[str, ...]] | None = None,
@@ -356,7 +388,7 @@ def resolve_mode_c_execution(
         provider_registry=provider_registry,
         provider_probes=provider_probes,
     )
-    bindings = load_compatibility_bindings(config)
+    bindings = load_compatibility_bindings(config, required_bindings=required_bindings)
     policy = build_execution_policy(config)
     if known_launches is None:
         from .launch_strategies import discover_launches

@@ -6,7 +6,13 @@ Ownership contract (canonical):
 Coordinator running under Orca:
 - owns concrete workflow/DAG
 - owns task dependencies and ordering
-- owns inner worker selection
+- decides which Tasks to create and when
+
+Aichestra policy:
+- binds each worker role to one exact ExecutionTarget
+- Orca MUST Dispatch that target; the coordinator LLM MUST NOT substitute
+
+Orca:
 
 Orca:
 - owns canonical Run lifecycle/state
@@ -34,7 +40,8 @@ task + project root
 → bounded context + policy package
 → exactly one Orca Run
 → handoff objective/context to Orca
-→ coordinator under Orca owns concrete DAG / inner workers
+→ coordinator under Orca owns concrete DAG / when to create Tasks
+→ Orca MUST Dispatch the exact role_dispatch_contract target per worker role
 → Orca owns Run/Task/Dispatch/worker/terminal/worktree lifecycle
 → deterministic Aichestra gates where required
 → Mode C result from Orca Run state + gate results
@@ -44,6 +51,8 @@ task + project root
 from __future__ import annotations
 
 import os
+import json
+import copy
 import re
 import shutil
 import subprocess
@@ -69,6 +78,12 @@ from aichestra.orchestration.project_context import (
     ProjectContext,
     discover_project_context,
 )
+from aichestra.orchestration.research_compact import (
+    RESEARCH_ARTIFACT_COMPACT_CHARS,
+    RESEARCH_ARTIFACT_FILE_CHARS,
+    RESEARCH_NOTES_PATH,
+    resolve_research_artifact,
+)
 from aichestra.orchestration.roles import select_lead
 from aichestra.orchestration.speckit_policy import (
     SpecKitPath,
@@ -77,7 +92,7 @@ from aichestra.orchestration.speckit_policy import (
 )
 from aichestra.orchestration.verification import (
     VerificationReport,
-    detect_verification_commands,
+    VerificationResult,
     run_verification,
 )
 from aichestra.providers.base import (
@@ -88,7 +103,7 @@ from aichestra.providers.base import (
     ProviderTaskRequest,
     ProviderTaskResult,
 )
-from aichestra.execution.domain import ExecutionPolicy, ExecutionTarget
+from aichestra.execution.domain import ExecutionPolicy, ExecutionTarget, Locality
 from aichestra.execution.serialize import (
     CANONICAL_EXECUTION_FIELDS,
     COORDINATOR_GATES,
@@ -96,6 +111,8 @@ from aichestra.execution.serialize import (
     LAUNCH_PROOF_OPERATION,
     LEGACY_COMPATIBILITY_FIELDS,
     OWNERSHIP_METADATA,
+    ROLE_DISPATCH_OPERATION,
+    dispatch_role_invocation,
     prove_launch_invocation,
     render_cli_invocation,
     safe_endpoint_for_context,
@@ -280,6 +297,7 @@ class WorkflowBindings:
     classify_fn: Callable[[WorkflowState], dict[str, Any]] | None = None
     maintenance_kwargs: dict[str, Any] = field(default_factory=dict)
     verification_commands: list[list[str]] = field(default_factory=list)
+    verification_enabled: bool = False
     preferred_lead: str = "codex"
     fallback_lead: str = "cursor"
     local_enabled: bool = False
@@ -292,6 +310,9 @@ class WorkflowBindings:
     execution_targets: tuple[ExecutionTarget, ...] = ()
     execution_policy: ExecutionPolicy = field(default_factory=ExecutionPolicy)
     aichestra_repo_root: str | None = None
+    coordinator_binding: dict[str, Any] = field(default_factory=dict)
+    role_bindings: dict[str, Any] = field(default_factory=dict)
+    quota_policy: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -329,12 +350,25 @@ class ModeCPolicyPackage:
     classify: dict[str, Any] = field(default_factory=dict)
     media_routing: dict[str, Any] | None = None
     precedence: tuple[str, ...] = ()
+    role_bindings: dict[str, Any] = field(default_factory=dict)
+    quota_policy: dict[str, Any] = field(default_factory=dict)
+    coordinator_binding: dict[str, Any] = field(default_factory=dict)
+    role_dispatch_contract: dict[str, Any] = field(default_factory=dict)
+    # Deterministic research output policy for the coordinator (not a phase).
+    research_artifact: str = "none"
+    research_artifact_notes_path: str = RESEARCH_NOTES_PATH
+    research_artifact_file_chars: int = RESEARCH_ARTIFACT_FILE_CHARS
+    research_artifact_compact_chars: int = RESEARCH_ARTIFACT_COMPACT_CHARS
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "run_id": self.run_id,
             "task_prompt": self.task_prompt,
             "research_query": self.research_query,
+            "research_artifact": self.research_artifact,
+            "research_artifact_notes_path": self.research_artifact_notes_path,
+            "research_artifact_file_chars": self.research_artifact_file_chars,
+            "research_artifact_compact_chars": self.research_artifact_compact_chars,
             "project_root": self.project_root,
             "aichestra_repo_root": self.aichestra_repo_root,
             "project_context": dict(self.project_context),
@@ -351,6 +385,17 @@ class ModeCPolicyPackage:
                 project_root=self.project_root or "<root>",
                 repo_root=self.aichestra_repo_root or None,
             ),
+            "role_dispatch_operation": ROLE_DISPATCH_OPERATION,
+            "role_dispatch_invocation": dispatch_role_invocation(
+                project_root=self.project_root or "<root>",
+                repo_root=self.aichestra_repo_root or None,
+                run_id=self.run_id or "<run-id>",
+            ),
+            # Explicit project/user role policy (002) — not hard-coded core routing.
+            "role_bindings": dict(self.role_bindings),
+            "quota_policy": dict(self.quota_policy),
+            "coordinator_binding": dict(self.coordinator_binding),
+            "role_dispatch_contract": dict(self.role_dispatch_contract),
             # Legacy compatibility seams — secondary; not inner-worker SoT.
             "preferred_lead": self.preferred_lead,
             "fallback_lead": self.fallback_lead,
@@ -398,8 +443,13 @@ class ModeCRunController:
             self.state.metadata["orca_run_id"] = self.bindings.resume_run_id.strip()
             self.state.metadata["orca_run_resumed"] = True
         self._attach_stage_root: str | None = None
+        self._resolved_roles = {}
+        self._coordinator_target = None
+        self._quota_target = None
+        self._quota_attempted = False
         self._bootstrap_target = None
         self._prepared_bootstrap_launch = None
+        self._bootstrap_launch_context = None
         self._inflight_handoff_context: dict[str, Any] | None = None
 
     def apply_maintenance_review(self, **kwargs: Any) -> MaintenanceReviewDecision:
@@ -439,8 +489,44 @@ class ModeCRunController:
                 serialize_prepared_launch,
             )
             from aichestra.providers.orca import resolve_orca_binary
+            from aichestra.config.roles import (
+                load_quota_policy,
+                load_role_bindings,
+                parse_role_binding,
+            )
+            from aichestra.execution.roles import RoleBindingResolver
 
-            candidate = select_bootstrap_candidate(self.bindings.execution_targets)
+            runtime_cfg = self._runtime_cfg()
+            known = frozenset(runtime_cfg["execution"]["runtimes"])
+            if self.bindings.role_bindings or self.bindings.coordinator_binding:
+                try:
+                    resolver = RoleBindingResolver(self.bindings.execution_targets)
+                    if self.bindings.role_bindings:
+                        self._resolved_roles = resolver.resolve_all(
+                            load_role_bindings(
+                                {"roles": self.bindings.role_bindings, **runtime_cfg}
+                            )
+                        )
+                    if self.bindings.coordinator_binding:
+                        self._coordinator_target = resolver.resolve(
+                            "orchestration.coordinator",
+                            parse_role_binding(
+                                self.bindings.coordinator_binding,
+                                field="orchestration.coordinator",
+                                known=known,
+                            ),
+                        )
+                    quota = load_quota_policy(
+                        {"quota": self.bindings.quota_policy, **runtime_cfg}
+                    )
+                    if quota.mode == "auto":
+                        self._quota_target = resolver.resolve(
+                            "quota.roles.implement", quota.implement_fallback
+                        )
+                except ValueError as exc:
+                    self._fail_gate(GateKind.ORCA_HANDOFF, detail=str(exc), result={"ok": False})
+                    return self.state
+            candidate = self._coordinator_target or select_bootstrap_candidate(self.bindings.execution_targets)
             if candidate is None:
                 self._fail_gate(GateKind.ORCA_HANDOFF,
                     detail="Mode C has no runnable bootstrap ExecutionTarget",
@@ -448,7 +534,16 @@ class ModeCRunController:
                 return self.state
 
             orca = self.bindings.orca
-            assert orca is not None
+            if orca is None:
+                self._fail_gate(
+                    GateKind.ORCA_HANDOFF,
+                    detail=(
+                        "Mode C requires Orca as the orchestration control plane; "
+                        "native Codex/Cursor remain Mode A and are not used as Mode C fallback"
+                    ),
+                    result={"ok": False, "failure": FailureClass.UNAVAILABLE.value},
+                )
+                return self.state
             status = orca.probe()
             binary = status.binary_path or resolve_orca_binary()
             if not binary:
@@ -493,6 +588,7 @@ class ModeCRunController:
 
             self._bootstrap_target = bootstrap
             self._prepared_bootstrap_launch = prepared
+            self._bootstrap_launch_context = launch_ctx
             self.state.metadata["bootstrap_execution_target"] = serialize_execution_target(
                 bootstrap
             )
@@ -550,6 +646,10 @@ class ModeCRunController:
             self.state.current_gate = None
             return self.state
         finally:
+            if self._prepared_bootstrap_launch is not None:
+                from aichestra.execution.launch_strategies import abort_prepared
+                abort_prepared(self._prepared_bootstrap_launch, self._bootstrap_launch_context)
+                self._prepared_bootstrap_launch = None
             self._cleanup_attachment_staging()
 
     def advance(self) -> GateKind | None:
@@ -735,7 +835,29 @@ class ModeCRunController:
             )
             return True
 
-        from aichestra.providers.attachments import stage_attachments
+        from aichestra.providers.attachments import (
+            orca_attach_unsupported_detail,
+            orca_worker_start_supports_attach,
+            stage_attachments,
+        )
+        from aichestra.providers.orca import resolve_orca_binary
+        from aichestra.providers.quota_guard import real_provider_execution_blocked
+
+        # MODE-C-010: fail closed before Run handoff when live Orca cannot attach.
+        # Fake-provider CI still exercises attach flag wiring against fakes.
+        if not real_provider_execution_blocked():
+            binary = resolve_orca_binary()
+            if not orca_worker_start_supports_attach(binary):
+                self._fail_gate(
+                    GateKind.ATTACHMENTS,
+                    detail=orca_attach_unsupported_detail(binary),
+                    result={
+                        "ok": False,
+                        "failure": FailureClass.UNAVAILABLE.value,
+                        "orca_attach_supported": False,
+                    },
+                )
+                return False
 
         prompt = self.bindings.task_prompt or ""
         decision = route_media(
@@ -812,12 +934,31 @@ class ModeCRunController:
         from aichestra.execution.launch_strategies import serialize_prepared_launch
 
         package = self._build_policy_package(run_id)
+        from aichestra.execution.run_contract import load_contract, save_contract
+        from aichestra.repo import resolve_aichestra_config_root
+        try:
+            home = resolve_aichestra_config_root(repo_root=package.aichestra_repo_root or None)
+            if self.state.metadata.get("orca_run_resumed"):
+                saved = load_contract(home, run_id, package.project_root)
+                if saved != package.role_dispatch_contract:
+                    raise ValueError("Run contract differs from current policy; restore the original settings or start a new Mode C Run")
+            else:
+                save_contract(home, run_id, package.project_root, package.role_dispatch_contract)
+        except (OSError, ValueError) as exc:
+            self._fail_gate(GateKind.ORCA_HANDOFF, detail=f"Cannot persist Run contract: {exc}")
+            return False
         self.state.metadata["mode_c_policy_package"] = package.to_dict()
         prove_invocation = prove_launch_invocation(
             project_root=package.project_root or "<root>",
             repo_root=package.aichestra_repo_root or None,
         )
         prove_display = render_cli_invocation(prove_invocation)
+        dispatch_invocation = dispatch_role_invocation(
+            project_root=package.project_root or "<root>",
+            repo_root=package.aichestra_repo_root or None,
+            run_id=run_id,
+        )
+        dispatch_display = render_cli_invocation(dispatch_invocation)
 
         context = sanitize_mapping(
             {
@@ -842,6 +983,8 @@ class ModeCRunController:
                 ),
                 "launch_proof_operation": LAUNCH_PROOF_OPERATION,
                 "launch_proof_invocation": prove_invocation,
+                "role_dispatch_operation": ROLE_DISPATCH_OPERATION,
+                "role_dispatch_invocation": dispatch_invocation,
                 "aichestra_repo_root": package.aichestra_repo_root,
                 # Capability hints — ExecutionTargets are canonical; legacy secondary.
                 "capabilities": {
@@ -876,7 +1019,16 @@ class ModeCRunController:
             prompt=(
                 "Mode C handoff under a single Orca Run. "
                 "Coordinator running under Orca owns the concrete workflow/DAG, "
-                "task dependencies and ordering, and inner worker selection. "
+                "task dependencies and ordering, and which Tasks to create. "
+                "POLICY_PACKAGE.role_dispatch_contract binds each worker role to "
+                "one exact execution_target_id. Prefer policy-enforced Dispatch via "
+                f"`{ROLE_DISPATCH_OPERATION}` / structured role_dispatch_invocation "
+                f"`{dispatch_display}` (create the Task first, then pass --run/--task/"
+                "--role). That entrypoint resolves the project binding, proves launch "
+                "when requires_launch_proof is true, and worker-starts only the bound "
+                "target. Direct Orca worker-start of bindings[role].execution_target_id "
+                "is allowed only for runnable targets already in execution_targets. "
+                "The coordinator MUST NOT choose a different runtime or target. "
                 "Orca owns canonical Run/Task/Dispatch lifecycle, worker "
                 "lifecycle, terminal/worktree lifecycle, and messages/handoffs. "
                 "Aichestra supplies discovery, ExecutionTargets, policy, "
@@ -885,7 +1037,8 @@ class ModeCRunController:
                 "instructions from project_context with stated precedence. "
                 "For inner workers, Dispatch only ExecutionTargets listed in "
                 "execution_targets (enabled, available, capable, allowed, and "
-                "runnable). execution_target_candidates are NOT dispatchable; "
+                "runnable) unless using dispatch-role which may prove a candidate. "
+                "execution_target_candidates are NOT directly dispatchable; "
                 f"promote a candidate only via `{LAUNCH_PROOF_OPERATION}` / "
                 f"structured launch_proof_invocation `{prove_display}` "
                 "(argv contract — never shell-concatenate paths or JSON "
@@ -1020,37 +1173,60 @@ class ModeCRunController:
             return False
 
         bindings = self.bindings
-        commands = list(bindings.verification_commands or [])
         root = self._effective_project_root()
-        detected = False
-        if not commands:
-            commands = detect_verification_commands(root or bindings.project_root)
-            detected = bool(commands)
-            if commands:
-                self.state.metadata["verification_commands_detected"] = True
-                self.state.metadata["verification_commands"] = commands
+        # Single toggle: bindings.verification_enabled (from verification.enabled).
+        # Disabled ≠ soft-pass: return non-zero so Orca finishes the coordinator
+        # with worker_done failed (Verify, don't claim — no LLM bypass).
+        if not bindings.verification_enabled:
+            report = VerificationReport(
+                results=[
+                    VerificationResult(
+                        command=(),
+                        cwd=str(root or ""),
+                        exit_code=1,
+                        stdout="",
+                        stderr=(
+                            "verification.enabled=false; no verify commands run"
+                        ),
+                    )
+                ]
+            )
+            self.state.metadata["verification"] = report.to_dict()
+            self.state.metadata["verification_disabled"] = True
+            self._fail_gate(
+                GateKind.VERIFICATION,
+                detail=(
+                    "verification.enabled=false: returning non-zero exit code "
+                    "without running checks (enable via aichestra settings set "
+                    "verification.enabled=true and configure verify)"
+                ),
+                result={
+                    "ok": False,
+                    "disabled": True,
+                    "verification": report.to_dict(),
+                },
+            )
+            return False
+        commands = list(bindings.verification_commands or [])
         if not commands:
             report = VerificationReport(results=[])
             self.state.metadata["verification"] = report.to_dict()
             self._fail_gate(
                 GateKind.VERIFICATION,
                 detail=(
-                    "verification not configured: no verify commands in "
-                    "project config and no safe auto-detect match"
+                    "verification.enabled=true but no verify commands configured"
                 ),
                 result={
                     "ok": False,
-                    "verification": report.to_dict(),
                     "missing_verification": True,
+                    "verification": report.to_dict(),
                 },
             )
             return False
-        report = run_verification(commands, cwd=root)
+        report = run_verification(commands, cwd=root, timeout=480.0)
         self.state.metadata["verification"] = report.to_dict()
         self.state.metadata["verification_cwd"] = root
         detail = "verification ok" if report.ok else "verification failed"
-        if detected:
-            detail = f"{detail} (auto-detected commands)"
         if not report.ok:
             self._fail_gate(
                 GateKind.VERIFICATION,
@@ -1105,6 +1281,73 @@ class ModeCRunController:
             "scheduler": "coordinator_under_orca",
         }
 
+    def _runtime_cfg(self) -> dict[str, Any]:
+        """Allowlist registered runtime ids for every workflow re-parse."""
+        return {
+            "execution": {
+                "runtimes": {
+                    t.runtime.id: {} for t in self.bindings.execution_targets
+                }
+            }
+        }
+
+    def _target_contract_entry(self, target: ExecutionTarget | None, extra: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        from aichestra.execution.roles import target_contract_entry
+        if target is None:
+            return dict(extra or {})
+        entry = target_contract_entry(target)
+        if extra:
+            for key, value in extra.items():
+                # Contract state/proof fields are authoritative over raw settings.
+                entry.setdefault(key, value)
+        return entry
+
+    def _coordinator_contract_entry(self) -> dict[str, Any]:
+        extra = dict(self.bindings.coordinator_binding or {})
+        return self._target_contract_entry(self._coordinator_target or self._bootstrap_target, extra)
+
+    def _quota_policy_contract(self) -> dict[str, Any]:
+        from aichestra.config.roles import load_quota_policy
+        quota = load_quota_policy(
+            {"quota": self.bindings.quota_policy or {}, **self._runtime_cfg()}
+        )
+        payload = quota.to_dict()
+        if self._quota_target is not None:
+            payload["roles"] = dict(payload.get("roles") or {})
+            payload["roles"]["implement"] = self._target_contract_entry(
+                self._quota_target, quota.implement_fallback.to_dict()
+            )
+        return payload
+
+    def _role_dispatch_contract(self) -> dict[str, Any]:
+        bindings = {
+            role: self._target_contract_entry(target, (self.bindings.role_bindings or {}).get(role) or {})
+            for role, target in self._resolved_roles.items()
+        }
+        quota = self._quota_policy_contract()
+        return {
+            "version": 2,
+            "owner": "aichestra_policy",
+            "enforcer": "aichestra.dispatch_role",
+            "dag_owner": "coordinator_under_orca",
+            "rule": (
+                "For each Task whose role is a key in bindings, Dispatch the bound "
+                "target via aichestra dispatch-role (policy-enforced worker-start) "
+                "or Orca worker-start of the exact execution_target_id. When "
+                "requires_launch_proof is true, prove-launch the candidate_id first "
+                "and Dispatch only the returned runnable target. The coordinator "
+                "chooses which Tasks to create and when; it MUST NOT choose a "
+                "different target. Auto quota fallback uses dispatch-role --reason "
+                "quota-fallback, requiring a canonical completed primary implement "
+                "quota receipt in this Run."
+            ),
+            "bindings": bindings,
+            "quota": {
+                "mode": quota.get("mode", "manual"),
+                "roles": dict(quota.get("roles") or {}),
+            },
+        }
+
     def _build_policy_package(self, run_id: str) -> ModeCPolicyPackage:
         project_ctx = dict(self.state.metadata.get("project_context") or {})
         scale = (self.state.metadata.get("speckit_path") or {}).get("scale", "small")
@@ -1120,6 +1363,16 @@ class ModeCRunController:
         def _effective(target: ExecutionTarget) -> ExecutionTarget:
             return proven_by_id.get(target.id, target)
 
+        # Keep role/quota contract aligned with runnable promotion (same id).
+        if proven_by_id:
+            self._resolved_roles = {
+                role: _effective(target) for role, target in self._resolved_roles.items()
+            }
+            if self._quota_target is not None:
+                self._quota_target = _effective(self._quota_target)
+            if self._coordinator_target is not None:
+                self._coordinator_target = _effective(self._coordinator_target)
+
         serialized_targets = tuple(
             serialize_execution_target(_effective(t))
             for t in self.bindings.execution_targets
@@ -1131,12 +1384,22 @@ class ModeCRunController:
             if t.provisionable and t.id not in proven_by_id
         )
         serialized_policy = serialize_execution_policy(self.bindings.execution_policy)
-        return ModeCPolicyPackage(
+        explicit_query = bool((self.bindings.research_query or "").strip())
+        research_artifact = resolve_research_artifact(
+            speckit_scale=str(scale),
+            speckit_steps=tuple(str(s) for s in steps),
+            explicit_research_query=explicit_query,
+            resume_or_audit=bool(self.state.metadata.get("orca_run_resumed")),
+            cloud_handoff=self._research_cloud_handoff_signal(),
+            research_useful=bool(self.state.metadata.get("research_useful_hint", True)),
+        )
+        package = ModeCPolicyPackage(
             run_id=run_id,
             task_prompt=self.bindings.task_prompt or "Mode C task",
             research_query=self.bindings.research_query
             or self.bindings.task_prompt
             or "",
+            research_artifact=research_artifact,
             project_root=str(self.bindings.project_root or ""),
             aichestra_repo_root=str(self.bindings.aichestra_repo_root or ""),
             project_context=project_ctx,
@@ -1160,6 +1423,63 @@ class ModeCRunController:
             if isinstance(self.state.metadata.get("media_routing"), dict)
             else None,
             precedence=tuple(project_ctx.get("precedence") or ()),
+            coordinator_binding=self._coordinator_contract_entry(),
+            role_bindings={
+                role: {
+                    **binding,
+                    **(
+                        {"execution_target_id": self._resolved_roles[role].id}
+                        if role in self._resolved_roles
+                        else {}
+                    ),
+                }
+                for role, binding in (self.bindings.role_bindings or {}).items()
+            },
+            quota_policy=self._quota_policy_contract(),
+            role_dispatch_contract=self._role_dispatch_contract(),
+        )
+        from aichestra.execution.roles import assert_role_dispatch_package_consistent
+
+        assert_role_dispatch_package_consistent(package.to_dict())
+        return package
+
+    def _research_expected_for_task(self) -> bool:
+        """Whether this invocation is expected to produce research output.
+
+        Static approximation until a coordinator creates a research Task.
+        ``local_enabled`` is capability only and MUST NOT imply research.
+        """
+        if bool((self.bindings.research_query or "").strip()):
+            return True
+        if bool(self.state.metadata.get("orca_run_resumed")):
+            return True
+        path = self.state.metadata.get("speckit_path") or {}
+        scale = str(path.get("scale") or "small").strip().lower()
+        if scale in {"medium", "large", "large_high_risk"}:
+            return True
+        steps = path.get("steps") or ()
+        return any(str(s).strip().lower() == "research" for s in steps)
+
+    def _research_cloud_handoff_signal(self) -> bool:
+        """True when local research material will cross to a cloud consumer.
+
+        Compaction targets the local→cloud boundary (FR-053), not merely the
+        presence of a cloud runtime or ``local_enabled`` capability.
+        """
+        research = self._resolved_roles.get("research")
+        if (
+            research is None
+            or research.locality != Locality.LOCAL
+            or not self._research_expected_for_task()
+        ):
+            return False
+
+        implement = self._resolved_roles.get("implement")
+        if implement is not None and implement.locality == Locality.CLOUD:
+            return True
+        return (
+            self._coordinator_target is not None
+            and self._coordinator_target.locality == Locality.CLOUD
         )
 
     def _effective_project_root(self) -> str | None:
@@ -1334,13 +1654,17 @@ class ModeCRunController:
 
         root = self._effective_project_root()
         try:
+            # The Orca adapter now owns bootstrap cleanup, including failed starts.
+            # Before this boundary run_all's finally owns any prepared resource.
+            if role == MODE_C_HANDOFF_ROLE:
+                self._prepared_bootstrap_launch = None
             result = orca.execute_task(
                 ProviderTaskRequest(
                     prompt=prompt,
                     role=role,
                     context=ctx,
                     cwd=root,
-                    timeout_seconds=600.0,
+                    timeout_seconds=3600.0,
                     read_only=read_only,
                     attachments=tuple(self.bindings.attachments or ()),
                     execution_target=self._bootstrap_target if role == MODE_C_HANDOFF_ROLE else None,
@@ -1355,7 +1679,7 @@ class ModeCRunController:
             if adopt_fail is not None:
                 return adopt_fail
         if self._is_quota_failure(result):
-            return self._quota_handoff_failure(result, role=role, source="orca")
+            return self._quota_handoff_failure(result, role=role, source="orca", prompt=prompt, context=ctx)
         return {
             "ok": result.ok,
             "detail": result.detail,
@@ -1412,7 +1736,10 @@ class ModeCRunController:
         if run_id and self.bindings.orca:
             result = self.bindings.orca.execute_task(ProviderTaskRequest(
                 prompt="Read canonical Run state", role="run_status", read_only=True,
-                context={"run_id": run_id}, cwd=self.bindings.project_root,
+                context={"run_id": run_id, "quota_mode": self.bindings.quota_policy.get("mode", "manual")},
+                cwd=self.bindings.project_root, role_targets=self._resolved_roles,
+                execution_target=self._bootstrap_target,
+                quota_target=self._quota_target,
             ))
             status["canonical_read"] = result.to_dict()
             status["canonical_state"] = result.metadata.get("receipt")
@@ -1516,10 +1843,7 @@ class ModeCRunController:
         return classify_speckit_scale(**heuristics)
 
     def _is_quota_failure(self, result: ProviderTaskResult) -> bool:
-        if result.failure is FailureClass.QUOTA:
-            return True
-        blob = f"{result.detail} {result.output}".lower()
-        return "quota" in blob
+        return result.failure is FailureClass.QUOTA
 
     def _quota_handoff_failure(
         self,
@@ -1527,7 +1851,63 @@ class ModeCRunController:
         *,
         role: str,
         source: str,
+        prompt: str = "",
+        context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        mode = self.bindings.quota_policy.get("mode", "manual")
+        fallback = (
+            (self.bindings.quota_policy.get("roles") or {}).get("implement")
+            or self.bindings.quota_policy.get("implement_fallback")
+            or {}
+        )
+        if role == MODE_C_HANDOFF_ROLE:
+            # Coordinator quota is not coding-worker quota. quota.roles.implement
+            # never replaces orchestration.coordinator.
+            packet = build_handoff_packet(
+                original_request=self.bindings.task_prompt
+                or self.state.metadata.get("task_prompt", ""),
+                accepted_decisions=[
+                    str((self.state.metadata.get("classify") or {}).get("classification", "")),
+                ],
+                repo_path=self.bindings.project_root or "",
+                worktree_path=str(self.state.metadata.get("orca_worktree_path") or ""),
+                workflow_phase=role,
+                completed_work=list(self.state.completed),
+                remaining_work=[],
+                known_failures=[result.detail],
+                next_action=(
+                    "Change orchestration.coordinator via `aichestra settings`; "
+                    "quota.roles.implement is the coding-worker fallback and does "
+                    "not replace the coordinator"
+                ),
+                compacted_research={},
+                source_lead=source if source != "orca" else self.bindings.preferred_lead,
+                target_lead="operator",
+                orca_run_id=str(self.state.metadata.get("orca_run_id") or ""),
+            )
+            handoff = prepare_manual_handoff(
+                packet,
+                run_id=str(self.state.metadata.get("orca_run_id") or "") or None,
+            )
+            self.state.metadata["manual_handoff"] = handoff
+            return {
+                "ok": False,
+                "detail": (
+                    "quota failure during coordinator; quota.roles.implement does "
+                    "not replace orchestration.coordinator — change "
+                    "orchestration.coordinator via aichestra settings"
+                ),
+                "provider": result.to_dict(),
+                "failure": FailureClass.QUOTA.value,
+                "manual_handoff": True,
+            }
+        if mode == "auto":
+            return {"ok": False, "failure": FailureClass.QUOTA.value,
+                    "detail": "Implement quota auto-fallback is a typed Orca Dispatch "
+                    "contract (quota.roles.implement); Aichestra does not replace "
+                    "the coordinator. Remaining implement work must Dispatch the "
+                    "exact fallback execution_target_id. Live inner Dispatch pinning "
+                    "is blocked on current Orca."}
         packet = build_handoff_packet(
             original_request=self.bindings.task_prompt
             or self.state.metadata.get("task_prompt", ""),
@@ -1540,10 +1920,10 @@ class ModeCRunController:
             completed_work=list(self.state.completed),
             remaining_work=[],
             known_failures=[result.detail],
-            next_action="Continue inside the same Orca Run",
+            next_action="Change roles.implement or quota.roles.implement via aichestra settings",
             compacted_research={},
             source_lead=source if source != "orca" else self.bindings.preferred_lead,
-            target_lead="cursor",
+            target_lead=str(fallback.get("runtime") or self.bindings.fallback_lead or "operator"),
             orca_run_id=str(self.state.metadata.get("orca_run_id") or ""),
         )
         handoff = prepare_manual_handoff(

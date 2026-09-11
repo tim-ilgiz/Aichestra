@@ -182,7 +182,8 @@ def test_local_worker_send_sets_config_env(monkeypatch: pytest.MonkeyPatch) -> N
     assert cfg["model"] == "ollama/tinyllama"
 
 
-def test_missing_verification_commands_fail_workflow(tmp_path: Path) -> None:
+def test_verification_disabled_fails_closed(tmp_path: Path) -> None:
+    """verification.enabled=false → non-zero gate reply; no soft-pass."""
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
         research_useful=False,
@@ -193,14 +194,20 @@ def test_missing_verification_commands_fail_workflow(tmp_path: Path) -> None:
             project_root=str(tmp_path),
             task_prompt="noop typo",
             maintenance_kwargs={"change_summary": "noop", "touches_behavior": False},
+            verification_enabled=False,
             verification_commands=[],
         ),
     )
     state = wf.run_all()
     assert GateKind.VERIFICATION.value in state.failed
-    assert state.phase_outcomes[GateKind.VERIFICATION.value].status is GateStatus.FAILED
-    assert state.metadata["verification"]["ok"] is False
-    assert "not configured" in state.phase_outcomes[GateKind.VERIFICATION.value].detail
+    assert GateKind.VERIFICATION.value not in state.completed
+    assert state.metadata.get("verification_disabled") is True
+    report = state.metadata.get("verification") or {}
+    assert report.get("ok") is False
+    assert int(report.get("exit_code") or 0) != 0
+    assert "verification.enabled=false" in state.phase_outcomes[
+        GateKind.VERIFICATION.value
+    ].detail
 
 
 def test_mode_c_does_not_use_edit_lock(tmp_path: Path) -> None:
@@ -220,6 +227,7 @@ def test_mode_c_does_not_use_edit_lock(tmp_path: Path) -> None:
             project_root=str(root),
             task_prompt="implement",
             maintenance_kwargs={"change_summary": "noop", "touches_behavior": False},
+            verification_enabled=True,
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
@@ -258,6 +266,7 @@ def test_cli_binds_writer_for_login_feature(
             {
                 "project_id": "target",
                 "local": {"enabled": False},
+                "verification": {"enabled": True},
                 "verify": [sys.executable, "-c", "import sys; sys.exit(0)"],
             }
         )
@@ -295,6 +304,10 @@ def test_real_adapter_coordinator_contract(monkeypatch, tmp_path, provider, loca
     adapter = OrcaProvider()
     monkeypatch.setattr(adapter, "probe", lambda: ProviderStatus(
         kind=ProviderKind.ORCA, available=True, binary_path="orca"))
+    monkeypatch.setattr(
+        "aichestra.providers.orca.orca_worker_start_supports_attach",
+        lambda _binary: True,
+    )
     calls = []
     def run(**kwargs):
         argv = kwargs["argv"]
@@ -435,8 +448,10 @@ def coordinator_rpc(monkeypatch, tmp_path):
 
 def _coordinator_controller(adapter, tmp_path):
     return ModeCRunController(bindings=WorkflowBindings(
+        aichestra_repo_root=str(tmp_path),
         execution_targets=fake_execution_targets(),
         orca=adapter, providers=[fake_codex().probe()], project_root=str(tmp_path),
+        verification_enabled=True,
         task_prompt="fix typo", verification_commands=[[sys.executable, "-c", "pass"]]))
 
 

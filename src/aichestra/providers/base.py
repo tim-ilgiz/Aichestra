@@ -99,6 +99,8 @@ class ProviderTaskRequest:
     attachments: tuple[str, ...] = ()
 
     execution_target: "ExecutionTarget | None" = field(default=None, repr=False, compare=False)
+    role_targets: dict[str, "ExecutionTarget"] = field(default_factory=dict, repr=False, compare=False)
+    quota_target: "ExecutionTarget | None" = field(default=None, repr=False, compare=False)
     gate_handler: Callable[[str], dict[str, Any]] | None = field(default=None, repr=False, compare=False)
 
     def bounded_prompt(self) -> str:

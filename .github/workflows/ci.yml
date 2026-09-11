@@ -38,6 +38,14 @@ jobs:
       - name: Run pytest
         run: pytest
 
+      - name: Build wheel
+        run: |
+          python -m pip install build
+          python -m build --wheel
+
+      - name: Smoke installed wheel outside checkout
+        run: python -c "import pathlib, subprocess, sys; wheel = next(pathlib.Path('dist').glob('*.whl')); subprocess.run([sys.executable, 'scripts/smoke_wheel.py', str(wheel)], check=True)"
+
       - name: Note live validation status
         if: always()
         shell: bash

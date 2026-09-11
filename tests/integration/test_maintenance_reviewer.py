@@ -95,6 +95,7 @@ def test_workflow_skips_writers_when_none(tmp_path) -> None:
             project_root=str(tmp_path),
             task_prompt="noop typo",
             maintenance_kwargs={"change_summary": "noop"},
+            verification_enabled=True,
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )

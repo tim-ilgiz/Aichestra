@@ -5,13 +5,22 @@ from __future__ import annotations
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Literal, Mapping
 
 from aichestra.providers.base import (
     ProviderAdapter,
     ProviderTaskRequest,
     ProviderTaskResult,
 )
+
+ResearchArtifact = Literal["none", "file", "compacted"]
+
+# Durable notes path for research_artifact=file (project-relative).
+RESEARCH_NOTES_PATH = ".aichestra/research_notes.md"
+# Escalate none→file when live research body exceeds this (coordinator MUST).
+RESEARCH_ARTIFACT_FILE_CHARS = 2_000
+# Escalate to compacted for cloud handoff or bodies at/above this size.
+RESEARCH_ARTIFACT_COMPACT_CHARS = 4_000
 
 
 @dataclass
@@ -33,6 +42,54 @@ class ResearchSummary:
 
 
 LocalResearchRunner = Callable[[Path, str], ProviderTaskResult]
+
+
+def resolve_research_artifact(
+    *,
+    speckit_scale: str = "small",
+    speckit_steps: Iterable[str] | None = None,
+    explicit_research_query: bool = False,
+    multi_worker_roles: bool = False,
+    resume_or_audit: bool = False,
+    expected_summary_chars: int = 0,
+    cloud_handoff: bool = False,
+    research_useful: bool = True,
+    file_threshold_chars: int = RESEARCH_ARTIFACT_FILE_CHARS,
+    compact_threshold_chars: int = RESEARCH_ARTIFACT_COMPACT_CHARS,
+) -> ResearchArtifact:
+    """Deterministic Mode C research_artifact policy (not LLM discretion).
+
+    Returns ``none`` | ``file`` | ``compacted`` for POLICY_PACKAGE. Coordinator
+    MUST follow; Cursor/Codex MUST NOT invent whether to write an MD file.
+
+    Priority (stronger artifact wins when signals conflict):
+    1. ``compacted`` — cloud handoff boundary or large volume
+    2. ``file`` — explicit ``--query``, MEDIUM/LARGE Spec Kit, multi-role
+       research path, resume/audit, or summary above file threshold
+    3. ``none`` — SMALL single-step continue-in-Run (worker_done body only)
+    """
+    if not research_useful:
+        return "none"
+
+    scale = (speckit_scale or "small").strip().lower()
+    steps = {str(s).strip().lower() for s in (speckit_steps or ()) if str(s).strip()}
+    summary_chars = max(0, int(expected_summary_chars))
+
+    if cloud_handoff or summary_chars >= compact_threshold_chars:
+        return "compacted"
+
+    multi_role = multi_worker_roles or ("research" in steps)
+    medium_or_large = scale in {"medium", "large", "large_high_risk"}
+    if (
+        explicit_research_query
+        or medium_or_large
+        or multi_role
+        or resume_or_audit
+        or summary_chars >= file_threshold_chars
+    ):
+        return "file"
+
+    return "none"
 
 
 def compact_research(

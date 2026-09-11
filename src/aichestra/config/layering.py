@@ -1,14 +1,16 @@
-"""Configuration layering: tracked → OS → machine-local → project → runtime."""
+"""Configuration layering: package defaults → OS → machine-local → project → runtime."""
 
 from __future__ import annotations
 
 import copy
 import json
+from importlib import resources
 from pathlib import Path
 from typing import Any, Mapping
 
+from aichestra.config.paths import user_config_home
 from aichestra.platform_detect import detect_os
-from aichestra.repo import find_repo_root
+from aichestra.repo import looks_like_aichestra_root, resolve_aichestra_config_root
 
 MACHINE_LOCAL_FILENAME = "machine.local.json"
 
@@ -18,7 +20,7 @@ def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
     for key, value in override.items():
         if (
             key in result
-            and isinstance(result[key], dict)
+            and isinstance(result.get(key), dict)
             and isinstance(value, dict)
         ):
             result[key] = deep_merge(result[key], value)
@@ -37,8 +39,63 @@ def load_json(path: Path) -> dict[str, Any]:
 
 
 def machine_local_path(repo_root: Path | None = None) -> Path:
-    root = repo_root or find_repo_root()
-    return root / ".local" / MACHINE_LOCAL_FILENAME
+    """Machine-local file: clone/fake `.local/`, else user config home top-level."""
+    if repo_root is not None:
+        root = Path(repo_root).resolve()
+        if _uses_dot_local_machine_config(root):
+            return root / ".local" / MACHINE_LOCAL_FILENAME
+        return root / MACHINE_LOCAL_FILENAME
+    try:
+        root = resolve_aichestra_config_root()
+    except ValueError:
+        return user_config_home() / MACHINE_LOCAL_FILENAME
+    if _uses_dot_local_machine_config(root):
+        return Path(root) / ".local" / MACHINE_LOCAL_FILENAME
+    return Path(root) / MACHINE_LOCAL_FILENAME
+
+
+def uses_dot_local_machine_config(root: Path) -> bool:
+    """True for Aichestra clone (or test fake with policies/) layout."""
+    return looks_like_aichestra_root(root) or (
+        root / "policies" / "defaults.json"
+    ).is_file()
+
+
+# Backward-compatible private alias.
+_uses_dot_local_machine_config = uses_dot_local_machine_config
+
+
+def package_defaults() -> dict[str, Any]:
+    """Load defaults shipped inside the installed package."""
+    try:
+        base = resources.files("aichestra.policies")
+        text = (base / "defaults.json").read_text(encoding="utf-8")
+        data = json.loads(text)
+        if isinstance(data, dict):
+            return data
+    except (FileNotFoundError, ModuleNotFoundError, OSError, json.JSONDecodeError, TypeError):
+        pass
+    return {
+        "local": {"enabled": False},
+        "providers": {
+            "preferred_lead": "codex",
+            "fallback_lead": "cursor",
+        },
+        "orchestration": {
+            "mode_default": "native",
+            "coordinator": {"runtime": "codex"},
+        },
+        "roles": {
+            "implement": {"runtime": "codex"},
+            "research": {"runtime": "cursor"},
+            "tests": {"runtime": "cursor"},
+            "docs": {"runtime": "cursor"},
+        },
+        "quota": {
+            "mode": "manual",
+            "roles": {"implement": {"runtime": "cursor"}},
+        },
+    }
 
 
 def resolve_config(
@@ -49,14 +106,22 @@ def resolve_config(
     machine_local: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Resolve layered configuration without requiring fixed home paths."""
-    root = repo_root or find_repo_root()
+    try:
+        root = (
+            Path(repo_root).resolve()
+            if repo_root is not None
+            else resolve_aichestra_config_root(project_root=project_root)
+        )
+    except ValueError:
+        root = user_config_home()
+
     tracked = _load_tracked_defaults(root)
     os_layer = _load_os_defaults(root)
-    local = (
-        machine_local
-        if machine_local is not None
-        else load_json(machine_local_path(root))
-    )
+    if machine_local is not None:
+        local = machine_local
+    else:
+        local = load_json(machine_local_path(root))
+
     project: dict[str, Any] = {}
     if project_root is not None:
         project = load_json(Path(project_root) / ".aichestra" / "project.json")
@@ -70,17 +135,11 @@ def resolve_config(
 
 
 def _load_tracked_defaults(root: Path) -> dict[str, Any]:
+    # Contributor clone: prefer repo policies/; always fall back to package.
     json_path = root / "policies" / "defaults.json"
     if json_path.is_file():
         return load_json(json_path)
-    return {
-        "local": {"enabled": False},
-        "providers": {
-            "preferred_lead": "codex",
-            "fallback_lead": "cursor",
-        },
-        "orchestration": {"mode_default": "native"},
-    }
+    return package_defaults()
 
 
 def _load_os_defaults(root: Path) -> dict[str, Any]:
@@ -99,7 +158,22 @@ def save_machine_local(data: dict[str, Any], repo_root: Path | None = None) -> P
 
 def local_enabled(config: dict[str, Any] | None = None) -> bool:
     cfg = config if config is not None else resolve_config()
-    return bool(cfg.get("local", {}).get("enabled", False))
+    local = cfg.get("local") if isinstance(cfg.get("local"), dict) else {}
+    return bool(local.get("enabled", False))
+
+
+def preferred_lead_name(config: dict[str, Any] | None = None) -> str:
+    cfg = config if config is not None else resolve_config()
+    providers = cfg.get("providers") if isinstance(cfg.get("providers"), dict) else {}
+    raw = providers.get("preferred_lead") or "codex"
+    return str(raw).strip().lower() or "codex"
+
+
+def fallback_lead_name(config: dict[str, Any] | None = None) -> str:
+    cfg = config if config is not None else resolve_config()
+    providers = cfg.get("providers") if isinstance(cfg.get("providers"), dict) else {}
+    raw = providers.get("fallback_lead") or "cursor"
+    return str(raw).strip().lower() or "cursor"
 
 
 def provider_enabled(config: dict[str, Any] | None, kind: str) -> bool:
@@ -118,20 +192,6 @@ def provider_enabled(config: dict[str, Any] | None, kind: str) -> bool:
     if isinstance(entry, bool):
         return entry
     return True
-
-
-def preferred_lead_name(config: dict[str, Any] | None = None) -> str:
-    cfg = config if config is not None else resolve_config()
-    providers = cfg.get("providers") if isinstance(cfg.get("providers"), dict) else {}
-    raw = providers.get("preferred_lead") or "codex"
-    return str(raw).strip().lower() or "codex"
-
-
-def fallback_lead_name(config: dict[str, Any] | None = None) -> str:
-    cfg = config if config is not None else resolve_config()
-    providers = cfg.get("providers") if isinstance(cfg.get("providers"), dict) else {}
-    raw = providers.get("fallback_lead") or "cursor"
-    return str(raw).strip().lower() or "cursor"
 
 
 def apply_provider_enable_overrides(
@@ -172,8 +232,6 @@ def apply_provider_enable_overrides(
         )
     if no_local:
         override["local"]["enabled"] = False
-        # Highest invocation override: strip LOCAL even if config explicitly
-        # listed it under execution.policy.allowed_localities.
         policy_override["allowed_localities"] = _allowed_localities_without_local(
             config
         )
@@ -216,9 +274,10 @@ def _union_disabled_runtimes(
     return merged
 
 
-def _allowed_localities_without_local(config: Mapping[str, Any] | dict[str, Any]) -> list[str]:
+def _allowed_localities_without_local(
+    config: Mapping[str, Any] | dict[str, Any],
+) -> list[str]:
     """Compute allowed_localities for a ``--no-local`` invocation override."""
-    # Stable non-local localities; keep config order when localities are explicit.
     default_non_local = ("remote", "cloud")
     execution = config.get("execution") if isinstance(config.get("execution"), dict) else {}
     policy = (

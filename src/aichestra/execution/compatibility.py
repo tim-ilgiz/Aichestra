@@ -13,6 +13,8 @@ from .domain import Compatibility, ExecutionCapabilities
 
 def load_compatibility_bindings(
     config: Mapping[str, Any],
+    *,
+    required_bindings=(),
 ) -> tuple[Compatibility, ...]:
     """Load explicit bindings; invalid/incomplete rows are skipped fail-closed.
 
@@ -55,6 +57,31 @@ def load_compatibility_bindings(
     for runtime in (() if "bindings" in execution else DEFAULT_RUNTIME_BINARIES):
         if not any(b.runtime == runtime for b in bindings):
             bindings.append(Compatibility(runtime))
+    # Role declarations are exact compatibility requests. Existing restrictions
+    # on the same pair remain authoritative; never overwrite disabled bindings.
+    from aichestra.config.roles import (
+        load_coordinator_binding,
+        load_quota_policy,
+        load_role_bindings,
+    )
+    roles = list(load_role_bindings(config).values()) if "roles" in config else []
+    orch = config.get("orchestration")
+    if isinstance(orch, Mapping) and "coordinator" in orch:
+        roles.append(load_coordinator_binding(config))
+    if "quota" in config and load_quota_policy(config).mode == "auto":
+        roles.append(load_quota_policy(config).implement_fallback)
+    from dataclasses import replace
+    # Saved Run requirements precede mutable role declarations. Explicit and
+    # legacy compatibility restrictions above still remain authoritative.
+    for role in [*required_bindings, *roles]:
+        if any((b.runtime, b.provider, b.model) == (role.runtime, role.provider, role.model) for b in bindings):
+            continue
+        pair = [b for b in bindings if (b.runtime, b.provider) == (role.runtime, role.provider)]
+        wildcard = next((b for b in pair if b.model is None), None)
+        if wildcard is not None:
+            bindings.append(replace(wildcard, model=role.model))
+        elif not pair:
+            bindings.append(Compatibility(role.runtime, role.provider, role.model))
     return tuple(bindings)
 
 

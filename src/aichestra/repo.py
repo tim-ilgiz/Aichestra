@@ -1,4 +1,4 @@
-"""Locate the Aichestra repository root from an arbitrary clone path."""
+"""Locate the Aichestra config root (clone or portable user home)."""
 
 from __future__ import annotations
 
@@ -39,11 +39,15 @@ def resolve_aichestra_config_root(
     project_root: Path | str | None = None,
     start: Path | str | None = None,
 ) -> Path:
-    """Resolve the Aichestra config/home root without using a foreign cwd.
+    """Resolve Aichestra config home for layered defaults / machine-local.
 
-    Order: explicit ``repo_root`` → ``AICHESTRA_REPO_ROOT`` → cwd only when
-    that tree is actually the Aichestra clone. Never silently adopt
-    ``project_root`` or another repo that merely has AGENTS.md.
+    Order:
+    1. explicit ``repo_root``
+    2. ``AICHESTRA_REPO_ROOT``
+    3. cwd when it is the Aichestra clone
+    4. portable user config home (global pip install — no clone required)
+
+    Never silently adopt ``project_root`` (foreign target project).
     """
     if repo_root is not None:
         return Path(repo_root).resolve()
@@ -52,24 +56,29 @@ def resolve_aichestra_config_root(
         return Path(env).expanduser().resolve()
     try:
         discovered = find_repo_root(start)
-    except FileNotFoundError as exc:
-        raise ValueError(
-            "Aichestra config root required: pass --repo-root or set "
-            f"{AICHESTRA_REPO_ROOT_ENV}; refusing cwd-based discovery that "
-            "can pick a foreign target project"
-        ) from exc
+    except FileNotFoundError:
+        from aichestra.config.paths import user_config_home
+
+        return user_config_home()
     if looks_like_aichestra_root(discovered):
         return discovered
-    project_hint = ""
-    if project_root is not None:
-        project_hint = f" Target project is {Path(project_root).resolve()}."
-    raise ValueError(
-        "Aichestra config root required: cwd is not the Aichestra clone "
-        f"(found {discovered}). Pass --repo-root or set {AICHESTRA_REPO_ROOT_ENV}."
-        f"{project_hint}"
-    )
+    # Foreign target project — use user config home, not project root.
+    from aichestra.config.paths import user_config_home
+
+    _ = project_root  # documented: intentionally unused for config home
+    return user_config_home()
 
 
 def _looks_like_root(path: Path) -> bool:
     hits = sum(1 for marker in _MARKERS if (path / marker).exists())
     return hits >= 2
+
+
+def trusted_config_root(path: Path | str) -> bool:
+    """Accept contributor config trees and the installed-package user home."""
+    from aichestra.config.paths import user_config_home
+
+    root = Path(path).resolve()
+    return (looks_like_aichestra_root(root)
+            or (root / "policies" / "defaults.json").is_file()
+            or root == user_config_home())

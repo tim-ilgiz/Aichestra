@@ -1,4 +1,4 @@
-"""Aichestra CLI — doctor / profile / bootstrap / update / handoff / prove-launch / abort-launch / orchestrate."""
+"""Aichestra CLI — doctor / profile / bootstrap / update / init / settings / handoff / orchestrate."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from aichestra import __version__
 from aichestra.bootstrap.core import bootstrap, update
 from aichestra.doctor import doctor_json, format_doctor_report, run_doctor
 from aichestra.machine_profiler import profile_machine
-from aichestra.repo import find_repo_root, resolve_aichestra_config_root
+from aichestra.repo import resolve_aichestra_config_root
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -61,6 +61,55 @@ def build_parser() -> argparse.ArgumentParser:
     staging_p.add_argument("--dry-run", action="store_true")
     staging_p.add_argument("--repo-root", type=Path, default=None)
     staging_p.add_argument("--json", action="store_true")
+
+    init_p = sub.add_parser(
+        "init",
+        help="Create .aichestra/project.json in a target project",
+    )
+    init_p.add_argument(
+        "--project-root",
+        type=Path,
+        default=None,
+        help="Target project root (default: cwd)",
+    )
+    init_p.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Accept defaults without prompts",
+    )
+    init_p.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing project.json",
+    )
+    init_p.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="Set config key (repeatable), e.g. roles.research=cursor",
+    )
+    init_p.add_argument("--json", action="store_true")
+
+    settings_p = sub.add_parser(
+        "settings",
+        help="Show or set project .aichestra role/quota/verify settings",
+    )
+    settings_p.add_argument("--project-root", type=Path, default=None)
+    settings_sub = settings_p.add_subparsers(dest="settings_command")
+    settings_show = settings_sub.add_parser("show", help="Print project settings")
+    settings_show.add_argument("--project-root", type=Path, default=None)
+    settings_show.add_argument("--json", action="store_true", default=True)
+    settings_set_p = settings_sub.add_parser("set", help="Set KEY=VALUE in project.json")
+    settings_set_p.add_argument(
+        "pairs",
+        nargs="+",
+        metavar="KEY=VALUE",
+        help="e.g. orchestration.coordinator=cursor roles.implement=codex quota.mode=auto",
+    )
+    settings_set_p.add_argument("--project-root", type=Path, default=None)
+    settings_set_p.add_argument("--json", action="store_true", default=True)
 
     research_p = sub.add_parser(
         "research",
@@ -183,6 +232,51 @@ def build_parser() -> argparse.ArgumentParser:
     )
     abort_p.add_argument("--json", action="store_true", default=True)
 
+    dispatch_p = sub.add_parser(
+        "dispatch-role",
+        help=(
+            "Policy-enforced Dispatch for a configured worker role on an "
+            "existing Orca Task (resolve binding → prove if needed → "
+            "worker-start exact target; coordinator still owns the DAG)"
+        ),
+    )
+    dispatch_p.add_argument("--reason", choices=("primary", "quota-fallback"), default="primary")
+    dispatch_p.add_argument(
+        "--role",
+        required=True,
+        help="Worker role: implement, research, tests, or docs",
+    )
+    dispatch_p.add_argument(
+        "--run",
+        required=True,
+        dest="run_id",
+        help="Existing Mode C Orca run id",
+    )
+    dispatch_p.add_argument(
+        "--task",
+        required=True,
+        dest="task_id",
+        help="Existing Orca task id created by the coordinator",
+    )
+    dispatch_p.add_argument(
+        "--project-root",
+        type=Path,
+        required=True,
+        help="Target project root (layered config + role bindings)",
+    )
+    dispatch_p.add_argument(
+        "--repo-root",
+        type=Path,
+        default=None,
+        help="Aichestra repository root (machine-local + tracked policies)",
+    )
+    dispatch_p.add_argument(
+        "--worktree",
+        default="current",
+        help="Orca worktree context for worker-start (default: current)",
+    )
+    dispatch_p.add_argument("--json", action="store_true", default=True)
+
     orch_p = sub.add_parser(
         "orchestrate",
         help=(
@@ -201,8 +295,8 @@ def build_parser() -> argparse.ArgumentParser:
     orch_p.add_argument(
         "--project-root",
         type=Path,
-        required=True,
-        help="Target project root (required for Mode C; verify commands + write isolation)",
+        default=None,
+        help="Target project root (default: nearest .aichestra/project.json or cwd)",
     )
     orch_p.add_argument(
         "--attach",
@@ -253,8 +347,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0 if report.ok else 1
 
     if args.command == "profile":
-        root = args.repo_root or find_repo_root()
-        profile = profile_machine(root=Path(root))
+        root = (
+            Path(args.repo_root).resolve()
+            if args.repo_root
+            else resolve_aichestra_config_root()
+        )
+        profile = profile_machine(root=root)
         sys.stdout.write(json.dumps(profile.to_dict(), indent=2) + "\n")
         return 0
 
@@ -298,6 +396,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stdout.write(json.dumps(result.to_dict(), indent=2) + "\n")
         return 0 if result.ok or args.dry_run else 1
 
+    if args.command == "init":
+        return _cmd_init(args)
+
+    if args.command == "settings":
+        return _cmd_settings(args)
+
     if args.command == "research":
         from aichestra.config.layering import resolve_config
         from aichestra.orchestration.research_compact import research_paths
@@ -326,11 +430,56 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "abort-launch":
         return _cmd_abort_launch(args)
 
+    if args.command == "dispatch-role":
+        return _cmd_dispatch_role(args)
+
     if args.command == "orchestrate":
         return _cmd_orchestrate(args)
 
     parser.error(f"unknown command: {args.command}")
     return 2
+
+
+def _cmd_init(args: argparse.Namespace) -> int:
+    from aichestra.config.project_settings import init_project
+
+    root = Path(args.project_root or Path.cwd()).resolve()
+    try:
+        result = init_project(
+            root,
+            yes=bool(args.yes),
+            sets=list(args.set or []),
+            force=bool(args.force),
+        )
+    except (OSError, ValueError, NotADirectoryError) as exc:
+        sys.stderr.write(str(exc) + "\n")
+        return 2
+    if args.json:
+        sys.stdout.write(json.dumps(result, indent=2) + "\n")
+    else:
+        action = "created" if result.get("created") else "updated/existing"
+        sys.stdout.write(f"aichestra init ({action}): {result.get('path')}\n")
+    return 0 if result.get("ok") else 1
+
+
+def _cmd_settings(args: argparse.Namespace) -> int:
+    from aichestra.config.project_settings import settings_set, show_settings
+
+    from aichestra.config.project_settings import resolve_project_root, interactive_settings
+    root = resolve_project_root(args.project_root)
+    try:
+        if args.settings_command is None:
+            interactive_settings(root)
+            return 0
+        if args.settings_command == "show":
+            payload = show_settings(root)
+        else:
+            payload = settings_set(root, list(args.pairs or []))
+    except (OSError, ValueError, FileNotFoundError) as exc:
+        sys.stderr.write(str(exc) + "\n")
+        return 2
+    sys.stdout.write(json.dumps(payload, indent=2) + "\n")
+    return 0
 
 
 def _cmd_prove_launch(args: argparse.Namespace) -> int:
@@ -372,6 +521,23 @@ def _cmd_abort_launch(args: argparse.Namespace) -> int:
     payload = abort_launch_by_token(
         str(args.token or ""),
         repo_root=Path(args.repo_root).resolve() if args.repo_root else None,
+    )
+    sys.stdout.write(json.dumps(payload, indent=2, default=str) + "\n")
+    return 0 if payload.get("ok") else 1
+
+
+def _cmd_dispatch_role(args: argparse.Namespace) -> int:
+    """Policy-enforced role Dispatch — resolve binding → prove → worker-start."""
+    from aichestra.execution.dispatch_role import dispatch_role
+
+    payload = dispatch_role(
+        role=str(args.role),
+        reason=args.reason,
+        run_id=str(args.run_id),
+        task_id=str(args.task_id),
+        project_root=Path(args.project_root).resolve(),
+        repo_root=Path(args.repo_root).resolve() if args.repo_root else None,
+        worktree=str(getattr(args, "worktree", "current") or "current"),
     )
     sys.stdout.write(json.dumps(payload, indent=2, default=str) + "\n")
     return 0 if payload.get("ok") else 1
@@ -452,21 +618,18 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         resolve_mode_c_execution,
     )
     from aichestra.orchestration.modes import Mode
-    from aichestra.orchestration.roles import select_lead
-    from aichestra.orchestration.verification import verification_commands_from_config
+    from aichestra.orchestration.verification import (
+        verification_commands_from_config,
+        verification_enabled,
+    )
     from aichestra.orchestration.workflow import ModeCRunController, WorkflowBindings
     from aichestra.providers.discovery import discover_providers, enabled_map_from_config
     from aichestra.providers.fakes import fake_orca
     from aichestra.providers.orca import OrcaProvider
     from aichestra.providers.quota_guard import real_provider_execution_blocked
 
-    # Mode C must never write into ambient cwd — project-root is mandatory.
-    if not args.project_root:
-        sys.stderr.write(
-            "Mode C requires --project-root before any provider execution\n"
-        )
-        return 2
-    project_root = Path(args.project_root).resolve()
+    from aichestra.config.project_settings import resolve_project_root
+    project_root = resolve_project_root(args.project_root)
     if not project_root.is_dir():
         sys.stderr.write(f"Mode C --project-root is not a directory: {project_root}\n")
         return 2
@@ -487,10 +650,17 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         no_cursor=bool(getattr(args, "no_cursor", False)),
         no_local=bool(getattr(args, "no_local", False)),
     )
+    if not verification_enabled(cfg) or not verification_commands_from_config(cfg):
+        sys.stderr.write("Configure verification before orchestration: aichestra settings set verification.enabled=true 'verify=[\"python\",\"-m\",\"pytest\"]' (choose commands for your project).\n")
+        return 2
     # CI/fake mode never probes or launches real runtimes.
     use_fakes = real_provider_execution_blocked()
-    execution_targets, execution_policy, _facts = resolve_mode_c_execution(
-        cfg, known_launches=() if use_fakes else None)
+    try:
+        execution_targets, execution_policy, _facts = resolve_mode_c_execution(
+            cfg, known_launches=() if use_fakes else None)
+    except ValueError as exc:
+        sys.stderr.write(f"Invalid execution/role config: {exc}\n")
+        return 2
     local_cfg = cfg.get("local") if isinstance(cfg.get("local"), dict) else {}
     ollama_host = local_cfg.get("ollama_host") or local_cfg.get("endpoint")
     preferred_ids = _local_cfg_list(local_cfg, "preferred_models", "preferred_ids")
@@ -499,6 +669,49 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
     preferred = preferred_lead_name(cfg)
     fallback = fallback_lead_name(cfg)
     enabled = enabled_map_from_config(cfg)
+
+    from aichestra.config.roles import (
+        coordinator_binding_to_dict,
+        load_coordinator_binding,
+        load_quota_policy,
+        load_role_bindings,
+        role_bindings_to_dict,
+    )
+
+    try:
+        role_bindings_map = load_role_bindings(cfg)
+        quota_policy_obj = load_quota_policy(cfg)
+        coordinator_binding = load_coordinator_binding(cfg)
+    except ValueError as exc:
+        sys.stderr.write(f"Invalid project role/quota/coordinator config: {exc}\n")
+        return 2
+
+    preferred = preferred_lead_name(cfg)
+    fallback = fallback_lead_name(cfg)
+    disabled = frozenset(execution_policy.disabled_runtimes or ())
+    disabled_hits = []
+    if coordinator_binding.runtime in disabled:
+        disabled_hits.append(
+            f"orchestration.coordinator runtime {coordinator_binding.runtime!r}"
+        )
+    implement = role_bindings_map["implement"]
+    if implement.runtime in disabled:
+        disabled_hits.append(f"roles.implement runtime {implement.runtime!r}")
+    if quota_policy_obj.mode == "auto" and quota_policy_obj.implement_fallback.runtime in disabled:
+        disabled_hits.append(
+            f"quota.roles.implement runtime {quota_policy_obj.implement_fallback.runtime!r}"
+        )
+    if disabled_hits:
+        sys.stderr.write(
+            "Mode C fail closed: "
+            + "; ".join(disabled_hits)
+            + " is disabled; change settings or remove the disable flag.\n"
+        )
+        return 2
+    preferred = coordinator_binding.runtime
+    role_bindings_dict = role_bindings_to_dict(role_bindings_map)
+    quota_policy_dict = quota_policy_obj.to_dict()
+    coordinator_dict = coordinator_binding_to_dict(coordinator_binding)
 
     providers = discover_providers(
         local_enabled=enabled_local,
@@ -510,7 +723,22 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         from aichestra.providers.fakes import fake_execution_targets
         execution_targets = fake_execution_targets(providers, execution_policy)
     # Policy resolution for observability / config_roots — not adapter construction.
-    selection = select_lead(providers, preferred=preferred, fallback=fallback)
+    from aichestra.execution.roles import RoleBindingResolver
+    try:
+        resolver = RoleBindingResolver(execution_targets)
+        resolver.resolve_all(role_bindings_map)
+        coordinator_target = resolver.resolve(
+            "orchestration.coordinator", coordinator_binding
+        )
+        if quota_policy_obj.mode == "auto":
+            resolver.resolve("quota.roles.implement", quota_policy_obj.implement_fallback)
+    except ValueError as exc:
+        sys.stderr.write(str(exc) + "\n")
+        return 2
+    from dataclasses import replace
+    execution_targets = tuple(
+        replace(t, preferred=t.id == coordinator_target.id) for t in execution_targets
+    )
     attachments = tuple(str(Path(p).expanduser().resolve()) for p in (args.attach or []))
 
     orca = (fake_orca() if use_fakes else OrcaProvider()) if enabled.get("orca", True) else None
@@ -583,6 +811,7 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         attachments=attachments,
         resume_run_id=getattr(args, "resume_run_id", None),
         verification_commands=verification_commands_from_config(cfg),
+        verification_enabled=verification_enabled(cfg),
         preferred_lead=preferred,
         fallback_lead=fallback,
         local_enabled=enabled_local,
@@ -594,6 +823,9 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         execution_targets=execution_targets,
         execution_policy=execution_policy,
         aichestra_repo_root=str(repo_root),
+        role_bindings=role_bindings_dict,
+        quota_policy=quota_policy_dict,
+        coordinator_binding=coordinator_dict,
     )
     wf = ModeCRunController(
         mode=Mode.ORCHESTRATED,
@@ -609,15 +841,19 @@ def _cmd_orchestrate(args: argparse.Namespace) -> int:
         "local_enabled": enabled_local,
         "preferred_lead": preferred,
         "fallback_lead": fallback,
-        "lead_policy": selection.lead.value if selection.lead else None,
+        "lead_policy": preferred,
         "providers_enabled": enabled,
         "fake_providers": use_fakes,
         "verification_commands": bindings.verification_commands,
+        "verification_enabled": bindings.verification_enabled,
         "attachments": list(attachments),
         "orca_run_id": state.metadata.get("orca_run_id"),
         "resume_run_id": bindings.resume_run_id,
         "execution_target_count": len(execution_targets),
         "execution_target_contract_version": EXECUTION_TARGET_CONTRACT_VERSION,
+        "role_bindings": role_bindings_dict,
+        "quota_policy": quota_policy_dict,
+        "coordinator_binding": coordinator_dict,
     }
     sys.stdout.write(json.dumps(payload, indent=2, default=str) + "\n")
     return 0 if not state.failed and not state.stopped else 1

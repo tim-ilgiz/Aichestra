@@ -192,6 +192,45 @@ def test_bridge_command_embeds_binding_in_orca_process_argv():
         assert bridge.command.startswith("env OPENCODE_CONFIG_CONTENT=")
 
 
+@pytest.mark.parametrize("path", ["/api", "/api/v1", "/api/v1/"])
+@pytest.mark.parametrize("suffix", ["?tenant=A", "?tenant=A#fragment"])
+def test_endpoint_v1_normalization_preserves_query_and_fragment(path, suffix):
+    from aichestra.execution.launch_strategies import _endpoints_equal, _with_v1_path
+
+    endpoint = f"https://models.example{path}{suffix}"
+    canonical = f"https://models.example/api/v1{suffix}"
+    assert _with_v1_path(endpoint) == canonical
+    assert _endpoints_equal(endpoint, canonical)
+    assert _endpoints_equal(canonical, endpoint)
+    assert not _endpoints_equal(endpoint, canonical.replace("tenant=A", "tenant=B"))
+
+
+@pytest.mark.parametrize("os_name", ["macos", "linux", "windows"])
+def test_query_endpoint_bridge_attests_v1_path(os_name):
+    import shlex
+
+    from aichestra.execution.launch_strategies import (
+        _opencode_bridge_command,
+        extract_attested_binding,
+    )
+
+    target = _opencode_target(endpoint="https://models.example/api?tenant=A")
+    bridge = _opencode_bridge_command(target, os_name=os_name)
+    assert bridge is not None
+    argv = (
+        _windows_process_argv_from_bridge(bridge.command)
+        if os_name == "windows" else shlex.split(bridge.command)
+    )
+    evidence = {"process": {"pid": 4242, "argv": argv}}
+    attested = extract_attested_binding(evidence)
+    assert attested is not None
+    assert attested["endpoint"] == "https://models.example/api/v1?tenant=A"
+    assert structured_binding_matches(target, evidence)
+    assert not structured_binding_matches(
+        _opencode_target(endpoint="https://models.example/api?tenant=B"), evidence
+    )
+
+
 def test_terminal_bridge_prepare_and_confirm_require_structured_process_evidence():
     target = _opencode_target()
     adapter = TerminalBridgeLaunch()
@@ -618,6 +657,7 @@ def _controller_bindings(tmp_path, *, orca, targets):
         project_root=str(tmp_path),
         task_prompt="bridge bootstrap",
         maintenance_kwargs={"change_summary": "x", "touches_behavior": False},
+        verification_enabled=True,
         verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         execution_targets=tuple(targets),
     )
@@ -1173,6 +1213,7 @@ def test_prove_launch_refuses_foreign_project_as_config_root(tmp_path, monkeypat
     payload = prove_launch_by_candidate_id(
         "any",
         project_root=foreign,
+        repo_root=foreign,
     )
     assert payload["ok"] is False
     assert "config root" in payload["error"].lower() or "repo-root" in payload["error"].lower()

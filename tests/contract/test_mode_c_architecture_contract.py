@@ -69,6 +69,7 @@ def _small_bindings(
         research_query=research_query,
         attachments=attachments,
         maintenance_kwargs={"change_summary": "typo", "touches_behavior": False},
+        verification_enabled=True,
         verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
     )
 
@@ -89,6 +90,14 @@ def test_mode_c_requires_orca(tmp_path: Path) -> None:
     assert outcome.status is PhaseStatus.FAILED
     assert "Orca" in outcome.detail
     assert outcome.result.get("failure") == FailureClass.UNAVAILABLE.value
+    assert lead.sent == []
+    # CLI uses run_all(); must fail closed without AssertionError.
+    state = ModeCRunController(
+        mode=Mode.ORCHESTRATED,
+        bindings=_small_bindings(tmp_path, orca=None, lead=lead),
+    ).run_all()
+    assert state.stopped
+    assert GateKind.ORCA_HANDOFF.value in state.failed
     assert lead.sent == []
 
 
@@ -371,6 +380,7 @@ def test_disabled_lead_never_dispatched(tmp_path: Path) -> None:
             preferred_lead="codex",
             fallback_lead="cursor",
             maintenance_kwargs={"touches_behavior": False},
+            verification_enabled=True,
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
@@ -436,6 +446,62 @@ def test_local_capabilities_reach_orca_policy(tmp_path: Path) -> None:
     assert "vision" in (caps.get("local_capabilities") or [])
     package = state.metadata["mode_c_policy_package"]
     assert package["local_model_ref"] == "llava:7b"
+
+
+def test_research_artifact_policy_in_package(tmp_path: Path) -> None:
+    """Deterministic research_artifact hint — not LLM MD invention."""
+    from aichestra.orchestration.research_compact import RESEARCH_NOTES_PATH
+
+    orca = fake_orca("success")
+    # SMALL typo fix → none (live-test shape).
+    small = ModeCRunController(
+        mode=Mode.ORCHESTRATED,
+        bindings=_small_bindings(tmp_path, orca=orca, task_prompt="fix one-line typo"),
+    ).run_all()
+    assert not small.failed, small.failed
+    pkg = small.metadata["mode_c_policy_package"]
+    assert pkg["research_artifact"] == "none"
+    assert pkg["research_artifact_notes_path"] == RESEARCH_NOTES_PATH
+    assert pkg["speckit_scale"] == "small"
+
+    # local_enabled is capability, not a local→cloud research handoff.
+    orca_local = fake_orca("success")
+    local_cap = _small_bindings(
+        tmp_path, orca=orca_local, task_prompt="fix one-line typo"
+    )
+    local_cap.local_enabled = True
+    local_state = ModeCRunController(
+        mode=Mode.ORCHESTRATED, bindings=local_cap
+    ).run_all()
+    assert not local_state.failed, local_state.failed
+    assert local_state.metadata["mode_c_policy_package"]["research_artifact"] == "none"
+
+    orca2 = fake_orca("success")
+    with_query = ModeCRunController(
+        mode=Mode.ORCHESTRATED,
+        bindings=_small_bindings(
+            tmp_path,
+            orca=orca2,
+            task_prompt="fix one-line typo",
+            research_query="auth module",
+        ),
+    ).run_all()
+    assert not with_query.failed, with_query.failed
+    assert with_query.metadata["mode_c_policy_package"]["research_artifact"] == "file"
+
+    orca3 = fake_orca("success")
+    medium = ModeCRunController(
+        mode=Mode.ORCHESTRATED,
+        bindings=_small_bindings(
+            tmp_path,
+            orca=orca3,
+            task_prompt="refactor across 12 files in multi-package monorepo",
+        ),
+    ).run_all()
+    assert not medium.failed, medium.failed
+    med_pkg = medium.metadata["mode_c_policy_package"]
+    assert med_pkg["speckit_scale"] == "medium"
+    assert med_pkg["research_artifact"] == "file"
 
 
 def test_verify_auto_detect_python(tmp_path: Path) -> None:
@@ -672,6 +738,7 @@ def test_disabled_codex_is_never_dispatched(tmp_path: Path) -> None:
             preferred_lead="codex",
             fallback_lead="cursor",
             maintenance_kwargs={"touches_behavior": False},
+            verification_enabled=True,
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
@@ -698,6 +765,7 @@ def test_disabled_cursor_is_never_dispatched(tmp_path: Path) -> None:
             preferred_lead="codex",
             fallback_lead="cursor",
             maintenance_kwargs={"touches_behavior": False},
+            verification_enabled=True,
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
@@ -724,6 +792,7 @@ def test_no_available_lead_does_not_default_to_codex(tmp_path: Path) -> None:
             preferred_lead="codex",
             fallback_lead="cursor",
             maintenance_kwargs={"touches_behavior": False},
+            verification_enabled=True,
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )

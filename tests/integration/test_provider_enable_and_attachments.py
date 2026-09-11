@@ -129,6 +129,7 @@ def test_vision_attachment_delivered_and_wired(tmp_path: Path) -> None:
             task_prompt="fix UI from screenshot",
             attachments=(str(img),),
             maintenance_kwargs={"touches_behavior": False},
+            verification_enabled=True,
             verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
         ),
     )
@@ -170,6 +171,7 @@ def test_orchestrate_honors_preferred_lead_and_no_codex(
         json.dumps(
             {
                 "project_id": "app",
+                "verification": {"enabled": True},
                 "verify": [sys.executable, "-c", "import sys; sys.exit(0)"],
             }
         )
@@ -189,26 +191,71 @@ def test_orchestrate_honors_preferred_lead_and_no_codex(
             "--no-codex",
         ]
     )
-    payload = json.loads(capsys.readouterr().out)
-    assert code == 0, payload
-    assert payload["config_roots"]["preferred_lead"] == "cursor"
-    assert payload["config_roots"]["providers_enabled"]["codex"] is False
+    output = capsys.readouterr()
+    assert code == 2
+    assert "roles.implement" in output.err and "disabled" in output.err
+    assert not output.out
 
 
-def test_orchestrate_requires_project_root(
+def test_orchestrate_no_codex_fails_coordinator_independently_of_implement(
     fake_aichestra_root: Path,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setenv("AICHESTRA_FAKE_PROVIDERS", "1")
-    with pytest.raises(SystemExit) as exc:
-        main(
-            [
-                "orchestrate",
-                "--repo-root",
-                str(fake_aichestra_root),
-                "--prompt",
-                "no root",
-            ]
+    project = tmp_path / "app"
+    project.mkdir()
+    (project / ".aichestra").mkdir()
+    (project / ".aichestra" / "project.json").write_text(
+        json.dumps(
+            {
+                "orchestration": {"coordinator": {"runtime": "codex"}},
+                "roles": {
+                    "implement": {"runtime": "cursor"},
+                    "research": {"runtime": "cursor"},
+                    "tests": {"runtime": "cursor"},
+                    "docs": {"runtime": "cursor"},
+                },
+                "verification": {"enabled": True},
+                "verify": [sys.executable, "-c", "import sys; sys.exit(0)"],
+            }
         )
-    assert exc.value.code == 2
+        + "\n",
+        encoding="utf-8",
+    )
+    code = main(
+        [
+            "orchestrate",
+            "--repo-root",
+            str(fake_aichestra_root),
+            "--project-root",
+            str(project),
+            "--prompt",
+            "noop typo",
+            "--no-research",
+            "--no-codex",
+        ]
+    )
+    output = capsys.readouterr()
+    assert code == 2
+    assert "orchestration.coordinator" in output.err and "disabled" in output.err
+    assert "roles.implement" not in output.err
+    assert not output.out
+
+
+def test_orchestrate_infers_project_root_and_preflights_verification(
+    fake_aichestra_root, tmp_path, monkeypatch, capsys,
+):
+    from aichestra.config.project_settings import init_project
+    project = tmp_path / "project"
+    project.mkdir()
+    init_project(project, yes=True)
+    nested = project / "nested"
+    nested.mkdir()
+    monkeypatch.chdir(nested)
+    monkeypatch.setenv("AICHESTRA_FAKE_PROVIDERS", "1")
+    code = main(["orchestrate", "--repo-root", str(fake_aichestra_root), "--prompt", "noop"])
+    assert code == 2
+    assert "Configure verification before orchestration" in capsys.readouterr().err
+    assert not (project / ".aichestra" / "last_mode_c_run.json").exists()

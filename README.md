@@ -6,11 +6,41 @@ OpenCode + Ollama local worker.
 
 ## Install
 
+From this repository (runtime only):
+
+```bash
+python3 -m pip install -e .
+```
+
+For contributors who also run tests:
+
 ```bash
 python3 -m pip install -e ".[dev]"
+pytest
 ```
 
 Or run without install by setting `PYTHONPATH=src`.
+
+After install, `aichestra …` and `python -m aichestra …` are equivalent.
+
+## Config locations
+
+| Mode | Machine-local settings |
+|------|------------------------|
+| Contributor clone (cwd is this repo) | `.local/machine.local.json` (gitignored) |
+| Installed package / foreign project | Portable user config home (see below) |
+
+User config home (override with `AICHESTRA_CONFIG_HOME`):
+
+- macOS: `~/Library/Application Support/aichestra/`
+- Linux: `$XDG_CONFIG_HOME/aichestra/` or `~/.config/aichestra/`
+- Windows: `%APPDATA%\aichestra\`
+
+`local.enabled` defaults to `false` and remains valid on any hardware.
+Large local model downloads require explicit approval
+(`--approve-model-download` records approval; it does not download weights).
+
+Target-project settings live in `.aichestra/project.json` (via `aichestra init`).
 
 ## Bootstrap (idempotent config / doctor)
 
@@ -32,20 +62,131 @@ Bootstrap writes/merges config, runs discovery + doctor, and can set
 remain. It does **not** install Orca/Codex/Cursor/OpenCode/Ollama — install
 those tools separately; doctor reports what is missing.
 
-Machine-local settings are written to `.local/machine.local.json` (gitignored).
-`local.enabled` defaults to `false` and remains valid on any hardware.
-
-Large local model downloads require explicit approval
-(`--approve-model-download` records approval; it does not download weights).
-
 ## Daily commands
 
 ```bash
-python -m aichestra doctor          # PASS/WARN/FAIL health check
-python -m aichestra profile         # deterministic machine profile (JSON)
-python -m aichestra bootstrap       # idempotent setup
-python -m aichestra update          # after git pull; preserves machine-local
+# Platform
+python -m aichestra doctor            # PASS/WARN/FAIL health check
+python -m aichestra profile           # deterministic machine profile (JSON)
+python -m aichestra bootstrap         # idempotent setup
+python -m aichestra update            # after git pull; preserves machine-local
+
+# Target project
+aichestra init --yes                  # create .aichestra/project.json
+aichestra settings                    # interactive role/model/quota editor
+aichestra settings show               # print roles / quota / verification
+aichestra settings set KEY=VALUE …    # mutate project.json (see below)
+
+# Mode C / research / handoff (require Orca where noted)
+python -m aichestra orchestrate --prompt "…" --project-root /path/to/target
+python -m aichestra handoff --prompt "…" --run-id <run_id>
+python -m aichestra research /path/to/target-project --query "auth"
+python -m aichestra prove-launch --project-root /path/to/target --candidate-id <id>
+python -m aichestra abort-launch --token <cleanup_lease>
+python -m aichestra dispatch-role --role tests --run <run_id> --task <task_id> \
+  --project-root /path/to/target
+
+# Staging diagnostics (typed, allowlist-gated)
+python -m aichestra staging STAGE_ALIAS --op uptime --dry-run
+python -m aichestra staging STAGE_ALIAS --op disk_usage
 ```
+
+### Target project init + role settings
+
+From any target project:
+
+```bash
+cd /path/to/your-project
+aichestra init --yes
+aichestra init --yes --force                          # overwrite existing project.json
+aichestra init --yes --set roles.implement=cursor     # init + one-shot sets
+aichestra settings show
+```
+
+All `aichestra settings set` keys:
+
+```bash
+# Coordinator LLM (Mode C bootstrap) — independent of coding workers
+aichestra settings set orchestration.coordinator=cursor
+
+# Worker roles (implement | research | tests | docs)
+aichestra settings set roles.implement=codex
+aichestra settings set roles.research=cursor
+aichestra settings set roles.tests=cursor
+aichestra settings set roles.docs=cursor
+aichestra settings set roles.tests.runtime=opencode
+aichestra settings set roles.tests.model=qwen2.5-coder:14b
+aichestra settings set roles.tests.provider=ollama
+aichestra settings set 'roles.tests={"runtime":"opencode","model":"qwen2.5-coder:14b"}'
+
+# Quota (manual | auto) — coding-worker fallback only
+aichestra settings set quota.mode=manual
+aichestra settings set quota.mode=auto
+aichestra settings set quota.roles.implement=cursor
+aichestra settings set quota.implement_fallback=cursor   # alias for quota.roles.implement
+
+# Verification gate (JSON boolean only; fail-closed when disabled)
+aichestra settings set verification.enabled=false
+aichestra settings set verification.enabled=true
+aichestra settings set verify='["pytest","-q"]'
+aichestra settings set verify='[["npm","test"],["npm","run","lint"]]'
+aichestra settings set verify=null
+```
+
+Works in **any** target project directory (not tied to a specific app). Role
+values are AgentRuntime ids (`codex`, `cursor`, `gemini`, `claude`, `opencode`)
+with optional `provider` / `model` (OpenCode + local/Ollama). Aliases `local` /
+`local-worker` map to `opencode`. `roles.*` are worker roles only.
+`orchestration.coordinator` is the Mode C coordinator LLM and is independent
+of `roles.implement`. Config lives in `.aichestra/project.json`.
+`verify` is separate from the toggle. Init sets `verification.enabled=false`;
+until enabled with a real JSON boolean `true` and non-empty verify commands,
+orchestration stops at preflight before creating a Run. The verification gate
+also remains fail-closed.
+
+Mode C resolves the coordinator and each worker role into exact supported
+ExecutionTargets before creating a Run. Bootstrap uses
+`orchestration.coordinator`, never `roles.implement`. `execution.runtimes`
+can register additional runtime ids (including from machine/global layered
+config — bindings are stored in the project; runtimes need not be copied into
+`project.json`).
+Disabled or unresolved bindings fail with a settings error. Orca owns task
+creation; Aichestra emits a typed `role_dispatch_contract`
+(`role → execution_target_id`, with `requires_launch_proof` for provisionable
+candidates). Prefer `aichestra dispatch-role --run --task --role` to
+worker-start the exact bound target. Before handoff, Aichestra persists an
+immutable contract by Run id in the config home. Later settings changes do not
+retarget that Run; unavailable or disabled targets fail closed. Missing contracts
+require a new Run, including with `--resume-run-id`: resume never creates a
+contract and rejects changed policy. Restore the original settings to resume,
+or start a new Run to apply new settings. Dispatch of an existing Task resolves
+the saved runtime/provider/model independently of current role settings, while
+current availability and explicit compatibility restrictions remain authoritative.
+Endpoint fingerprints distinguish tenant/query differences without storing the
+full URL in the coordinator contract. Task role and same-Run association are
+checked before launch. Canonical task/worker receipts are audited for role, Run and
+effective runtime/provider/model/endpoint. Missing or mismatched evidence
+fails the Run. An Orca version that omits durable `launch.effective` cannot
+fully close live post-dispatch audit. Full live role/quota acceptance remains
+partial until coordinators adopt dispatch-role and receipts are proven live.
+
+`quota.mode=manual` stops and asks the operator to change settings and start a
+new Run with the remaining objective/context; it cannot retarget the old Run.
+`quota.roles.implement` is the coding-worker fallback (precedence:
+`quota.roles.implement` → `quota.implement_fallback` → default). Auto mode does
+**not** replace the coordinator LLM; coordinator quota is a separate failure
+(`orchestration.coordinator`). Inner-task implement fallback must have a prior
+structured primary-worker quota receipt. Use `dispatch-role --role implement
+--reason quota-fallback --run <run_id> --task <task_id> --project-root <root>`;
+this selects the Run contract fallback only in auto mode and checks canonical
+quota evidence before starting a worker. Live quota recovery via dispatch-role and durable
+receipts remain NOT VALIDATED end-to-end.
+
+From a project or subdirectory, use `aichestra orchestrate --prompt "..."`.
+The nearest ancestor `.aichestra/project.json` selects the project root, with
+cwd as the fallback; `--project-root` overrides this. `aichestra init` opens
+the settings editor on a terminal; `--yes` accepts defaults for automation.
+The editor includes Coordinator separately from Coding.
 
 ### Modes in practice
 
@@ -59,8 +200,10 @@ python -m aichestra update          # after git pull; preserves machine-local
    No direct Codex/Cursor fallback in Mode C (use Mode A for native tools).
    Optional provider toggles: `--no-codex`, `--no-cursor`, `--no-local`
    (and `--no-orca`, which fails Mode C closed).
-   Attachments: `--attach screenshot.png` delivers native file bytes
-   (Orca `--attach` / staged inbox; Codex `--image` in Mode A).
+   Attachments: `--attach screenshot.png` forwards native file bytes when the
+   installed Orca `worker-start` still advertises `--attach` (staged outside the
+   parent checkout). If Orca lacks that primitive, Mode C fails closed honestly
+   rather than metadata-only path lists. Codex Mode A uses `--image` / `-i`.
 4. **Codex→Cursor handoff** — one-action inside the same Orca Run:
    `python -m aichestra handoff --prompt "…" --run-id <run_id>`
    (or `--repo /path/to/project` to auto-resolve a recent Mode C run from
@@ -68,7 +211,7 @@ python -m aichestra update          # after git pull; preserves machine-local
    after successful `run-use`. Use `--prepare-only` for packet-only output.
    Without `--run-id` / resolvable recent run, execute fails closed.
 5. **Disable local inference** — keep `local.enabled: false` in
-   `.local/machine.local.json` (default).
+   machine-local config (default).
 6. **Local repository research** —
    `python -m aichestra research /path/to/target-project --query "auth"`
 7. **Machine/local AI** — `python -m aichestra profile` and doctor local-AI section.
@@ -83,11 +226,11 @@ python -m aichestra update          # after git pull; preserves machine-local
 9. **Worktree / diff** — prefer Orca:
    `orca worktree list`, `orca worktree show`, and the Orca UI diff for the
    active worktree (do not `git reset --hard` the user's real checkout).
-10. **Update** — `git pull` then `python -m aichestra update`.
+10. **Update** — `git pull` then `python -m aichestra update` (clone) or
+    reinstall / `pip install -e .` after pulling (contributor).
 
 Orca CLI may live on PATH or at the macOS app bundle
 `/Applications/Orca.app/Contents/Resources/bin/orca` (discovered automatically).
-
 
 Convenience scripts:
 
@@ -106,8 +249,9 @@ python scripts/smoke_mac.py         # Mac-oriented live smoke report
 | C | `orchestrated` | One Orca Run + Aichestra policy/gates (agent steps via Orca; local maintenance-reviewer + verification on adopted worktree). |
 
 Orca is opt-in and **required for Mode C**. Codex is the preferred lead; Cursor is the fallback.
-Quota handoff Codex→Cursor is **manual one-action** in v1
-(`automatic_quota_fallback_reliable = false`).
+Quota behavior uses project `quota.mode` and its exact configured fallback.
+Legacy handoff helpers retain their manual semantics; Mode C recovery is owned
+by the Run controller and executed only through Orca.
 
 ## Staging diagnostics
 
@@ -123,6 +267,7 @@ are rejected **before** execution. Production SSH has **no** integration path.
 | macOS live smoke | May be live-validated separately via `scripts/smoke_mac.py` for components actually present |
 | Windows live smoke | **NOT VALIDATED** until a real Windows smoke run |
 | Linux live smoke | **NOT VALIDATED** until a real Linux smoke run |
+| Live Codex→Cursor quota fallback via `dispatch-role` | **PARTIAL** (infra present; end-to-end live NOT VALIDATED) |
 
 Do not treat CI green as live OS smoke for Windows/Linux.
 
@@ -142,13 +287,14 @@ Do not treat CI green as live OS smoke for Windows/Linux.
 - Spec: [`specs/001-portable-ai-orchestration/spec.md`](specs/001-portable-ai-orchestration/spec.md)
 - Plan: [`specs/001-portable-ai-orchestration/plan.md`](specs/001-portable-ai-orchestration/plan.md)
 - Tasks: [`specs/001-portable-ai-orchestration/tasks.md`](specs/001-portable-ai-orchestration/tasks.md)
+- Project init / role routing: [`specs/002-project-init-role-routing/spec.md`](specs/002-project-init-role-routing/spec.md)
 - Constitution: [`.specify/memory/constitution.md`](.specify/memory/constitution.md)
 - Agent contract: [`AGENTS.md`](AGENTS.md)
 
 ## Tests
 
 ```bash
-pip install -e ".[dev]"
+python3 -m pip install -e ".[dev]"
 pytest
 ```
 
@@ -156,11 +302,14 @@ Fixture projects under `fixtures/project_a` (Python) and `fixtures/project_b`
 (Node) prove isolation. CI sets `AICHESTRA_FAKE_PROVIDERS=1` and
 `AICHESTRA_NO_REAL_QUOTA=1`.
 
-Mode C bootstraps one explicit coordinator in the current Orca checkout using
-one runnable ExecutionTarget. Legacy provider fields do not select the coordinator. The coordinator reads project context,
-including scoped nested AGENTS.md, owns child Tasks/Dispatches and worktree
-placement in the same Run, waits for their outcomes and converges their results
-before completing. At the implementation boundary it calls
+Mode C bootstraps one explicit coordinator from `orchestration.coordinator`
+(independent of `roles.implement`) using one runnable ExecutionTarget. Legacy
+provider fields do not select the coordinator. The coordinator reads project
+context, including scoped nested AGENTS.md, owns which Tasks to create and
+when, and must Dispatch each worker role through
+`role_dispatch_contract` exact `execution_target_id`s (prefer
+`aichestra dispatch-role`). It waits for outcomes
+and converges results before completing. At the implementation boundary it calls
 `orchestration ask --question AICHESTRA_GATE:maintenance`; Aichestra replies with
 TEST/DOC/ADR/SPEC decisions before Orca dispatches required writers. The
 coordinator releases settled child workers; Aichestra releases the coordinator

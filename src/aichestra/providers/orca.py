@@ -20,7 +20,12 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from aichestra.platform_detect import OperatingSystem, detect_os
-from aichestra.providers.attachments import orca_attach_flags, stage_attachments
+from aichestra.providers.attachments import (
+    orca_attach_flags,
+    orca_attach_unsupported_detail,
+    orca_worker_start_supports_attach,
+    stage_attachments,
+)
 from aichestra.providers.base import (
     FailureClass,
     ProviderAdapter,
@@ -153,7 +158,9 @@ def build_orca_argv(
         ]
     name = f"aichestra-{session_id[:8]}"
     worktree = str(request.context.get("worktree") or "new-child")
-    from aichestra.providers.attachments import orca_attach_flags
+    attach_flags: list[str] = []
+    if request.attachments and orca_worker_start_supports_attach(binary):
+        attach_flags = orca_attach_flags(request.attachments)
 
     return [
         binary,
@@ -169,7 +176,7 @@ def build_orca_argv(
         agent,
         "--setup",
         "skip",
-        *orca_attach_flags(request.attachments),
+        *attach_flags,
         "--json",
     ]
 
@@ -724,20 +731,29 @@ class OrcaProvider(ProviderAdapter):
                 )
             agent = target.runtime.id
             from aichestra.execution.serialize import (
+                ROLE_DISPATCH_OPERATION,
+                dispatch_role_invocation,
                 prove_launch_invocation,
                 render_cli_invocation,
             )
 
+            repo_root_ctx = (
+                str(request.context.get("aichestra_repo_root")).strip()
+                if isinstance(request.context.get("aichestra_repo_root"), str)
+                and str(request.context.get("aichestra_repo_root")).strip()
+                else None
+            )
             prove_invocation = prove_launch_invocation(
                 project_root=str(request.context.get("project_root") or "<root>"),
-                repo_root=(
-                    str(request.context.get("aichestra_repo_root")).strip()
-                    if isinstance(request.context.get("aichestra_repo_root"), str)
-                    and str(request.context.get("aichestra_repo_root")).strip()
-                    else None
-                ),
+                repo_root=repo_root_ctx,
             )
             prove_display = render_cli_invocation(prove_invocation)
+            dispatch_invocation = dispatch_role_invocation(
+                project_root=str(request.context.get("project_root") or "<root>"),
+                repo_root=repo_root_ctx,
+                run_id=str(request.context.get("run_id") or "<run-id>"),
+            )
+            dispatch_display = render_cli_invocation(dispatch_invocation)
             # Preserve the complete policy; generic bounded_prompt truncates context.
             contract = (
                 "Target:\nYou are the explicit Mode C coordinator for project_root in ProjectContext. "
@@ -749,12 +765,24 @@ class OrcaProvider(ProviderAdapter):
                 "non-consumingly for deterministic ask/reply gates. "
                 "Honor project instruction precedence and security constraints.\n"
                 "ExecutionTargets:\n"
-                "The coordinator owns inner worker selection. "
+                "The coordinator owns the DAG: which Tasks to create and when. "
+                "Aichestra owns POLICY_PACKAGE.role_dispatch_contract: each worker "
+                "role maps to one exact execution_target_id. Prefer "
+                f"`{ROLE_DISPATCH_OPERATION}` via structured role_dispatch_invocation "
+                f"`{dispatch_display}` after Task create (pass --run/--task/--role). "
+                "That entrypoint resolves the project binding, proves launch when "
+                "requires_launch_proof is true, and worker-starts only the bound "
+                "target — another target cannot be Dispatched through it. "
+                "The coordinator MUST NOT choose a different runtime or target for a "
+                "bound role. "
                 "The coordinator package includes canonical execution_targets "
                 "(runnable only), execution_target_candidates (non-dispatchable), "
                 "and execution_policy (execution_target_contract_version). "
-                "For inner workers, Dispatch only targets listed in execution_targets "
+                "For direct Orca worker-start, Dispatch only a contracted "
+                "execution_target_id that also appears in execution_targets "
                 "(enabled, available, capable, allowed, and runnable). "
+                "When bindings[role].requires_launch_proof is true, prove-launch "
+                "candidate_id first (or use dispatch-role which proves then starts). "
                 "orca-existing-terminal targets include launch_ref; Dispatch that "
                 "handle — do not invent a terminal. "
                 "Candidates require aichestra.prove_launch via "
@@ -775,7 +803,37 @@ class OrcaProvider(ProviderAdapter):
                 "Never pass a raw terminal handle to abort-launch. "
                 "Target locality may be local, remote, or cloud according to ExecutionPolicy. "
                 "Do not infer workers from raw providers. "
-                "Do not impose product-name phase routing. "
+                "Every inner task must use its exact role (implement/research/tests/docs) as task-title. Canonical worker-show launch.effective receipts are audited; missing or mismatched evidence fails the Run. This audit is post-dispatch and is not a substitute for pinning Dispatch to execution_target_id via dispatch-role. "
+                "orchestration.coordinator is this coordinator LLM and is independent of roles.implement. "
+                "POLICY_PACKAGE.role_dispatch_contract.bindings is a typed binding: "
+                "for each child Task declare role in {implement,research,tests,docs} and "
+                "Dispatch ONLY bindings[role].execution_target_id "
+                "(runtime/provider/model when set). "
+                "Do not silently substitute another product. If the bound "
+                "runtime is missing/disabled/unavailable, settle failed — do "
+                "not invent a replacement. "
+                "Quota policy (POLICY_PACKAGE.quota_policy / role_dispatch_contract.quota): "
+                "quota.roles.implement is the coding-worker fallback, not a "
+                "coordinator replacement. On implement quota/rate-limit, if "
+                "mode=manual escalate/ask the operator to change roles via "
+                "`aichestra settings` and start a new Run with the remaining objective "
+                "and handoff context (the current Run contract is immutable); "
+                "finish with worker_done failed if blocked; "
+                "if mode=auto, same-Run Dispatch of quota.roles.implement "
+                "execution_target_id via dispatch-role --reason quota-fallback (requires canonical primary quota evidence), or Orca (never call Cursor/Codex outside Orca, "
+                "and never replace this coordinator). "
+                "Do not invent additional hard-coded phase→product maps beyond "
+                "role_dispatch_contract. "
+                "Research artifacts (POLICY_PACKAGE.research_artifact — mandatory "
+                "policy, not LLM discretion; Cursor/Codex MUST NOT invent MD files): "
+                "none = do not write research_artifact_notes_path; put short findings "
+                "only in worker_done body / task result for the next Task spec; "
+                "file = write durable notes to research_artifact_notes_path "
+                "(and/or compact SUMMARY); compacted = put research_compact SUMMARY "
+                "in the next Task context and write a file only if durable audit is "
+                "required. If live research output exceeds research_artifact_file_chars "
+                "while mode is none, escalate to file; if cloud handoff or output "
+                "exceeds research_artifact_compact_chars, use compacted. "
                 "Unsupported targets MUST NOT be dispatched. "
                 "Legacy preferred_lead/local_* fields are secondary compatibility seams only. "
                 "Ownership:\nYou own the dynamic DAG: create arbitrary Tasks/Dispatches through Orca. "
@@ -824,12 +882,23 @@ class OrcaProvider(ProviderAdapter):
                         "execution_target_contract_version",
                         "launch_proof_operation",
                         "launch_proof_invocation",
+                        "role_dispatch_operation",
+                        "role_dispatch_invocation",
+                        "role_bindings",
+                        "quota_policy",
+                        "coordinator_binding",
+                        "role_dispatch_contract",
                         "aichestra_repo_root",
                         "attachments",
                         "classify",
                         "speckit_scale",
                         "speckit_steps",
                         "provider_policy",
+                        "research_query",
+                        "research_artifact",
+                        "research_artifact_notes_path",
+                        "research_artifact_file_chars",
+                        "research_artifact_compact_chars",
                     )
                     if request.context.get(key) is not None
                 }
@@ -878,13 +947,17 @@ class OrcaProvider(ProviderAdapter):
                 argv=[binary, "orchestration", "task-list", "--run", str(request.context["run_id"]), "--json"],
                 session=session, request=request, unavailable_detail="Orca unavailable")
             rows = _receipt_rows(_parse_orca_json(tasks.output), "tasks")
+            audit = {"ok": True}
+            if request.role_targets:
+                audit = self._audit_role_dispatches(binary, session, request, rows)
+                valid = valid and audit["ok"]
             settled = bool(valid and tasks.ok and rows and all(
-                row.get("status") == "completed" for row in rows))
+                (row.get("status") == "completed" or (row.get("id") or row.get("taskId")) in audit.get("superseded_quota_tasks", [])) for row in rows))
             return replace(result, ok=settled,
                 failure=FailureClass.NONE if settled else FailureClass.ERROR,
                 detail="Canonical Run settled" if settled else "Canonical Run failed, unsettled, or unverifiable",
                 metadata={**result.metadata, "receipt": receipt, "tasks": _parse_orca_json(tasks.output),
-                          "settled": settled})
+                          "settled": settled, "role_audit": audit})
 
         # Phase reports must never create Runs — local metadata only at adapter.
         if role in {"phase_report", "status_ping"}:
@@ -1007,6 +1080,32 @@ class OrcaProvider(ProviderAdapter):
         released = state in {"released", "already_released"}
         ok = bool(result.ok and released and workers.ok and not unresolved)
         return ok, {"state": state, "history": history, "unresolved_resources": unresolved}
+
+    def _audit_role_dispatches(self, binary, session, request, tasks):
+        from aichestra.execution.roles import validate_role_receipts
+        run_id = request.context["run_id"]
+        def call(args):
+            result = run_cli_task(binary=binary, argv=[binary, *args], session=session, request=request)
+            if not result.ok:
+                raise ValueError("Cannot read canonical dispatch receipts")
+            return _parse_orca_json(result.output)
+        try:
+            if not tasks:
+                raise ValueError("Cannot read canonical role tasks")
+            workers = _receipt_rows(call(["orchestration", "worker-list", "--run", run_id, "--json"]), "workers")
+            if workers is None:
+                raise ValueError("Cannot enumerate Run dispatches")
+            receipts = {}
+            for worker in workers:
+                dispatch = worker.get("dispatch_id") or worker.get("dispatchId")
+                if not isinstance(dispatch, str) or not dispatch:
+                    raise ValueError("Worker receipt missing dispatch id")
+                receipts[dispatch] = call(["orchestration", "worker-show", "--dispatch", dispatch, "--json"])
+            return validate_role_receipts(run_id, tasks, workers, receipts,
+                request.role_targets, bootstrap_target=request.execution_target,
+                quota_target=request.quota_target, quota_mode=request.context.get("quota_mode", "manual"))
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            return {"ok": False, "detail": str(exc)}
 
     def _register_run(
         self,
@@ -1180,11 +1279,27 @@ class OrcaProvider(ProviderAdapter):
             or "new-child"
         )
         # Do NOT stage into the parent project checkout. Prefer absolute paths
-        # for Orca --attach; optionally stage under a temp dir outside the repo.
+        # for Orca --attach when supported; never invent an unsupported flag.
         delivery = stage_attachments(request.attachments, None)
-        attach_flags = orca_attach_flags(
-            delivery.staged or delivery.resolved or request.attachments
-        )
+        attach_paths = delivery.staged or delivery.resolved or request.attachments
+        attach_flags: list[str] = []
+        if attach_paths:
+            if not orca_worker_start_supports_attach(binary):
+                return self._failed_dispatch(
+                    ProviderTaskResult(
+                        ok=False,
+                        failure=FailureClass.UNAVAILABLE,
+                        detail=orca_attach_unsupported_detail(binary),
+                        session_id=session.session_id,
+                        metadata={
+                            "attachment_delivery": delivery.to_dict(),
+                            "orca_attach_supported": False,
+                        },
+                    ),
+                    steps,
+                    session.session_id,
+                )
+            attach_flags = orca_attach_flags(attach_paths)
         worker_argv = [
             binary,
             "orchestration",
@@ -1621,10 +1736,17 @@ class OrcaProvider(ProviderAdapter):
             if "cleanup" not in meta:
                 _, cleanup = self._release_worker(binary, session, request, dispatch_id, run_id)
                 meta["cleanup"] = cleanup
+            event = done_meta.get("event") or {}
+            failure_code = event.get("failure")
+            if isinstance(failure_code, dict):
+                failure_code = failure_code.get("code")
+            quota_failure = failure_code in {"quota", "rate_limit", "quota_exhausted"}
+            cleanup = meta.get("cleanup") or {}
+            quota_failure = quota_failure and cleanup.get("state") in {"released", "already_released"} and not cleanup.get("unresolved_resources", True)
             return ProviderTaskResult(
                 ok=False,
                 output=wait_result.output or worker_result.output,
-                failure=FailureClass.ERROR,
+                failure=FailureClass.QUOTA if quota_failure else FailureClass.ERROR,
                 detail=done_detail,
                 session_id=session.session_id,
                 metadata=meta,

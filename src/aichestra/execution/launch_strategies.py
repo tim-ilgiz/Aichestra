@@ -44,15 +44,69 @@ def _flags(command: dict[str, Any] | None) -> set[str]:
     return set(raw) if isinstance(raw, (list, tuple, set)) else set()
 
 
-def _effective(receipt: Mapping[str, Any]) -> dict[str, Any] | None:
-    data = receipt.get("result", receipt)
-    if not isinstance(data, dict):
-        return None
-    launch = data.get("launch")
-    if not isinstance(launch, dict):
+def _as_mapping(value: Any) -> Mapping[str, Any] | None:
+    if isinstance(value, Mapping):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return parsed if isinstance(parsed, Mapping) else None
+    return None
+
+
+def _launch_with_effective(value: Any) -> dict[str, Any] | None:
+    """Return a launch object that already carries durable ``effective`` evidence.
+
+    Bare ``startOptions.agent`` (requested preference only) is not enough.
+    Live Orca worker-show nests durable evidence under
+    ``startOptions.launch.effective`` (and the JSON twin ``start_options``).
+    """
+    launch = _as_mapping(value)
+    if launch is None:
         return None
     effective = launch.get("effective")
-    return effective if isinstance(effective, dict) else None
+    if isinstance(effective, Mapping):
+        return dict(launch)
+    return None
+
+
+def receipt_launch(receipt: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Locate durable launch evidence on a worker-show / confirm receipt."""
+    data = receipt.get("result", receipt)
+    if not isinstance(data, Mapping):
+        return None
+    worker = data.get("worker")
+    worker_map = worker if isinstance(worker, Mapping) else {}
+    # Prefer explicit top-level launch; then Orca 1.4+ startOptions nesting.
+    candidates = (
+        data.get("launch"),
+        worker_map.get("launch"),
+        data.get("startOptions"),
+        data.get("start_options"),
+        worker_map.get("startOptions"),
+        worker_map.get("start_options"),
+    )
+    for candidate in candidates:
+        direct = _launch_with_effective(candidate)
+        if direct is not None:
+            return direct
+        opts = _as_mapping(candidate)
+        if opts is None:
+            continue
+        nested = _launch_with_effective(opts.get("launch"))
+        if nested is not None:
+            return nested
+    return None
+
+
+def _effective(receipt: Mapping[str, Any]) -> dict[str, Any] | None:
+    launch = receipt_launch(receipt)
+    if launch is None:
+        return None
+    effective = launch.get("effective")
+    return dict(effective) if isinstance(effective, Mapping) else None
 
 
 def _normalize_endpoint(endpoint: str | None) -> str | None:
@@ -68,7 +122,7 @@ def _normalize_endpoint(endpoint: str | None) -> str | None:
     if not parts.scheme or not parts.netloc:
         return text
     path = parts.path.rstrip("/") or ""
-    return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+    return urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
 
 
 def expected_binding(target: ExecutionTarget) -> dict[str, str | None]:
@@ -82,6 +136,15 @@ def expected_binding(target: ExecutionTarget) -> dict[str, str | None]:
     }
 
 
+def _with_v1_path(endpoint: str) -> str:
+    """Add the API suffix to the path, preserving query and fragment identity."""
+    parts = urlsplit(endpoint)
+    path = parts.path.rstrip("/")
+    if not path.endswith("/v1"):
+        path += "/v1"
+    return urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
+
+
 def _endpoints_equal(left: str | None, right: str | None) -> bool:
     a = _normalize_endpoint(left)
     b = _normalize_endpoint(right)
@@ -90,9 +153,29 @@ def _endpoints_equal(left: str | None, right: str | None) -> bool:
     if a == b:
         return True
     # OpenCode baseURL may include a trailing /v1 the discovery endpoint omitted.
-    a_v1 = a if a.endswith("/v1") else f"{a}/v1"
-    b_v1 = b if b.endswith("/v1") else f"{b}/v1"
-    return a_v1 == b_v1
+    return _with_v1_path(a) == _with_v1_path(b)
+
+
+def binding_matches_target(
+    actual: Mapping[str, Any],
+    target: ExecutionTarget,
+) -> bool:
+    """Compare an extracted attested binding to a contract ExecutionTarget.
+
+    Shared by post-dispatch receipt audit and any caller that already holds
+    ``extract_attested_binding`` output. Endpoint identity uses the same
+    ``_endpoints_equal`` semantics as launch proof (``/api`` ≡ ``/api/v1`` with
+    the same query), so pre- and post-dispatch cannot disagree.
+    """
+    return (
+        actual.get("runtime") == target.runtime.id
+        and actual.get("provider") == (target.provider.id if target.provider else None)
+        and (target.model is None or actual.get("model") == target.model.id)
+        and _endpoints_equal(
+            actual.get("endpoint") if isinstance(actual.get("endpoint"), str) else None,
+            target.endpoint,
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -655,7 +738,7 @@ def _opencode_bridge_command(
         return None
     model_ref = f"{provider}/{model_id}"
     binary = target.runtime.binary_path or target.runtime.id
-    base = endpoint if endpoint.endswith("/v1") else f"{endpoint}/v1"
+    base = _with_v1_path(endpoint)
     config = {
         "$schema": "https://opencode.ai/config.json",
         "model": model_ref,
@@ -1331,7 +1414,7 @@ def prove_launch_by_candidate_id(
 
     from aichestra.config.layering import resolve_config
     from aichestra.providers.orca import resolve_orca_binary
-    from aichestra.repo import resolve_aichestra_config_root
+    from aichestra.repo import resolve_aichestra_config_root, trusted_config_root
 
     from .serialize import (
         LAUNCH_PROOF_OPERATION,
@@ -1371,12 +1454,18 @@ def prove_launch_by_candidate_id(
         config_root_error = None
 
     if targets is None:
-        if aichestra_root is None:
+        if aichestra_root is None or not trusted_config_root(aichestra_root):
             return _payload({
                 "ok": False,
                 "operation": LAUNCH_PROOF_OPERATION,
                 "candidate_id": cid,
-                "error": config_root_error,
+                "error": config_root_error
+                or (
+                    "Aichestra config root required for prove-launch: pass "
+                    "--repo-root or set AICHESTRA_REPO_ROOT to the Aichestra "
+                    "config home; refusing an unrecognized directory "
+                    "as trusted config root"
+                ),
             })
         cfg = (
             dict(config)

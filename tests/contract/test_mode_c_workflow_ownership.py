@@ -26,6 +26,7 @@ def _bindings(root: Path, *, prompt: str, orca) -> WorkflowBindings:
         project_root=str(root),
         task_prompt=prompt,
         maintenance_kwargs={"change_summary": "x", "touches_behavior": False},
+        verification_enabled=True,
         verification_commands=[[sys.executable, "-c", "import sys; sys.exit(0)"]],
     )
 
