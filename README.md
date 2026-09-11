@@ -6,11 +6,41 @@ OpenCode + Ollama local worker.
 
 ## Install
 
+From this repository (runtime only):
+
+```bash
+python3 -m pip install -e .
+```
+
+For contributors who also run tests:
+
 ```bash
 python3 -m pip install -e ".[dev]"
+pytest
 ```
 
 Or run without install by setting `PYTHONPATH=src`.
+
+After install, `aichestra …` and `python -m aichestra …` are equivalent.
+
+## Config locations
+
+| Mode | Machine-local settings |
+|------|------------------------|
+| Contributor clone (cwd is this repo) | `.local/machine.local.json` (gitignored) |
+| Installed package / foreign project | Portable user config home (see below) |
+
+User config home (override with `AICHESTRA_CONFIG_HOME`):
+
+- macOS: `~/Library/Application Support/aichestra/`
+- Linux: `$XDG_CONFIG_HOME/aichestra/` or `~/.config/aichestra/`
+- Windows: `%APPDATA%\aichestra\`
+
+`local.enabled` defaults to `false` and remains valid on any hardware.
+Large local model downloads require explicit approval
+(`--approve-model-download` records approval; it does not download weights).
+
+Target-project settings live in `.aichestra/project.json` (via `aichestra init`).
 
 ## Bootstrap (idempotent config / doctor)
 
@@ -31,12 +61,6 @@ Bootstrap writes/merges config, runs discovery + doctor, and can set
 `bootstrap_complete=true` when doctor is ok and no blocking remaining steps
 remain. It does **not** install Orca/Codex/Cursor/OpenCode/Ollama — install
 those tools separately; doctor reports what is missing.
-
-Machine-local settings are written to `.local/machine.local.json` (gitignored).
-`local.enabled` defaults to `false` and remains valid on any hardware.
-
-Large local model downloads require explicit approval
-(`--approve-model-download` records approval; it does not download weights).
 
 ## Daily commands
 
@@ -67,11 +91,9 @@ python -m aichestra staging STAGE_ALIAS --op uptime --dry-run
 python -m aichestra staging STAGE_ALIAS --op disk_usage
 ```
 
-(`aichestra …` and `python -m aichestra …` are equivalent after install.)
-
 ### Target project init + role settings
 
-After `pip install -e .` (or `pip install .`), from any target project:
+From any target project:
 
 ```bash
 cd /path/to/your-project
@@ -103,7 +125,7 @@ aichestra settings set quota.mode=auto
 aichestra settings set quota.roles.implement=cursor
 aichestra settings set quota.implement_fallback=cursor   # alias for quota.roles.implement
 
-# Verification gate (fail-closed when disabled)
+# Verification gate (JSON boolean only; fail-closed when disabled)
 aichestra settings set verification.enabled=false
 aichestra settings set verification.enabled=true
 aichestra settings set verify='["pytest","-q"]'
@@ -118,15 +140,16 @@ with optional `provider` / `model` (OpenCode + local/Ollama). Aliases `local` /
 `orchestration.coordinator` is the Mode C coordinator LLM and is independent
 of `roles.implement`. Config lives in `.aichestra/project.json`.
 `verify` is separate from the toggle. Init sets `verification.enabled=false`;
-until enabled with non-empty verify commands, orchestration stops at preflight
-before creating a Run. The verification gate also remains fail-closed.
-Machine-local prefs for a global install use the portable user config home
-(`AICHESTRA_CONFIG_HOME` override supported).
+until enabled with a real JSON boolean `true` and non-empty verify commands,
+orchestration stops at preflight before creating a Run. The verification gate
+also remains fail-closed.
 
 Mode C resolves the coordinator and each worker role into exact supported
 ExecutionTargets before creating a Run. Bootstrap uses
 `orchestration.coordinator`, never `roles.implement`. `execution.runtimes`
-can register additional runtime ids.
+can register additional runtime ids (including from machine/global layered
+config — bindings are stored in the project; runtimes need not be copied into
+`project.json`).
 Disabled or unresolved bindings fail with a settings error. Orca owns task
 creation; Aichestra emits a typed `role_dispatch_contract`
 (`role → execution_target_id`, with `requires_launch_proof` for provisionable
@@ -149,8 +172,9 @@ partial until coordinators adopt dispatch-role and receipts are proven live.
 
 `quota.mode=manual` stops and asks the operator to change settings and start a
 new Run with the remaining objective/context; it cannot retarget the old Run.
-`quota.roles.implement` is the coding-worker fallback. Auto mode does **not**
-replace the coordinator LLM; coordinator quota is a separate failure
+`quota.roles.implement` is the coding-worker fallback (precedence:
+`quota.roles.implement` → `quota.implement_fallback` → default). Auto mode does
+**not** replace the coordinator LLM; coordinator quota is a separate failure
 (`orchestration.coordinator`). Inner-task implement fallback must have a prior
 structured primary-worker quota receipt. Use `dispatch-role --role implement
 --reason quota-fallback --run <run_id> --task <task_id> --project-root <root>`;
@@ -200,11 +224,11 @@ The editor includes Coordinator separately from Coding.
 9. **Worktree / diff** — prefer Orca:
    `orca worktree list`, `orca worktree show`, and the Orca UI diff for the
    active worktree (do not `git reset --hard` the user's real checkout).
-10. **Update** — `git pull` then `python -m aichestra update`.
+10. **Update** — `git pull` then `python -m aichestra update` (clone) or
+    reinstall / `pip install -e .` after pulling (contributor).
 
 Orca CLI may live on PATH or at the macOS app bundle
 `/Applications/Orca.app/Contents/Resources/bin/orca` (discovered automatically).
-
 
 Convenience scripts:
 
@@ -241,6 +265,7 @@ are rejected **before** execution. Production SSH has **no** integration path.
 | macOS live smoke | May be live-validated separately via `scripts/smoke_mac.py` for components actually present |
 | Windows live smoke | **NOT VALIDATED** until a real Windows smoke run |
 | Linux live smoke | **NOT VALIDATED** until a real Linux smoke run |
+| Live Codex→Cursor quota fallback via `dispatch-role` | **PARTIAL** (infra present; end-to-end live NOT VALIDATED) |
 
 Do not treat CI green as live OS smoke for Windows/Linux.
 
@@ -267,7 +292,7 @@ Do not treat CI green as live OS smoke for Windows/Linux.
 ## Tests
 
 ```bash
-pip install -e ".[dev]"
+python3 -m pip install -e ".[dev]"
 pytest
 ```
 
