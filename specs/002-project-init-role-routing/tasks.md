@@ -29,15 +29,15 @@
 
 - [x] T011 Resolve role runtime/provider/model into an exact preparable target
 - [x] T012 Audit all canonical role dispatch receipts; fail closed on mismatch
-- [ ] T013 REOPENED (2026-09-11 review): Same-Run auto quota retry via
-  `dispatch-role --reason quota-fallback` must share one durable quota
-  evidence resolver between `authorize_task` and final
-  `validate_role_receipts`. Live Orca 1.4.200 still omits typed `failure` from
-  `lastFailure`; authoritative evidence is `worker_done` message
-  `payload.failure=quota` via `check --all`. Closing requires settle-audit
-  parity + regression test (not only dispatch-role start). Prior live authorize
-  evidence: run `run_b3f15bcba245`, primary `ctx_4fb091aa3333`, fallback
-  `ctx_ba96c22a6ea4`.
+- [x] T013 CLOSED via T049 (2026-09-11): Same-Run auto quota retry shares
+  `resolve_worker_failure(..., durable_messages=)` between `authorize_task`
+  and settle `validate_role_receipts`. `_audit_role_dispatches` loads the same
+  `check --all` worker_done mail. Contract regression covers Orca 1.4.200
+  (lastFailure without typed failure + payload.failure=quota → final audit
+  OK). Prior live authorize: run `run_b3f15bcba245`, primary
+  `ctx_4fb091aa3333`, fallback `ctx_ba96c22a6ea4`. Live end-to-end settle on a
+  fresh Mode C Run after T049 remains optional smoke (not a merge blocker
+  once PR CI is green).
 - [x] T014 Remove disabled implement remap; preserve exact provider/model binding
 - [x] T015 Infer project root from nearest project config or resolved cwd
 - [x] T016 Interactive settings and init editor using runtime/model discovery
@@ -96,7 +96,7 @@
 - [x] T034 Extend isolated wheel smoke to orchestrate/prove-launch/dispatch-role
   config boundaries and add contract drift / negative quota regressions.
 
-T013 reopened for settle-audit / authorize durable-quota parity (T049);
+T013 closed via T049 settle-audit / authorize durable-quota parity;
 T022 live validated via coordinator-driven dispatch-role adoption receipts plus
 durable `launch.effective` (run `run_46902f941734`). These deterministic
 corrections remain in force.
@@ -134,10 +134,9 @@ corrections remain in force.
   missing the implement key (including empty `roles: {}`); explicit
   `quota.roles.implement` wins.
 
-T013 reopened until settle-audit uses the same durable worker_done
-`payload.failure` evidence as authorize (T049). T022 live validated via
-coordinator-driven dispatch-role and `launch.effective`
-(run `run_46902f941734`).
+T013 closed via T049 settle-audit durable worker_done `payload.failure`
+parity with authorize. T022 live validated via coordinator-driven
+dispatch-role and `launch.effective` (run `run_46902f941734`).
 
 ## Live Orca typed-quota readiness (2026-09-11)
 
@@ -164,4 +163,9 @@ coordinator-driven dispatch-role and `launch.effective`
 - [x] T051 Persist immutable per-dispatch adoption receipts under
   `<run-hash>.dispatch-role/<dispatch-hash>.json` with exclusive create;
   `load_dispatch_role_receipts` gathers the directory (legacy shared JSON
-  array still readable).
+  array still readable). Partial-write `OSError` cleans up the empty file.
+- [x] T052 Confirm real worker release after failed adoption persist: exit 0
+  alone is insufficient; mirror `_release_worker` bounded recovery
+  (`release_pending`/`release_unknown` → allowed recovery + `worker-show`)
+  before setting `worker_release_ok=true`. Contract: exit=0 +
+  `state=release_pending` → `worker_release_ok=false`.

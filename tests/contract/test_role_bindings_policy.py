@@ -1033,7 +1033,187 @@ def test_dispatch_role_fails_when_adoption_receipt_persist_fails(tmp_path, monke
     assert result["adoption_receipt_persisted"] is False
     assert result["dispatch_id"] == "d-persist-fail"
     assert "adoption receipt persistence failed" in result["error"]
+    assert result["worker_release_attempted"] is True
+    assert result["worker_release_ok"] is True
     assert any("worker-release" in c for c in calls)
+
+
+def test_dispatch_role_release_pending_is_not_release_ok(tmp_path, monkeypatch):
+    """Exit 0 + state=release_pending must not report worker_release_ok."""
+    import json
+    from types import SimpleNamespace
+    from aichestra.execution.dispatch_role import dispatch_role
+    from aichestra.execution.roles import target_contract_entry
+    from aichestra.execution.run_contract import save_contract
+
+    monkeypatch.setenv("AICHESTRA_CONFIG_HOME", str(tmp_path))
+    target = fake_execution_targets("cursor")[0]
+    save_contract(
+        tmp_path,
+        "run-1",
+        tmp_path,
+        {"bindings": {"tests": target_contract_entry(target)}, "quota": {"mode": "manual"}},
+    )
+    calls = []
+    pending = {
+        "dispatchId": "d-pending",
+        "state": "release_pending",
+        "terminalState": "release_pending",
+    }
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        if "task-list" in argv:
+            return SimpleNamespace(
+                returncode=0,
+                stdout='{"tasks":[{"id":"task-1","run_id":"run-1","role":"tests"}]}',
+                stderr="",
+            )
+        if "worker-start" in argv:
+            return SimpleNamespace(
+                returncode=0,
+                stdout='{"result":{"dispatchId":"d-pending"}}',
+                stderr="",
+            )
+        if "worker-release" in argv:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"result": pending}),
+                stderr="",
+            )
+        if "worker-show" in argv:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"result": pending}),
+                stderr="",
+            )
+        return SimpleNamespace(returncode=1, stdout="", stderr="unexpected")
+
+    def boom(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(
+        "aichestra.execution.dispatch_role.save_dispatch_role_receipt", boom
+    )
+    monkeypatch.setattr(
+        "aichestra.execution.dispatch_role.resolve_orca_binary", lambda: "orca-test"
+    )
+    monkeypatch.setattr(
+        "aichestra.execution.dispatch_role.trusted_config_root", lambda _p: True
+    )
+    monkeypatch.setattr(
+        "aichestra.execution.dispatch_role.resolve_aichestra_config_root",
+        lambda **_k: tmp_path,
+    )
+    result = dispatch_role(
+        role="tests",
+        run_id="run-1",
+        task_id="task-1",
+        project_root=tmp_path,
+        repo_root=tmp_path,
+        config={"roles": {"tests": {"runtime": "cursor"}}},
+        targets=fake_execution_targets("cursor"),
+        binary="orca-test",
+        run=fake_run,
+    )
+    assert result["ok"] is False
+    assert result["worker_started"] is True
+    assert result["worker_release_attempted"] is True
+    assert result["worker_release_ok"] is False
+    assert any("worker-release" in c for c in calls)
+    assert any("worker-show" in c for c in calls)
+
+
+def test_dispatch_role_release_pending_recovers_via_worker_show(tmp_path, monkeypatch):
+    """Bounded recovery may confirm released via worker-show terminalState."""
+    import json
+    from types import SimpleNamespace
+    from aichestra.execution.dispatch_role import dispatch_role
+    from aichestra.execution.roles import target_contract_entry
+    from aichestra.execution.run_contract import save_contract
+
+    monkeypatch.setenv("AICHESTRA_CONFIG_HOME", str(tmp_path))
+    target = fake_execution_targets("cursor")[0]
+    save_contract(
+        tmp_path,
+        "run-1",
+        tmp_path,
+        {"bindings": {"tests": target_contract_entry(target)}, "quota": {"mode": "manual"}},
+    )
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        if "task-list" in argv:
+            return SimpleNamespace(
+                returncode=0,
+                stdout='{"tasks":[{"id":"task-1","run_id":"run-1","role":"tests"}]}',
+                stderr="",
+            )
+        if "worker-start" in argv:
+            return SimpleNamespace(
+                returncode=0,
+                stdout='{"result":{"dispatchId":"d-recover"}}',
+                stderr="",
+            )
+        if "worker-release" in argv:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "result": {
+                            "dispatchId": "d-recover",
+                            "state": "release_pending",
+                            "recovery": "Recovery will retry after reconnect",
+                        }
+                    }
+                ),
+                stderr="",
+            )
+        if "worker-show" in argv:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "result": {
+                            "dispatchId": "d-recover",
+                            "terminalState": "released",
+                        }
+                    }
+                ),
+                stderr="",
+            )
+        return SimpleNamespace(returncode=1, stdout="", stderr="unexpected")
+
+    def boom(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(
+        "aichestra.execution.dispatch_role.save_dispatch_role_receipt", boom
+    )
+    monkeypatch.setattr(
+        "aichestra.execution.dispatch_role.resolve_orca_binary", lambda: "orca-test"
+    )
+    monkeypatch.setattr(
+        "aichestra.execution.dispatch_role.trusted_config_root", lambda _p: True
+    )
+    monkeypatch.setattr(
+        "aichestra.execution.dispatch_role.resolve_aichestra_config_root",
+        lambda **_k: tmp_path,
+    )
+    result = dispatch_role(
+        role="tests",
+        run_id="run-1",
+        task_id="task-1",
+        project_root=tmp_path,
+        repo_root=tmp_path,
+        config={"roles": {"tests": {"runtime": "cursor"}}},
+        targets=fake_execution_targets("cursor"),
+        binary="orca-test",
+        run=fake_run,
+    )
+    assert result["worker_release_ok"] is True
+    assert any("worker-show" in c for c in calls)
 
 
 def test_dispatch_role_receipts_are_per_dispatch_files(tmp_path):
