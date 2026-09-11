@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from aichestra.execution.launch_strategies import extract_attested_binding
-from aichestra.execution.roles import _task_role, _worker_record
+from aichestra.execution.roles import _task_role, _worker_record, contract_endpoint_matches
 from aichestra.providers.orca import _receipt_rows
 
 
@@ -92,6 +92,6 @@ def authorize_task(binary, run, run_id, task_id, role, contract, reason):
                 and _task_role(prior_task) == "implement"
                 and row.get("failure") == "quota" and ordered and actual
                 and all(actual.get(k) == primary.get(k) for k in ("runtime", "provider", "model"))
-                and (actual.get("endpoint") or "").rstrip("/") == (primary.get("endpoint") or "").rstrip("/")):
+                and contract_endpoint_matches(primary, actual.get("endpoint"))):
             return
     raise ValueError("Quota fallback requires a completed primary implement quota receipt in this Run")

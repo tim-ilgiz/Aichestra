@@ -318,3 +318,69 @@ def test_quota_fallback_authorized_before_worker_start(tmp_path, monkeypatch, fa
     assert ("worker-start" in calls) is (fault is None)
     if fault is None:
         assert result["execution_target_id"] == fallback.id
+
+
+@pytest.mark.parametrize("changed_role", ["cursor", {"runtime": "opencode", "provider": "beeline", "model": "new-model"}])
+@pytest.mark.parametrize("fault", [None, "disabled", "wrong-terminal"])
+def test_saved_provider_binding_uses_production_resolver(tmp_path, monkeypatch, changed_role, fault):
+    import json
+    from types import SimpleNamespace
+    from aichestra.execution import serialize
+    from aichestra.execution.dispatch_role import dispatch_role
+    from aichestra.execution.domain import AgentRuntime, DiscoveryFacts, LaunchCapability, LaunchStrategy
+    from aichestra.execution.roles import target_contract_entry
+    from aichestra.execution.run_contract import save_contract
+
+    monkeypatch.setenv("AICHESTRA_CONFIG_HOME", str(tmp_path))
+    provider = ModelProvider("beeline", available=True, endpoint="https://models.example/api?tenant=A")
+    facts = DiscoveryFacts(runtimes=(AgentRuntime("opencode", available=True),),
+                           providers=(provider,), models=(Model("Qwen", "beeline", available=True),))
+    # Only external discovery/launch capabilities are substituted. Compatibility,
+    # policy, target resolution and dispatch authorization are production code.
+    monkeypatch.setattr(serialize, "discover_execution_facts", lambda *a, **kw: facts)
+    monkeypatch.setattr("aichestra.execution.launch_strategies.discover_launches", lambda *a, **kw: (
+        LaunchCapability("opencode", "beeline", "Qwen", endpoint=provider.endpoint,
+                         strategy=LaunchStrategy.ORCA_EXISTING_TERMINAL, proven=True,
+                         launch_ref="bound-terminal"),))
+    cfg = {"roles": {"tests": {"runtime": "opencode", "provider": "beeline", "model": "Qwen"}}}
+    original, _, _ = serialize.resolve_mode_c_execution(cfg)
+    target = next(t for t in original if t.model and t.model.id == "Qwen")
+    assert target.dispatchable
+    save_contract(tmp_path, "r1", tmp_path, {"bindings": {"tests": target_contract_entry(target)}})
+    cfg["roles"]["tests"] = changed_role
+    if fault == "disabled":
+        cfg["execution"] = {"bindings": [{"runtime": "opencode", "provider": "beeline", "enabled": False}]}
+    calls = []
+    def run(argv, **kwargs):
+        calls.append(argv)
+        if argv[1] == "terminal":
+            return SimpleNamespace(returncode=0, stdout=json.dumps({"binding": {
+                "runtime": "opencode", "provider": "beeline", "model": "Qwen",
+                "endpoint": "https://models.example/api?tenant=B" if fault == "wrong-terminal" else provider.endpoint}}), stderr="")
+        data = {"task-list": {"tasks": [{"id": "t1", "run_id": "r1", "role": "tests"}]},
+                "run-use": {}, "worker-start": {"dispatchId": "d1"}}[argv[2]]
+        return SimpleNamespace(returncode=0, stdout=json.dumps(data), stderr="")
+    result = dispatch_role(role="tests", run_id="r1", task_id="t1", project_root=tmp_path,
+                           repo_root=tmp_path, config=cfg, binary="orca-test", run=run)
+    assert result["ok"] is (fault is None), result
+    assert any("worker-start" in c for c in calls) is (fault is None)
+    if fault is None:
+        assert result["execution_target_id"] == target.id
+        start = next(c for c in calls if "worker-start" in c)
+        assert start[start.index("--terminal") + 1] == "bound-terminal"
+        assert "--agent" not in start
+
+
+def test_endpoint_identity_preserves_tenant_without_exposing_it():
+    from aichestra.execution.roles import target_contract_entry, contract_endpoint_matches
+    from aichestra.execution.launch_strategies import extract_attested_binding
+    target = replace(fake_execution_targets()[0], endpoint="https://host/api/?tenant=A")
+    entry = target_contract_entry(target)
+    assert "tenant" not in entry["endpoint"]
+    assert contract_endpoint_matches(entry, "https://host/api?tenant=A")
+    assert not contract_endpoint_matches(entry, "https://host/api?tenant=B")
+    actual = extract_attested_binding({"effective": {"agent": "codex", "endpoint": target.endpoint}})
+    assert contract_endpoint_matches(entry, actual["endpoint"])
+    legacy = dict(entry)
+    del legacy["endpoint_fingerprint"]
+    assert not contract_endpoint_matches(legacy, target.endpoint)

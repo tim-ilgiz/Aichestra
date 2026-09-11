@@ -92,3 +92,14 @@
 
 T013/T022 still require live coordinator adoption and durable Orca launch receipts;
 these deterministic corrections do not claim live integration acceptance.
+
+## Resume / immutable target review corrections
+
+- [x] T035 Resume never creates or replaces a contract; cover missing, changed,
+  and unchanged contracts through run_all.
+- [x] T036 Resolve saved provider/model requirements through the production
+  compatibility pipeline after settings drift; preserve disabled restrictions.
+- [x] T037 Release prepared bootstrap resources on contract persistence failure.
+- [x] T038 Fingerprint full endpoint identity, preserving query in attestation.
+- [x] T039 Refuse unpinned agent fallback after terminal/model adapter failure;
+  pass existing terminal launch references to the adapter.

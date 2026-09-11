@@ -181,3 +181,14 @@ Fake CI providers are not live evidence.
 - Installed user config homes are trusted with package defaults, including when
   passed explicitly as --repo-root. Wheel smoke exercises all three command
   config boundaries, with no checkout imports or AICHESTRA_REPO_ROOT.
+
+- Resume MUST only load an existing contract, never create one. Missing or
+  changed policy fails closed; restore original settings or start a new Run.
+- Saved worker bindings participate as transient compatibility requirements,
+  before mutable role declarations, without overriding explicit restrictions.
+- Bootstrap resources remain Aichestra's cleanup responsibility until handed
+  to the Orca adapter. Persistence failures MUST release owned terminals.
+- Endpoint identity includes query/tenant via a fingerprint of the full
+  normalized URL. Sanitized coordinator URLs are not identity evidence.
+- Manual quota changes apply to a new Run with the remaining objective/context;
+  changing settings MUST NOT mutate the old Run's role contract.

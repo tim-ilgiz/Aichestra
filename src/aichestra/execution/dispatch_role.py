@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from aichestra.config.layering import resolve_config
-from aichestra.config.roles import ROLE_KEYS
+from aichestra.config.roles import ROLE_KEYS, RoleBinding
 from aichestra.execution.launch_strategies import (
     LaunchContext,
     adapter_for,
@@ -24,11 +24,11 @@ from aichestra.execution.launch_strategies import (
     serialize_prepared_launch,
 )
 from aichestra.execution.run_contract import load_contract, authorize_task
+from aichestra.execution.roles import contract_endpoint_matches
 from aichestra.execution.serialize import (
     ROLE_DISPATCH_OPERATION,
     resolve_mode_c_execution,
     serialize_execution_target,
-    safe_endpoint_for_context,
 )
 from aichestra.providers.orca import resolve_orca_binary
 from aichestra.repo import trusted_config_root, resolve_aichestra_config_root
@@ -156,7 +156,12 @@ def dispatch_role(
 
     if targets is None:
         try:
-            targets, _policy, _facts = resolve_mode_c_execution(cfg)
+            targets, _policy, _facts = resolve_mode_c_execution(
+                cfg, required_bindings=(RoleBinding(
+                    runtime=entry["runtime"], provider=entry["provider"],
+                    model=entry["model"],
+                ),),
+            )
         except ValueError as exc:
             return _payload({
                 "ok": False,
@@ -170,7 +175,7 @@ def dispatch_role(
                    and t.runtime.id == entry["runtime"]
                    and (t.provider.id if t.provider else None) == entry["provider"]
                    and (t.model.id if t.model else None) == entry["model"]
-                   and (safe_endpoint_for_context(t.endpoint) or "").rstrip("/") == (entry.get("endpoint") or "").rstrip("/")
+                   and contract_endpoint_matches(entry, t.endpoint)
                    and t.preparable]
         if len(matches) != 1:
             raise ValueError("Run contract target unavailable or disabled; refusing substitution")
@@ -221,6 +226,7 @@ def dispatch_role(
     launch_ctx = LaunchContext(
         binary=orca_binary,
         worktree=wt,
+        terminal_handle=target.launch_ref,
         run=run_fn,
     )
     proved = False
@@ -234,6 +240,11 @@ def dispatch_role(
                 prepared = adapter_for(target).prepare(target, launch_ctx)
             except ValueError:
                 # Already-proven native targets may use project agent ids.
+                from aichestra.execution.domain import LaunchStrategy
+                if (target.launch_strategy != LaunchStrategy.ORCA_NATIVE
+                        or target.provider is not None or target.model is not None
+                        or target.endpoint is not None):
+                    raise
                 from aichestra.execution.launch_strategies import PreparedLaunch
 
                 prepared = PreparedLaunch(

@@ -13,6 +13,8 @@ from .domain import Compatibility, ExecutionCapabilities
 
 def load_compatibility_bindings(
     config: Mapping[str, Any],
+    *,
+    required_bindings=(),
 ) -> tuple[Compatibility, ...]:
     """Load explicit bindings; invalid/incomplete rows are skipped fail-closed.
 
@@ -69,7 +71,9 @@ def load_compatibility_bindings(
     if "quota" in config and load_quota_policy(config).mode == "auto":
         roles.append(load_quota_policy(config).implement_fallback)
     from dataclasses import replace
-    for role in roles:
+    # Saved Run requirements precede mutable role declarations. Explicit and
+    # legacy compatibility restrictions above still remain authoritative.
+    for role in [*required_bindings, *roles]:
         if any((b.runtime, b.provider, b.model) == (role.runtime, role.provider, role.model) for b in bindings):
             continue
         pair = [b for b in bindings if (b.runtime, b.provider) == (role.runtime, role.provider)]

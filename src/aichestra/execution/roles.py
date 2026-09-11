@@ -1,6 +1,8 @@
 """Exact role resolution; no task graph or agent scheduling lives here."""
 from __future__ import annotations
 
+import hashlib
+
 from aichestra.config.roles import RoleBinding
 from aichestra.execution.domain import ExecutionTarget
 
@@ -27,6 +29,20 @@ class RoleBindingResolver:
         return {role: self.resolve(role, binding) for role, binding in bindings.items()}
 
 
+def endpoint_fingerprint(endpoint: str | None) -> str:
+    from .launch_strategies import _normalize_endpoint
+    return hashlib.sha256((_normalize_endpoint(endpoint) or "").encode("utf-8")).hexdigest()
+
+
+def contract_endpoint_matches(entry: dict, endpoint: str | None) -> bool:
+    fingerprint = entry.get("endpoint_fingerprint")
+    if fingerprint is not None:
+        return fingerprint == endpoint_fingerprint(endpoint)
+    # Legacy contracts only prove the endpoint they actually stored. Never
+    # equate a sanitized URL with an unseen tenant query or credentials.
+    return (entry.get("endpoint") or "").rstrip("/") == (endpoint or "").strip().rstrip("/")
+
+
 def target_contract_entry(target: ExecutionTarget) -> dict:
     """Typed role→target entry for POLICY_PACKAGE.role_dispatch_contract.
 
@@ -42,6 +58,7 @@ def target_contract_entry(target: ExecutionTarget) -> dict:
         "execution_target_id": target.id,
         "runtime": target.runtime.id,
         "endpoint": safe_endpoint_for_context(target.endpoint),
+        "endpoint_fingerprint": endpoint_fingerprint(target.endpoint),
         "provider": target.provider.id if target.provider else None,
         "model": target.model.id if target.model else None,
     }

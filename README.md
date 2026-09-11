@@ -134,13 +134,21 @@ candidates). Prefer `aichestra dispatch-role --run --task --role` to
 worker-start the exact bound target. Before handoff, Aichestra persists an
 immutable contract by Run id in the config home. Later settings changes do not
 retarget that Run; unavailable or disabled targets fail closed. Missing contracts
-require a new Run. Task role and same-Run association are checked before launch. Canonical task/worker receipts are audited for role, Run and
+require a new Run, including with `--resume-run-id`: resume never creates a
+contract and rejects changed policy. Restore the original settings to resume,
+or start a new Run to apply new settings. Dispatch of an existing Task resolves
+the saved runtime/provider/model independently of current role settings, while
+current availability and explicit compatibility restrictions remain authoritative.
+Endpoint fingerprints distinguish tenant/query differences without storing the
+full URL in the coordinator contract. Task role and same-Run association are
+checked before launch. Canonical task/worker receipts are audited for role, Run and
 effective runtime/provider/model/endpoint. Missing or mismatched evidence
 fails the Run. An Orca version that omits durable `launch.effective` cannot
 fully close live post-dispatch audit. Full live role/quota acceptance remains
 partial until coordinators adopt dispatch-role and receipts are proven live.
 
-`quota.mode=manual` stops and asks the operator to change settings.
+`quota.mode=manual` stops and asks the operator to change settings and start a
+new Run with the remaining objective/context; it cannot retarget the old Run.
 `quota.roles.implement` is the coding-worker fallback. Auto mode does **not**
 replace the coordinator LLM; coordinator quota is a separate failure
 (`orchestration.coordinator`). Inner-task implement fallback must have a prior

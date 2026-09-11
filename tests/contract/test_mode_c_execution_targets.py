@@ -729,7 +729,7 @@ def test_production_resolver_discovers_native_launch_contract(monkeypatch):
     from aichestra.execution.launch_strategies import NativeLaunch
     facts = DiscoveryFacts(runtimes=(AgentRuntime("acme-agent", available=True),))
     monkeypatch.setattr(module, "discover_execution_facts", lambda *a, **k: facts)
-    monkeypatch.setattr(module, "load_compatibility_bindings", lambda c: (Compatibility("acme-agent"),))
+    monkeypatch.setattr(module, "load_compatibility_bindings", lambda c, **kw: (Compatibility("acme-agent"),))
     monkeypatch.setattr("aichestra.providers.orca.resolve_orca_binary", lambda: "orca-test")
     monkeypatch.setattr("aichestra.execution.launch_strategies.LAUNCH_ADAPTERS", [NativeLaunch("acme-agent")])
     calls = []
@@ -838,3 +838,78 @@ def test_provisionable_targets_are_candidates_not_dispatchable(tmp_path, monkeyp
     assert "--repo-root" in list(inv.get("args") or [])
     assert LAUNCH_PROOF_OPERATION in (handoff.prompt or "")
     assert "prove-launch" in (handoff.prompt or "")
+
+
+def test_resume_never_creates_or_replaces_contract_and_cleans_bootstrap(tmp_path, monkeypatch):
+    from aichestra.execution.run_contract import _path, save_contract
+    from aichestra.execution.launch_strategies import PreparedLaunch
+    from tests.fakes.providers import fake_execution_targets
+    target = fake_execution_targets()[0]
+    closed = []
+    monkeypatch.setattr("aichestra.execution.launch_strategies.prove_bootstrap_launch",
+                        lambda *a: (target, PreparedLaunch(arguments=["--agent", "codex"],
+                                                          terminal_handle="owned-bridge", owns_terminal=True)))
+    monkeypatch.setattr("aichestra.execution.launch_strategies.abort_prepared",
+                        lambda prepared, ctx: closed.append(prepared.terminal_handle))
+    for existing in (False, True):
+        orca = fake_orca("success")
+        bindings = _bindings(tmp_path, orca=orca, targets=(target,))
+        bindings.aichestra_repo_root = str(tmp_path)
+        bindings.resume_run_id = "existing-run"
+        if existing:
+            save_contract(tmp_path, "existing-run", tmp_path, {"bindings": {"tests": {"runtime": "cursor"}}})
+        path = _path(tmp_path, "existing-run")
+        before = path.read_bytes() if path.exists() else None
+        state = ModeCRunController(bindings=bindings).run_all()
+        assert state.stopped
+        assert not any(r.role == MODE_C_HANDOFF_ROLE for r in orca.sent)
+        assert (path.read_bytes() if path.exists() else None) == before
+        assert closed[-1] == "owned-bridge"
+    assert len(closed) == 2
+
+
+def test_contract_persistence_error_releases_prepared_bootstrap(tmp_path, monkeypatch):
+    from aichestra.execution.launch_strategies import PreparedLaunch
+    from tests.fakes.providers import fake_execution_targets
+    target = fake_execution_targets()[0]
+    closed = []
+    monkeypatch.setattr("aichestra.execution.launch_strategies.prove_bootstrap_launch",
+                        lambda *a: (target, PreparedLaunch(arguments=["--agent", "codex"],
+                                                          terminal_handle="owned-bridge", owns_terminal=True)))
+    monkeypatch.setattr("aichestra.execution.launch_strategies.abort_prepared",
+                        lambda prepared, ctx: closed.append(prepared.terminal_handle))
+    def fail(*a):
+        raise OSError("disk full")
+    monkeypatch.setattr("aichestra.execution.run_contract.save_contract", fail)
+    orca = fake_orca("success")
+    bindings = _bindings(tmp_path, orca=orca, targets=(target,))
+    bindings.aichestra_repo_root = str(tmp_path)
+    state = ModeCRunController(bindings=bindings).run_all()
+    assert state.stopped
+    assert closed == ["owned-bridge"]
+    assert not any(r.role == MODE_C_HANDOFF_ROLE for r in orca.sent)
+
+
+def test_resume_with_matching_contract_hands_off_without_rewriting(tmp_path, monkeypatch):
+    from aichestra.execution.run_contract import _path
+    from tests.fakes.providers import fake_execution_targets
+    target = fake_execution_targets()[0]
+    initial = _bindings(tmp_path, orca=fake_orca("success"), targets=(target,))
+    initial.aichestra_repo_root = str(tmp_path)
+    first = ModeCRunController(bindings=initial).run_all()
+    assert not first.stopped
+    run_id = first.metadata["orca_run_id"]
+    path = _path(tmp_path, run_id)
+    before = path.read_bytes()
+    def unexpected_save(*a):
+        raise AssertionError("resume must never call save_contract")
+    monkeypatch.setattr("aichestra.execution.run_contract.save_contract", unexpected_save)
+    orca = fake_orca("success")
+    resumed = _bindings(tmp_path, orca=orca, targets=(target,))
+    resumed.aichestra_repo_root = str(tmp_path)
+    resumed.resume_run_id = run_id
+    state = ModeCRunController(bindings=resumed).run_all()
+    assert not state.stopped
+    assert state.metadata["orca_run_id"] == run_id
+    assert path.read_bytes() == before
+    assert any(r.role == MODE_C_HANDOFF_ROLE for r in orca.sent)

@@ -68,7 +68,7 @@ def _normalize_endpoint(endpoint: str | None) -> str | None:
     if not parts.scheme or not parts.netloc:
         return text
     path = parts.path.rstrip("/") or ""
-    return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+    return urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
 
 
 def expected_binding(target: ExecutionTarget) -> dict[str, str | None]:

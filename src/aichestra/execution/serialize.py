@@ -366,6 +366,7 @@ def build_execution_policy(config: Mapping[str, Any]) -> ExecutionPolicy:
 def resolve_mode_c_execution(
     config: Mapping[str, Any],
     *,
+    required_bindings=(),
     known_launches: tuple[LaunchCapability, ...] | None = None,
     machine=None,
     runtime_binaries: Mapping[str, tuple[str, ...]] | None = None,
@@ -387,7 +388,7 @@ def resolve_mode_c_execution(
         provider_registry=provider_registry,
         provider_probes=provider_probes,
     )
-    bindings = load_compatibility_bindings(config)
+    bindings = load_compatibility_bindings(config, required_bindings=required_bindings)
     policy = build_execution_policy(config)
     if known_launches is None:
         from .launch_strategies import discover_launches

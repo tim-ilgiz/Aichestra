@@ -434,6 +434,7 @@ class ModeCRunController:
         self._quota_attempted = False
         self._bootstrap_target = None
         self._prepared_bootstrap_launch = None
+        self._bootstrap_launch_context = None
         self._inflight_handoff_context: dict[str, Any] | None = None
 
     def apply_maintenance_review(self, **kwargs: Any) -> MaintenanceReviewDecision:
@@ -563,6 +564,7 @@ class ModeCRunController:
 
             self._bootstrap_target = bootstrap
             self._prepared_bootstrap_launch = prepared
+            self._bootstrap_launch_context = launch_ctx
             self.state.metadata["bootstrap_execution_target"] = serialize_execution_target(
                 bootstrap
             )
@@ -620,6 +622,10 @@ class ModeCRunController:
             self.state.current_gate = None
             return self.state
         finally:
+            if self._prepared_bootstrap_launch is not None:
+                from aichestra.execution.launch_strategies import abort_prepared
+                abort_prepared(self._prepared_bootstrap_launch, self._bootstrap_launch_context)
+                self._prepared_bootstrap_launch = None
             self._cleanup_attachment_staging()
 
     def advance(self) -> GateKind | None:
@@ -882,11 +888,16 @@ class ModeCRunController:
         from aichestra.execution.launch_strategies import serialize_prepared_launch
 
         package = self._build_policy_package(run_id)
-        from aichestra.execution.run_contract import save_contract
+        from aichestra.execution.run_contract import load_contract, save_contract
         from aichestra.repo import resolve_aichestra_config_root
         try:
-            save_contract(resolve_aichestra_config_root(repo_root=package.aichestra_repo_root or None),
-                          run_id, package.project_root, package.role_dispatch_contract)
+            home = resolve_aichestra_config_root(repo_root=package.aichestra_repo_root or None)
+            if self.state.metadata.get("orca_run_resumed"):
+                saved = load_contract(home, run_id, package.project_root)
+                if saved != package.role_dispatch_contract:
+                    raise ValueError("Run contract differs from current policy; restore the original settings or start a new Mode C Run")
+            else:
+                save_contract(home, run_id, package.project_root, package.role_dispatch_contract)
         except (OSError, ValueError) as exc:
             self._fail_gate(GateKind.ORCA_HANDOFF, detail=f"Cannot persist Run contract: {exc}")
             return False
@@ -1548,6 +1559,10 @@ class ModeCRunController:
 
         root = self._effective_project_root()
         try:
+            # The Orca adapter now owns bootstrap cleanup, including failed starts.
+            # Before this boundary run_all's finally owns any prepared resource.
+            if role == MODE_C_HANDOFF_ROLE:
+                self._prepared_bootstrap_launch = None
             result = orca.execute_task(
                 ProviderTaskRequest(
                     prompt=prompt,

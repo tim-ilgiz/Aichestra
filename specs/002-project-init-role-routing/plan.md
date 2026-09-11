@@ -81,3 +81,9 @@ Persist the role contract in the resolved config home before handoff. Dispatch
 reads that contract, validates canonical Task membership, and resolves only its
 exact target against currently enabled discovery. Quota fallback is an explicit
 reason guarded by primary-worker quota evidence; Orca still owns scheduling.
+
+Resume uses load-only contract validation and rejects policy drift. Dispatch
+adds the saved binding to compatibility requirements before mutable roles,
+preserving explicit restrictions. Track bootstrap ownership until adapter
+handoff and release on pre-handoff failure. Use full endpoint fingerprints
+for immutable identity while retaining sanitized URLs for coordinator context.
