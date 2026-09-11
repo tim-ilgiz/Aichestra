@@ -96,9 +96,14 @@ def save_dispatch_role_receipt(home, receipt: Mapping) -> dict:
         row["launch_effective"] = dict(effective)
     path = _dispatch_role_receipt_path(home, row["run_id"], row["dispatch_id"])
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Serialize fully before exclusive create so a mid-write OSError cannot leave
+    # an empty/partial *.json that poisons load_dispatch_role_receipts forever.
+    payload = json.dumps(row, sort_keys=True).encode("utf-8")
+    created = False
     try:
-        with path.open("x", encoding="utf-8") as stream:
-            json.dump(row, stream, sort_keys=True)
+        with path.open("xb") as stream:
+            created = True
+            stream.write(payload)
         return row
     except FileExistsError:
         try:
@@ -119,6 +124,13 @@ def save_dispatch_role_receipt(home, receipt: Mapping) -> dict:
                 "with different evidence"
             )
         return dict(existing)
+    except OSError:
+        if created:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
 
 
 def load_dispatch_role_receipts(home, run_id) -> list[dict]:
@@ -222,8 +234,13 @@ def authorize_task(
     from_handle: str | None = None,
 ):
     def call(*args):
-        result = run([binary, "orchestration", *args],
-                     check=False, capture_output=True, text=True, timeout=120)
+        result = run(
+            [binary, "orchestration", *args, "--json"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
         if result.returncode:
             raise ValueError("Cannot read canonical Orca state")
         payload = json.loads(result.stdout)

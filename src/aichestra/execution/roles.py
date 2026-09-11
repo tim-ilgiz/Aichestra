@@ -219,24 +219,43 @@ def failure_code_from_durable_messages(
 
     ``lastFailure`` may omit ``failure`` while the matching ``worker_done``
     message still carries ``payload.failure``. Match by message id and/or
-    ``payload.dispatchId``.
+    ``payload.dispatchId``. When both identifiers are available they MUST
+    agree; conflicting canonical evidence is ignored (fail closed).
     """
     if not isinstance(dispatch_id, str) or not dispatch_id:
         return None
     if not isinstance(messages, list):
         return None
+    want_message = (
+        message_id.strip()
+        if isinstance(message_id, str) and message_id.strip()
+        else None
+    )
     for message in messages:
         if not isinstance(message, Mapping):
             continue
+        if message.get("type") != "worker_done":
+            continue
         msg_id = message.get("id") or message.get("messageId")
+        if isinstance(msg_id, str):
+            msg_id = msg_id.strip() or None
+        else:
+            msg_id = None
         body = _parse_object(message.get("payload"))
         if not isinstance(body, Mapping):
             continue
         body_dispatch = body.get("dispatchId") or body.get("dispatch_id")
-        matched = (
-            (isinstance(message_id, str) and message_id and msg_id == message_id)
-            or body_dispatch == dispatch_id
-        )
+        if isinstance(body_dispatch, str):
+            body_dispatch = body_dispatch.strip() or None
+        else:
+            body_dispatch = None
+        id_match = want_message is not None and msg_id == want_message
+        dispatch_match = body_dispatch == dispatch_id
+        if want_message is not None and body_dispatch is not None:
+            # Both sides of the evidence are present: require agreement.
+            matched = id_match and dispatch_match
+        else:
+            matched = id_match or dispatch_match
         if not matched:
             continue
         code = receipt_failure_code(body) or receipt_failure_code(

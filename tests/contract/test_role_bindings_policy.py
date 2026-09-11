@@ -1060,3 +1060,184 @@ def test_dispatch_role_receipts_are_per_dispatch_files(tmp_path):
     assert path_a.parent.name.endswith(".dispatch-role")
     loaded = load_dispatch_role_receipts(tmp_path, "r1")
     assert {row["dispatch_id"] for row in loaded} == {"d-a", "d-b"}
+
+
+def test_authorize_task_reads_orca_state_in_json_mode(tmp_path):
+    """authorize_task must append --json; plain text Orca output is not parseable."""
+    import json
+    from types import SimpleNamespace
+    from aichestra.execution.run_contract import authorize_task
+    from aichestra.execution.roles import target_contract_entry
+
+    primary = fake_execution_targets("codex")[0]
+    fallback = fake_execution_targets("cursor")[0]
+    contract = {
+        "bindings": {"implement": target_contract_entry(primary)},
+        "quota": {
+            "mode": "auto",
+            "roles": {"implement": target_contract_entry(fallback)},
+        },
+    }
+    task = {"id": "t1", "run_id": "r1", "title": "implement"}
+    worker = {
+        "dispatchId": "d1",
+        "taskId": "t1",
+        "runId": "r1",
+        "completedAt": "2026-01-01T00:00:00Z",
+        "lastFailure": json.dumps({
+            "messageId": "msg_1",
+            "outcome": "failed",
+            "completedAt": "2026-01-01T00:00:00Z",
+        }),
+    }
+    show = {
+        "worker": {
+            "dispatchId": "d1",
+            "taskId": "t1",
+            "runId": "r1",
+            "state": "failed",
+            "startOptions": {"launch": {"effective": {"agent": "codex"}}},
+        },
+        "dispatch": {**worker, "id": "d1", "status": "failed"},
+    }
+    mail = {
+        "ok": True,
+        "result": {
+            "messages": [{
+                "id": "msg_1",
+                "type": "worker_done",
+                "payload": json.dumps({
+                    "dispatchId": "d1",
+                    "outcome": "failed",
+                    "failure": "quota",
+                }),
+            }],
+        },
+    }
+    seen = []
+
+    def run(argv, **kwargs):
+        assert argv[0] == "orca-test"
+        assert argv[1] == "orchestration"
+        assert argv[-1] == "--json", argv
+        command = argv[2]
+        seen.append(command)
+        data = {
+            "task-list": {"tasks": [task]},
+            "worker-list": {"workers": [worker]},
+            "worker-show": show,
+            "run-show": {"result": {"run": {"coordinator_handle": "term-1"}}},
+            "check": mail,
+        }[command]
+        return SimpleNamespace(returncode=0, stdout=json.dumps(data), stderr="")
+
+    authorize_task(
+        "orca-test",
+        run,
+        "r1",
+        "t1",
+        "implement",
+        contract,
+        "quota-fallback",
+    )
+    for command in ("task-list", "worker-list", "worker-show", "run-show", "check"):
+        assert command in seen, seen
+
+
+def test_save_dispatch_role_receipt_cleans_up_partial_write(tmp_path, monkeypatch):
+    """A write failure after exclusive create must not leave corrupt receipt files."""
+    from pathlib import Path
+    from aichestra.execution.run_contract import (
+        _dispatch_role_receipt_path,
+        _dispatch_role_receipts_dir,
+        load_dispatch_role_receipts,
+        save_dispatch_role_receipt,
+    )
+
+    target = fake_execution_targets()[0]
+    task, worker, _ = receipt(dispatch="d-partial")
+    row = adopted(task, worker, target)
+    path = _dispatch_role_receipt_path(tmp_path, "r1", "d-partial")
+    real_open = Path.open
+
+    def flaky_open(self, mode="r", *args, **kwargs):
+        if "x" in mode and self == path:
+            handle = real_open(self, mode, *args, **kwargs)
+
+            class FailingStream:
+                def write(self, _data):
+                    raise OSError("disk full during write")
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *exc):
+                    handle.close()
+                    return False
+
+            return FailingStream()
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", flaky_open)
+    with pytest.raises(OSError, match="disk full"):
+        save_dispatch_role_receipt(tmp_path, row)
+    directory = _dispatch_role_receipts_dir(tmp_path, "r1")
+    assert not path.exists()
+    leftover = list(directory.glob("*.json")) if directory.is_dir() else []
+    assert leftover == []
+    assert load_dispatch_role_receipts(tmp_path, "r1") == []
+
+
+def test_durable_failure_resolver_rejects_conflicting_identifiers():
+    """messageId match must not override a contradictory payload.dispatchId."""
+    import json
+    from aichestra.execution.roles import (
+        failure_code_from_durable_messages,
+        resolve_worker_failure,
+    )
+
+    conflict = [{
+        "id": "msg_1",
+        "type": "worker_done",
+        "payload": json.dumps({
+            "dispatchId": "d999",
+            "outcome": "failed",
+            "failure": "quota",
+        }),
+    }]
+    assert failure_code_from_durable_messages(
+        "d1", conflict, message_id="msg_1"
+    ) is None
+
+    wrong_type = [{
+        "id": "msg_1",
+        "type": "ask",
+        "payload": json.dumps({
+            "dispatchId": "d1",
+            "outcome": "failed",
+            "failure": "quota",
+        }),
+    }]
+    assert failure_code_from_durable_messages(
+        "d1", wrong_type, message_id="msg_1"
+    ) is None
+
+    ok = [{
+        "id": "msg_1",
+        "type": "worker_done",
+        "payload": json.dumps({
+            "dispatchId": "d1",
+            "outcome": "failed",
+            "failure": "quota",
+        }),
+    }]
+    assert failure_code_from_durable_messages(
+        "d1", ok, message_id="msg_1"
+    ) == "quota"
+
+    worker = {
+        "dispatchId": "d1",
+        "lastFailure": json.dumps({"messageId": "msg_1", "outcome": "failed"}),
+    }
+    assert resolve_worker_failure(worker, durable_messages=conflict) is None
+    assert resolve_worker_failure(worker, durable_messages=ok) == "quota"
