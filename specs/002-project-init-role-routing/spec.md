@@ -72,7 +72,8 @@ including Codex, Cursor, OpenCode, and local models.
 ### US3 — Mode C honors coordinator vs worker bindings (P1)
 
 On `orchestrate`, POLICY_PACKAGE includes `orchestration.coordinator`,
-`role_bindings` (workers only), `role_dispatch_contract`, and `quota_policy`.
+`role_bindings` (workers only), `role_dispatch_contract`, `quota_policy`, and
+a deterministic `research_artifact` hint (`none` | `file` | `compacted`).
 Bootstrap uses the coordinator target. Worker Dispatch MUST use the exact
 bound ExecutionTarget id from the contract.
 
@@ -89,6 +90,10 @@ bound ExecutionTarget id from the contract.
    (`--no-codex` when that binding is codex), Mode C fails closed before silent
    substitution. Disabling implement does not remap the coordinator, and
    disabling the coordinator does not remap implement.
+5. Package contains deterministic `research_artifact` (`none`|`file`|`compacted`)
+   plus notes path/thresholds. SMALL single-step without `--query` → `none`;
+   explicit query / MEDIUM/LARGE / resume → `file`; local→cloud handoff or
+   large volume → `compacted`. Coordinator MUST follow; not LLM discretion.
 
 ### US4 — Quota notify vs auto fallback for coding workers (P2)
 

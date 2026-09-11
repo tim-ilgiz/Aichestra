@@ -103,3 +103,8 @@ these deterministic corrections do not claim live integration acceptance.
 - [x] T038 Fingerprint full endpoint identity, preserving query in attestation.
 - [x] T039 Refuse unpinned agent fallback after terminal/model adapter failure;
   pass existing terminal launch references to the adapter.
+
+## Research artifact policy
+
+- [x] T040 Emit deterministic `research_artifact` (`none`|`file`|`compacted`)
+  in POLICY_PACKAGE with coordinator MUST instructions; not a phase scheduler.

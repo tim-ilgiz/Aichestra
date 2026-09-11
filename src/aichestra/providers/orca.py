@@ -817,6 +817,16 @@ class OrcaProvider(ProviderAdapter):
                 "and never replace this coordinator). "
                 "Do not invent additional hard-coded phase→product maps beyond "
                 "role_dispatch_contract. "
+                "Research artifacts (POLICY_PACKAGE.research_artifact — mandatory "
+                "policy, not LLM discretion; Cursor/Codex MUST NOT invent MD files): "
+                "none = do not write research_artifact_notes_path; put short findings "
+                "only in worker_done body / task result for the next Task spec; "
+                "file = write durable notes to research_artifact_notes_path "
+                "(and/or compact SUMMARY); compacted = put research_compact SUMMARY "
+                "in the next Task context and write a file only if durable audit is "
+                "required. If live research output exceeds research_artifact_file_chars "
+                "while mode is none, escalate to file; if cloud handoff or output "
+                "exceeds research_artifact_compact_chars, use compacted. "
                 "Unsupported targets MUST NOT be dispatched. "
                 "Legacy preferred_lead/local_* fields are secondary compatibility seams only. "
                 "Ownership:\nYou own the dynamic DAG: create arbitrary Tasks/Dispatches through Orca. "
@@ -877,6 +887,11 @@ class OrcaProvider(ProviderAdapter):
                         "speckit_scale",
                         "speckit_steps",
                         "provider_policy",
+                        "research_query",
+                        "research_artifact",
+                        "research_artifact_notes_path",
+                        "research_artifact_file_chars",
+                        "research_artifact_compact_chars",
                     )
                     if request.context.get(key) is not None
                 }

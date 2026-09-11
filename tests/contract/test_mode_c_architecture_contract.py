@@ -448,6 +448,50 @@ def test_local_capabilities_reach_orca_policy(tmp_path: Path) -> None:
     assert package["local_model_ref"] == "llava:7b"
 
 
+def test_research_artifact_policy_in_package(tmp_path: Path) -> None:
+    """Deterministic research_artifact hint — not LLM MD invention."""
+    from aichestra.orchestration.research_compact import RESEARCH_NOTES_PATH
+
+    orca = fake_orca("success")
+    # SMALL typo fix → none (live-test shape).
+    small = ModeCRunController(
+        mode=Mode.ORCHESTRATED,
+        bindings=_small_bindings(tmp_path, orca=orca, task_prompt="fix one-line typo"),
+    ).run_all()
+    assert not small.failed, small.failed
+    pkg = small.metadata["mode_c_policy_package"]
+    assert pkg["research_artifact"] == "none"
+    assert pkg["research_artifact_notes_path"] == RESEARCH_NOTES_PATH
+    assert pkg["speckit_scale"] == "small"
+
+    orca2 = fake_orca("success")
+    with_query = ModeCRunController(
+        mode=Mode.ORCHESTRATED,
+        bindings=_small_bindings(
+            tmp_path,
+            orca=orca2,
+            task_prompt="fix one-line typo",
+            research_query="auth module",
+        ),
+    ).run_all()
+    assert not with_query.failed, with_query.failed
+    assert with_query.metadata["mode_c_policy_package"]["research_artifact"] == "file"
+
+    orca3 = fake_orca("success")
+    medium = ModeCRunController(
+        mode=Mode.ORCHESTRATED,
+        bindings=_small_bindings(
+            tmp_path,
+            orca=orca3,
+            task_prompt="refactor across 12 files in multi-package monorepo",
+        ),
+    ).run_all()
+    assert not medium.failed, medium.failed
+    med_pkg = medium.metadata["mode_c_policy_package"]
+    assert med_pkg["speckit_scale"] == "medium"
+    assert med_pkg["research_artifact"] == "file"
+
+
 def test_verify_auto_detect_python(tmp_path: Path) -> None:
     from aichestra.orchestration.verification import detect_verification_commands
 

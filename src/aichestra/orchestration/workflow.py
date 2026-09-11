@@ -78,6 +78,12 @@ from aichestra.orchestration.project_context import (
     ProjectContext,
     discover_project_context,
 )
+from aichestra.orchestration.research_compact import (
+    RESEARCH_ARTIFACT_COMPACT_CHARS,
+    RESEARCH_ARTIFACT_FILE_CHARS,
+    RESEARCH_NOTES_PATH,
+    resolve_research_artifact,
+)
 from aichestra.orchestration.roles import select_lead
 from aichestra.orchestration.speckit_policy import (
     SpecKitPath,
@@ -97,7 +103,7 @@ from aichestra.providers.base import (
     ProviderTaskRequest,
     ProviderTaskResult,
 )
-from aichestra.execution.domain import ExecutionPolicy, ExecutionTarget
+from aichestra.execution.domain import ExecutionPolicy, ExecutionTarget, Locality
 from aichestra.execution.serialize import (
     CANONICAL_EXECUTION_FIELDS,
     COORDINATOR_GATES,
@@ -348,12 +354,21 @@ class ModeCPolicyPackage:
     quota_policy: dict[str, Any] = field(default_factory=dict)
     coordinator_binding: dict[str, Any] = field(default_factory=dict)
     role_dispatch_contract: dict[str, Any] = field(default_factory=dict)
+    # Deterministic research output policy for the coordinator (not a phase).
+    research_artifact: str = "none"
+    research_artifact_notes_path: str = RESEARCH_NOTES_PATH
+    research_artifact_file_chars: int = RESEARCH_ARTIFACT_FILE_CHARS
+    research_artifact_compact_chars: int = RESEARCH_ARTIFACT_COMPACT_CHARS
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "run_id": self.run_id,
             "task_prompt": self.task_prompt,
             "research_query": self.research_query,
+            "research_artifact": self.research_artifact,
+            "research_artifact_notes_path": self.research_artifact_notes_path,
+            "research_artifact_file_chars": self.research_artifact_file_chars,
+            "research_artifact_compact_chars": self.research_artifact_compact_chars,
             "project_root": self.project_root,
             "aichestra_repo_root": self.aichestra_repo_root,
             "project_context": dict(self.project_context),
@@ -1347,12 +1362,22 @@ class ModeCRunController:
             if t.provisionable and t.id not in proven_by_id
         )
         serialized_policy = serialize_execution_policy(self.bindings.execution_policy)
+        explicit_query = bool((self.bindings.research_query or "").strip())
+        research_artifact = resolve_research_artifact(
+            speckit_scale=str(scale),
+            speckit_steps=tuple(str(s) for s in steps),
+            explicit_research_query=explicit_query,
+            resume_or_audit=bool(self.state.metadata.get("orca_run_resumed")),
+            cloud_handoff=self._research_cloud_handoff_signal(),
+            research_useful=bool(self.state.metadata.get("research_useful_hint", True)),
+        )
         package = ModeCPolicyPackage(
             run_id=run_id,
             task_prompt=self.bindings.task_prompt or "Mode C task",
             research_query=self.bindings.research_query
             or self.bindings.task_prompt
             or "",
+            research_artifact=research_artifact,
             project_root=str(self.bindings.project_root or ""),
             aichestra_repo_root=str(self.bindings.aichestra_repo_root or ""),
             project_context=project_ctx,
@@ -1395,6 +1420,28 @@ class ModeCRunController:
 
         assert_role_dispatch_package_consistent(package.to_dict())
         return package
+
+    def _research_cloud_handoff_signal(self) -> bool:
+        """True when local research material will cross to a cloud consumer.
+
+        Compaction targets the local→cloud boundary (FR-053), not merely the
+        presence of a cloud runtime. Role bindings alone do not imply this.
+        """
+        local_source = bool(self.bindings.local_enabled)
+        research = self._resolved_roles.get("research")
+        if research is not None and research.locality == Locality.LOCAL:
+            local_source = True
+
+        cloud_consumer = False
+        implement = self._resolved_roles.get("implement")
+        if implement is not None and implement.locality == Locality.CLOUD:
+            cloud_consumer = True
+        if (
+            self._coordinator_target is not None
+            and self._coordinator_target.locality == Locality.CLOUD
+        ):
+            cloud_consumer = True
+        return bool(local_source and cloud_consumer)
 
     def _effective_project_root(self) -> str | None:
         adopted = self.state.metadata.get("orca_worktree_path")
