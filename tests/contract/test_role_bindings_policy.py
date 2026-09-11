@@ -51,6 +51,29 @@ def test_canonical_receipts_enforce_role_model_and_run():
         audit()
 
 
+def test_validate_role_receipts_endpoint_v1_matches_launch_proof():
+    """Post-dispatch audit must use the same /api ≡ /api/v1 endpoint identity."""
+    target = replace(
+        fake_execution_targets()[0],
+        endpoint="https://models.example/api?tenant=A",
+    )
+    task, worker, payload = receipt()
+    payload["launch"]["effective"]["endpoint"] = (
+        "https://models.example/api/v1?tenant=A"
+    )
+    assert validate_role_receipts(
+        "r1", [task], [worker], {"d1": payload}, {"tests": target}
+    )["ok"]
+
+    payload["launch"]["effective"]["endpoint"] = (
+        "https://models.example/api/v1?tenant=B"
+    )
+    with pytest.raises(ValueError, match="violates binding"):
+        validate_role_receipts(
+            "r1", [task], [worker], {"d1": payload}, {"tests": target}
+        )
+
+
 def test_fallback_receipt_requires_auto_exact_target_and_prior_quota():
     primary = fake_execution_targets()[0]
     fallback = fake_execution_targets("cursor")[0]

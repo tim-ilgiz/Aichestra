@@ -82,6 +82,52 @@ def test_cloud_handoff_wins_over_small() -> None:
     )
 
 
+def test_cloud_handoff_signal_requires_local_research_path() -> None:
+    """local_enabled alone must not imply local→cloud research handoff."""
+    from dataclasses import replace
+
+    from aichestra.execution.domain import Locality
+    from aichestra.orchestration.workflow import Mode, ModeCRunController, WorkflowBindings
+    from tests.fakes.providers import fake_execution_targets
+
+    cloud = fake_execution_targets()[0]
+    local = replace(cloud, locality=Locality.LOCAL)
+    ctrl = ModeCRunController(
+        mode=Mode.ORCHESTRATED,
+        bindings=WorkflowBindings(
+            execution_targets=fake_execution_targets(),
+            local_enabled=True,
+            task_prompt="fix one-line typo",
+        ),
+    )
+    ctrl._coordinator_target = cloud
+
+    # Capability + cloud coordinator, no research role → not a handoff.
+    assert ctrl._research_cloud_handoff_signal() is False
+
+    # Local research bound but SMALL without query → research not expected.
+    ctrl._resolved_roles = {"research": local, "implement": cloud}
+    assert ctrl._research_expected_for_task() is False
+    assert ctrl._research_cloud_handoff_signal() is False
+
+    # Explicit research path + local research + cloud consumer → compacted.
+    ctrl.bindings.research_query = "auth module"
+    assert ctrl._research_expected_for_task() is True
+    assert ctrl._research_cloud_handoff_signal() is True
+    assert (
+        resolve_research_artifact(
+            speckit_scale="small",
+            explicit_research_query=True,
+            cloud_handoff=True,
+        )
+        == "compacted"
+    )
+
+    # Cloud research consumer path is not a local→cloud handoff.
+    ctrl._resolved_roles = {"research": cloud, "implement": cloud}
+    assert ctrl._research_cloud_handoff_signal() is False
+
+
 def test_research_disabled_forces_none() -> None:
     assert (
         resolve_research_artifact(

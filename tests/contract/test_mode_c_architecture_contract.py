@@ -464,6 +464,18 @@ def test_research_artifact_policy_in_package(tmp_path: Path) -> None:
     assert pkg["research_artifact_notes_path"] == RESEARCH_NOTES_PATH
     assert pkg["speckit_scale"] == "small"
 
+    # local_enabled is capability, not a local→cloud research handoff.
+    orca_local = fake_orca("success")
+    local_cap = _small_bindings(
+        tmp_path, orca=orca_local, task_prompt="fix one-line typo"
+    )
+    local_cap.local_enabled = True
+    local_state = ModeCRunController(
+        mode=Mode.ORCHESTRATED, bindings=local_cap
+    ).run_all()
+    assert not local_state.failed, local_state.failed
+    assert local_state.metadata["mode_c_policy_package"]["research_artifact"] == "none"
+
     orca2 = fake_orca("success")
     with_query = ModeCRunController(
         mode=Mode.ORCHESTRATED,

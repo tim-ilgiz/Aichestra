@@ -168,7 +168,10 @@ def validate_role_receipts(run_id, tasks, workers, receipts, role_targets,
         expected = bootstrap_target if role == "mode_c_handoff" else role_targets.get(role)
         if expected is None:
             raise ValueError(f"Task {task_id} has undeclared role {role!r}")
-        from aichestra.execution.launch_strategies import receipt_launch
+        from aichestra.execution.launch_strategies import (
+            binding_matches_target,
+            receipt_launch,
+        )
 
         # Prefer top-level launch; accept Orca startOptions.launch.effective.
         # Bare startOptions.agent is requested preference only — not evidence.
@@ -183,10 +186,8 @@ def validate_role_receipts(run_id, tasks, workers, receipts, role_targets,
             raise ValueError(f"Dispatch {dispatch} has no effective launch binding")
 
         def matches(target):
-            return (actual["runtime"] == target.runtime.id
-                    and actual["provider"] == (target.provider.id if target.provider else None)
-                    and (target.model is None or actual["model"] == target.model.id)
-                    and (actual["endpoint"] or "").rstrip("/") == (target.endpoint or "").rstrip("/"))
+            # Same comparator as launch proof — never a divergent endpoint check.
+            return binding_matches_target(actual, target)
 
         if not matches(expected):
             prior = [r for r in receipts.values() if r is not payload]

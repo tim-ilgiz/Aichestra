@@ -1421,27 +1421,44 @@ class ModeCRunController:
         assert_role_dispatch_package_consistent(package.to_dict())
         return package
 
+    def _research_expected_for_task(self) -> bool:
+        """Whether this invocation is expected to produce research output.
+
+        Static approximation until a coordinator creates a research Task.
+        ``local_enabled`` is capability only and MUST NOT imply research.
+        """
+        if bool((self.bindings.research_query or "").strip()):
+            return True
+        if bool(self.state.metadata.get("orca_run_resumed")):
+            return True
+        path = self.state.metadata.get("speckit_path") or {}
+        scale = str(path.get("scale") or "small").strip().lower()
+        if scale in {"medium", "large", "large_high_risk"}:
+            return True
+        steps = path.get("steps") or ()
+        return any(str(s).strip().lower() == "research" for s in steps)
+
     def _research_cloud_handoff_signal(self) -> bool:
         """True when local research material will cross to a cloud consumer.
 
         Compaction targets the local→cloud boundary (FR-053), not merely the
-        presence of a cloud runtime. Role bindings alone do not imply this.
+        presence of a cloud runtime or ``local_enabled`` capability.
         """
-        local_source = bool(self.bindings.local_enabled)
         research = self._resolved_roles.get("research")
-        if research is not None and research.locality == Locality.LOCAL:
-            local_source = True
+        if (
+            research is None
+            or research.locality != Locality.LOCAL
+            or not self._research_expected_for_task()
+        ):
+            return False
 
-        cloud_consumer = False
         implement = self._resolved_roles.get("implement")
         if implement is not None and implement.locality == Locality.CLOUD:
-            cloud_consumer = True
-        if (
+            return True
+        return (
             self._coordinator_target is not None
             and self._coordinator_target.locality == Locality.CLOUD
-        ):
-            cloud_consumer = True
-        return bool(local_source and cloud_consumer)
+        )
 
     def _effective_project_root(self) -> str | None:
         adopted = self.state.metadata.get("orca_worktree_path")

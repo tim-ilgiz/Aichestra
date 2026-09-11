@@ -156,6 +156,28 @@ def _endpoints_equal(left: str | None, right: str | None) -> bool:
     return _with_v1_path(a) == _with_v1_path(b)
 
 
+def binding_matches_target(
+    actual: Mapping[str, Any],
+    target: ExecutionTarget,
+) -> bool:
+    """Compare an extracted attested binding to a contract ExecutionTarget.
+
+    Shared by post-dispatch receipt audit and any caller that already holds
+    ``extract_attested_binding`` output. Endpoint identity uses the same
+    ``_endpoints_equal`` semantics as launch proof (``/api`` ≡ ``/api/v1`` with
+    the same query), so pre- and post-dispatch cannot disagree.
+    """
+    return (
+        actual.get("runtime") == target.runtime.id
+        and actual.get("provider") == (target.provider.id if target.provider else None)
+        and (target.model is None or actual.get("model") == target.model.id)
+        and _endpoints_equal(
+            actual.get("endpoint") if isinstance(actual.get("endpoint"), str) else None,
+            target.endpoint,
+        )
+    )
+
+
 @dataclass(frozen=True)
 class LaunchContext:
     """Runtime inputs for multi-step launches (bridge / existing terminal)."""
