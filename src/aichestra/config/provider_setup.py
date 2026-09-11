@@ -21,6 +21,7 @@ from aichestra.config.layering import (
     save_machine_local,
 )
 from aichestra.execution.runtimes import DEFAULT_RUNTIME_BINARIES
+from aichestra.local_runtime.http import validate_local_endpoint
 
 _PROVIDER_ID = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 _RUNTIME_ID = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
@@ -68,9 +69,7 @@ def register_ollama_provider(
     pair_opencode: bool = True,
     repo_root: Path | None = None,
 ) -> dict[str, Any]:
-    endpoint = str(endpoint).strip().rstrip("/")
-    if not endpoint:
-        raise ValueError("ollama endpoint must be non-empty")
+    endpoint = validate_local_endpoint(endpoint)
     patch: dict[str, Any] = {
         "local": {"enabled": bool(enable_local), "ollama_host": endpoint},
         "execution": {
@@ -104,9 +103,7 @@ def register_openai_compatible_provider(
     API keys or env-var names here.
     """
     pid = validate_provider_id(provider_id)
-    endpoint = str(endpoint).strip().rstrip("/")
-    if not endpoint:
-        raise ValueError("endpoint must be non-empty")
+    endpoint = validate_local_endpoint(endpoint)
     entry: dict[str, Any] = {
         "enabled": True,
         "endpoint": endpoint,
@@ -253,6 +250,7 @@ def discover_orca_agent_hints(
             "available": bool(available),
             "detail": detail,
             "source": "orca.account.list",
+            "authenticated_in_orca": bool(available),
         }
 
     for kind in ("claude", "codex"):

@@ -125,6 +125,20 @@ def resolve_config(
     project: dict[str, Any] = {}
     if project_root is not None:
         project = load_json(Path(project_root) / ".aichestra" / "project.json")
+    # Project policy may select/disable providers, but cannot supply connections.
+    project = copy.deepcopy(project)
+    project_local = project.get("local")
+    if isinstance(project_local, dict):
+        for key in ("endpoint", "ollama_host"):
+            project_local.pop(key, None)
+    project_execution = project.get("execution")
+    if isinstance(project_execution, dict):
+        entries = project_execution.get("model_providers")
+        if isinstance(entries, dict):
+            for entry in entries.values():
+                if isinstance(entry, dict):
+                    for key in ("endpoint", "api_style", "probe", "locality", "timeout_seconds"):
+                        entry.pop(key, None)
     layers = [tracked, os_layer, local, project]
     if runtime_override:
         layers.append(runtime_override)

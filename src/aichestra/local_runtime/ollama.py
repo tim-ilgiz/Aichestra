@@ -10,6 +10,8 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from aichestra.local_runtime.http import local_urlopen
+
 from aichestra.local_runtime.base import (
     LocalModel,
     LocalRuntime,
@@ -105,9 +107,9 @@ class OllamaRuntime(LocalRuntime):
 
     def _stop_running_via_api(self) -> bool | None:
         try:
-            with urllib.request.urlopen(f"{self.host}/api/ps", timeout=3) as resp:
+            with local_urlopen(f"{self.host}/api/ps", timeout=3) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
-        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError):
+        except (ValueError, urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError):
             return None
         models = payload.get("models") or []
         if not models:
@@ -125,25 +127,25 @@ class OllamaRuntime(LocalRuntime):
                 method="POST",
             )
             try:
-                with urllib.request.urlopen(req, timeout=10) as resp:
+                with local_urlopen(req, timeout=10) as resp:
                     if getattr(resp, "status", 200) >= 400:
                         ok = False
-            except (urllib.error.URLError, TimeoutError, OSError):
+            except (ValueError, urllib.error.URLError, TimeoutError, OSError):
                 ok = False
         return ok
 
     def _probe_api(self) -> bool:
         try:
-            with urllib.request.urlopen(f"{self.host}/api/tags", timeout=2) as resp:
+            with local_urlopen(f"{self.host}/api/tags", timeout=2) as resp:
                 return 200 <= getattr(resp, "status", 200) < 300
-        except (urllib.error.URLError, TimeoutError, OSError):
+        except (ValueError, urllib.error.URLError, TimeoutError, OSError):
             return False
 
     def _list_via_api(self) -> list[LocalModel] | None:
         try:
-            with urllib.request.urlopen(f"{self.host}/api/tags", timeout=3) as resp:
+            with local_urlopen(f"{self.host}/api/tags", timeout=3) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
-        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError):
+        except (ValueError, urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError):
             return None
         return [_model_from_ollama(item) for item in payload.get("models", [])]
 

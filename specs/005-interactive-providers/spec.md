@@ -24,6 +24,12 @@ Do not turn Aichestra into a second orchestrator or an LLM API client.
 - Local inference discovery (Ollama / local OpenAI-compatible without auth) is
   allowed as presence/reachability only — not as inference execution.
 - Machine-local provider/endpoint settings stay untracked (`machine.local.json`).
+- Local HTTP accepts only localhost, 127.0.0.1, and ::1, without credentials,
+  queries, fragments, environment proxies, or redirects. localhost is pinned to
+  literal loopback. LAN and remote endpoints are rejected.
+- Project policy cannot add or override connection endpoints or probe settings;
+  it may still select roles and disable providers.
+- OpenAI-compatible discovery uses one model-response snapshot per cycle.
 - Never store API keys/tokens or `api_key_env` names in Aichestra config.
 - A configured local provider without a reachable probe stays `available=false`.
 - Adding a provider MUST NOT add Mode C workflow phases (MODE-C-019).
@@ -78,7 +84,7 @@ suggests enabling matching runtimes — without copying credentials.
 
 1. Missing Orca degrades gracefully (no crash; manual local add still works).
 2. Suggestions are runtime enablement / availability hints, not Mode C dispatch proof.
-3. UX surfaces authenticated vs not (e.g. “available via Orca” /
+3. UX surfaces authenticated vs not (e.g. “authenticated in Orca (launch not verified)” /
    “not authenticated in Orca”) without asking for keys.
 
 ## Out of scope
@@ -88,3 +94,17 @@ suggests enabling matching runtimes — without copying credentials.
 - Claiming a new provider is Mode C-runnable without Orca launch proof
 - New orchestration backends
 - Full GUI installer
+
+
+## Review gaps (2026-09-11)
+
+- **OPEN — Orca model catalog:** Discover from Orca must ultimately supply
+  selectable runtime/provider/model tuples for Coding, Research, Tests, and Docs.
+  The installed CLI agent-context schema has account list and opaque worker-start
+  --model support, but no model/provider catalog command. Do not invent model ids,
+  read credentials, or claim account hints implement this requirement. Integration
+  remains blocked on an Orca catalog contract and a reachable runtime.
+- **PARTIAL — Orca availability without local PATH:** exact proven Orca-native
+  launch evidence now satisfies target availability independently of local PATH.
+  Account hints alone remain insufficient. Settings still needs the above Orca
+  capability source to expose runtimes missing from local PATH.

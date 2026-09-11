@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from aichestra.local_runtime.ollama import OllamaRuntime
+from aichestra.local_runtime.http import local_urlopen
 
 
 @dataclass(frozen=True)
@@ -170,6 +171,8 @@ class OpenAICompatibleProviderProbe:
         raw = endpoint if endpoint is not None else cfg.get("endpoint")
         self._endpoint = str(raw).rstrip("/") if raw else None
         self._timeout = float(cfg.get("timeout_seconds") or 5)
+        self._loaded = False
+        self._payload = None
 
     @property
     def id(self) -> str:
@@ -200,6 +203,12 @@ class OpenAICompatibleProviderProbe:
         return tuple(out)
 
     def _get_models_payload(self) -> Mapping[str, Any] | None:
+        if not self._loaded:
+            self._loaded = True
+            self._payload = self._fetch_models_payload()
+        return self._payload
+
+    def _fetch_models_payload(self) -> Mapping[str, Any] | None:
         import json
         import urllib.error
         import urllib.request
@@ -213,7 +222,7 @@ class OpenAICompatibleProviderProbe:
         headers = {"Accept": "application/json"}
         try:
             req = urllib.request.Request(url, headers=headers, method="GET")
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+            with local_urlopen(req, timeout=self._timeout) as resp:
                 body = resp.read().decode("utf-8", errors="replace")
             data = json.loads(body)
             return data if isinstance(data, Mapping) else None

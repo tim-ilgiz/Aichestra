@@ -102,11 +102,14 @@ def test_openai_compatible_probe_lists_models_without_auth(monkeypatch):
         def __exit__(self, *args):
             return False
 
+    calls = []
+
     def fake_urlopen(req, timeout=None):
+        calls.append(req.full_url)
         assert "Authorization" not in dict(req.headers)
         return Resp()
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("aichestra.execution.model_providers.local_urlopen", fake_urlopen)
     probe = OpenAICompatibleProviderProbe(
         provider_id="lmstudio",
         endpoint="http://127.0.0.1:1234/v1",
@@ -114,6 +117,7 @@ def test_openai_compatible_probe_lists_models_without_auth(monkeypatch):
     )
     assert probe.is_reachable()
     assert [m.id for m in probe.list_models()] == ["qwen", "coder"]
+    assert len(calls) == 1
 
 
 def test_discovery_uses_openai_api_style_without_named_factory(monkeypatch):
@@ -127,7 +131,7 @@ def test_discovery_uses_openai_api_style_without_named_factory(monkeypatch):
         def __exit__(self, *args):
             return False
 
-    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: Resp())
+    monkeypatch.setattr("aichestra.execution.model_providers.local_urlopen", lambda *a, **k: Resp())
     monkeypatch.setattr(
         "aichestra.execution.runtimes.which_binary", lambda names: None
     )
@@ -145,7 +149,7 @@ def test_discovery_uses_openai_api_style_without_named_factory(monkeypatch):
     )
     by_id = {p.id: p for p in facts.providers}
     assert by_id["acme"].available
-    assert facts.models[0].id == "m1"
+    assert [m.id for m in facts.models if m.provider == "acme"] == ["m1"]
 
 
 def test_discover_orca_hints_maps_accounts(monkeypatch):
@@ -252,3 +256,119 @@ def test_settings_agents_menu_registers_local_openai(tmp_path, monkeypatch):
     entry = data["execution"]["model_providers"]["lmstudio"]
     assert entry["api_style"] == "openai"
     assert "api_key_env" not in entry
+
+
+@pytest.mark.parametrize("endpoint", [
+    "https://api.example.com/v1", "http://192.168.1.2:1234", "file:///tmp/models",
+    "http://localhost@evil.example/v1", "http://user:secret@127.0.0.1/v1",
+    "http://127.0.0.1/v1?secret=x", "http://[::1", "http://127.0.0.1:bad",
+])
+def test_remote_or_credential_endpoints_rejected_before_write(tmp_path, endpoint):
+    for register in (
+        lambda: register_ollama_provider(endpoint=endpoint, repo_root=tmp_path),
+        lambda: register_openai_compatible_provider("test", endpoint=endpoint, repo_root=tmp_path),
+    ):
+        with pytest.raises(ValueError):
+            register()
+    assert not list(tmp_path.iterdir())
+
+
+def test_project_cannot_change_or_add_connections(tmp_path):
+    from aichestra.config.layering import resolve_config
+    project = tmp_path / "project" / ".aichestra"
+    project.mkdir(parents=True)
+    project.joinpath("project.json").write_text(json.dumps({
+        "local": {"ollama_host": "http://evil.example", "endpoint": "http://evil.example"},
+        "roles": {"tests": {"runtime": "opencode", "provider": "lmstudio"}},
+        "execution": {"model_providers": {
+            "lmstudio": {"endpoint": "http://evil.example", "api_style": "other", "enabled": False},
+            "injected": {"endpoint": "http://127.0.0.1:9999", "api_style": "openai"},
+        }},
+    }))
+    cfg = resolve_config(repo_root=tmp_path, project_root=project.parent, machine_local={
+        "local": {"ollama_host": "http://127.0.0.1:11434"},
+        "execution": {"model_providers": {"lmstudio": {
+            "endpoint": "http://127.0.0.1:1234/v1", "api_style": "openai",
+        }}},
+    })
+    assert cfg["local"]["ollama_host"] == "http://127.0.0.1:11434"
+    assert "endpoint" not in cfg["local"]
+    providers = cfg["execution"]["model_providers"]
+    assert providers["lmstudio"]["endpoint"] == "http://127.0.0.1:1234/v1"
+    assert providers["lmstudio"]["api_style"] == "openai"
+    assert providers["lmstudio"]["enabled"] is False
+    assert "endpoint" not in providers["injected"]
+    assert cfg["roles"]["tests"]["provider"] == "lmstudio"
+
+
+def test_http_boundary_blocks_remote_probes_and_redirects(monkeypatch):
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from aichestra.local_runtime.ollama import OllamaRuntime
+    from aichestra.local_runtime.http import validate_local_endpoint
+
+    assert validate_local_endpoint("http://localhost:1234/v1") == "http://127.0.0.1:1234/v1"
+    assert validate_local_endpoint("http://[::1]:1234") == "http://[::1]:1234"
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append(self.path)
+            self.send_response(302)
+            self.send_header("Location", "/should-not-follow")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    endpoint = f"http://127.0.0.1:{server.server_port}"
+    monkeypatch.setenv("http_proxy", endpoint)
+    monkeypatch.setenv("no_proxy", "")
+    try:
+        remote = OpenAICompatibleProviderProbe(provider_id="x", endpoint="http://evil.example")
+        assert not remote.is_reachable()
+        assert not OllamaRuntime(host="http://evil.example").is_reachable()
+        assert requests == []
+        local = OpenAICompatibleProviderProbe(provider_id="x", endpoint=endpoint)
+        assert not local.is_reachable()
+        assert local.list_models() == ()
+        assert requests == ["/v1/models"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_only_exact_proven_native_launch_can_replace_local_path():
+    from aichestra.execution.domain import (
+        AgentRuntime, Compatibility, DiscoveryFacts, LaunchCapability, LaunchStrategy,
+    )
+    from aichestra.execution.targets import resolve_targets
+    facts = DiscoveryFacts(runtimes=(AgentRuntime("codex", available=False),))
+    binding = (Compatibility("codex", model="opaque-model"),)
+    for proof, model, strategy, expected in (
+        (True, "opaque-model", LaunchStrategy.ORCA_NATIVE, True),
+        (False, "opaque-model", LaunchStrategy.ORCA_NATIVE, False),
+        (True, "different-model", LaunchStrategy.ORCA_NATIVE, False),
+        (True, "opaque-model", LaunchStrategy.ORCA_TERMINAL_BRIDGE, False),
+    ):
+        target = resolve_targets(facts, binding, known_launches=(
+            LaunchCapability("codex", model=model, strategy=strategy, proven=proof),
+        ))[0]
+        assert target.available is expected
+        assert target.runnable is expected
+
+
+
+def test_remote_config_is_unavailable_and_cannot_claim_locality():
+    from aichestra.execution.domain import Locality
+    facts = discover_execution_facts({"execution": {"model_providers": {
+        "remote": {"endpoint": "https://example.invalid/v1", "api_style": "openai", "locality": "local"},
+        "ollama": {"endpoint": "http://example.invalid:11434", "locality": "local"},
+    }}})
+    assert len(facts.providers) == 2
+    assert all(not provider.available for provider in facts.providers)
+    assert all(provider.locality == Locality.REMOTE for provider in facts.providers)

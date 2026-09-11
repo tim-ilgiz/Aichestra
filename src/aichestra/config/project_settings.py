@@ -580,11 +580,11 @@ def interactive_settings(project_root, *, config=None, save=True):
                     )
                     continue
                 print()
-                print("  Available through Orca:")
+                print("  Account signals from Orca:")
                 for h in hints:
                     mark = _status_mark(bool(h.get("available")))
                     status = (
-                        "available via Orca"
+                        "authenticated in Orca (launch not verified)"
                         if h.get("available")
                         else "not authenticated in Orca"
                     )
@@ -614,7 +614,8 @@ def interactive_settings(project_root, *, config=None, save=True):
                 if picked is None:
                     continue
                 register_agent_runtime(picked, repo_root=config_root)
-                print(f"  Enabled runtime {picked} from Orca hint")
+                print(f"  Registered runtime {picked} from Orca account hint")
+                print("  Account authentication does not prove runtime launch or model availability.")
                 layered, facts, runtimes = refresh_discovery()
             elif action == "2":
                 builtins = sorted(DEFAULT_RUNTIME_BINARIES)
@@ -664,7 +665,8 @@ def interactive_settings(project_root, *, config=None, save=True):
                     ],
                     hint=(
                         "For OpenRouter / OpenAI / Anthropic / cloud Gemini — "
-                        "use Discover from Orca. Do not configure API keys here."
+                        "authenticate in Orca; discovery currently exposes account hints only. "
+                        "Do not configure API keys here."
                     ),
                 )
                 if kind is None:
@@ -729,11 +731,11 @@ def interactive_settings(project_root, *, config=None, save=True):
                 providers = list_registered_providers(layered)
                 rts = list_registered_runtimes(layered)
                 if hints:
-                    print("  Through Orca:")
+                    print("  Account signals from Orca:")
                     for h in hints:
                         mark = _status_mark(bool(h.get("available")))
                         status = (
-                            "available via Orca"
+                            "authenticated in Orca (launch not verified)"
                             if h.get("available")
                             else "not authenticated in Orca"
                         )
