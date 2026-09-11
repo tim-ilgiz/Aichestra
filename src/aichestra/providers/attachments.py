@@ -2,15 +2,21 @@
 
 Path-only prompt text is not delivery. These helpers resolve files, stage bytes
 into a workspace inbox, and build provider CLI flags that pass real file inputs
-(Codex ``--image`` / ``-i``, Orca ``--attach``).
+(Codex ``--image`` / ``-i``, Orca ``--attach`` when the installed CLI still
+advertises that worker-start flag).
 """
 
 from __future__ import annotations
 
+import json
 import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
+
+# binary path -> supports worker-start --attach (MODE-C-010 capability probe).
+_ORCA_ATTACH_SUPPORT: dict[str, bool] = {}
 
 _IMAGE_SUFFIXES = {
     ".png",
@@ -179,8 +185,87 @@ def codex_image_flags(paths: Sequence[Path | str]) -> list[str]:
     return flags
 
 
+def clear_orca_attach_support_cache() -> None:
+    """Test helper: drop cached Orca ``--attach`` capability probes."""
+    _ORCA_ATTACH_SUPPORT.clear()
+
+
+def orca_worker_start_supports_attach(binary: str | None) -> bool:
+    """Return True only when this Orca CLI advertises worker-start ``--attach``.
+
+    Orca 1.4.200+ removed ``--attach`` from ``orchestration worker-start``.
+    MODE-C-010 / FR-058 require a real attachment primitive — never invent one
+    or treat prompt path lists as delivery. Unknown/unprobeable → False.
+    """
+    path = (binary or "").strip()
+    if not path:
+        return False
+    cached = _ORCA_ATTACH_SUPPORT.get(path)
+    if cached is not None:
+        return cached
+
+    supported = False
+    try:
+        proc = subprocess.run(
+            [path, "agent-context", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=45,
+            check=False,
+        )
+        text = (proc.stdout or "").strip() or (proc.stderr or "").strip()
+        start = text.find("{")
+        found_worker_start = False
+        if proc.returncode == 0 and start >= 0:
+            data = json.loads(text[start:])
+            for cmd in data.get("commands") or []:
+                if not isinstance(cmd, dict):
+                    continue
+                if cmd.get("command") != "orchestration worker-start":
+                    continue
+                flags = cmd.get("flags") or []
+                supported = "attach" in {str(f).strip() for f in flags}
+                found_worker_start = True
+                break
+        if not found_worker_start:
+            help_proc = subprocess.run(
+                [path, "orchestration", "worker-start", "--help"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+            help_text = f"{help_proc.stdout or ''}\n{help_proc.stderr or ''}"
+            supported = "--attach" in help_text
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, TypeError):
+        supported = False
+
+    _ORCA_ATTACH_SUPPORT[path] = supported
+    return supported
+
+
+def orca_attach_unsupported_detail(binary: str | None = None) -> str:
+    """Honest fail-closed message when Mode C attachments cannot be delivered."""
+    version_hint = ""
+    path = (binary or "").strip()
+    if path:
+        version_hint = f" (binary={path})"
+    return (
+        "Mode C FAIL CLOSED: this Orca build does not support "
+        "`orchestration worker-start --attach`"
+        f"{version_hint}. Attachments cannot be forwarded through a supported "
+        "Orca file primitive (MODE-C-010 / FR-058). Omit --attach, or use an "
+        "Orca version that advertises worker-start --attach; do not treat "
+        "prompt path lists as delivery."
+    )
+
+
 def orca_attach_flags(paths: Sequence[Path | str]) -> list[str]:
-    """Orca worker-start: repeated ``--attach PATH`` for each existing file."""
+    """Orca worker-start: repeated ``--attach PATH`` for each existing file.
+
+    Callers MUST gate on ``orca_worker_start_supports_attach`` before emitting
+    these flags; unsupported CLIs reject unknown ``--attach``.
+    """
     flags: list[str] = []
     resolved, _missing = resolve_attachment_paths(paths)
     for path in resolved:

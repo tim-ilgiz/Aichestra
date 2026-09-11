@@ -20,7 +20,12 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from aichestra.platform_detect import OperatingSystem, detect_os
-from aichestra.providers.attachments import orca_attach_flags, stage_attachments
+from aichestra.providers.attachments import (
+    orca_attach_flags,
+    orca_attach_unsupported_detail,
+    orca_worker_start_supports_attach,
+    stage_attachments,
+)
 from aichestra.providers.base import (
     FailureClass,
     ProviderAdapter,
@@ -153,7 +158,9 @@ def build_orca_argv(
         ]
     name = f"aichestra-{session_id[:8]}"
     worktree = str(request.context.get("worktree") or "new-child")
-    from aichestra.providers.attachments import orca_attach_flags
+    attach_flags: list[str] = []
+    if request.attachments and orca_worker_start_supports_attach(binary):
+        attach_flags = orca_attach_flags(request.attachments)
 
     return [
         binary,
@@ -169,7 +176,7 @@ def build_orca_argv(
         agent,
         "--setup",
         "skip",
-        *orca_attach_flags(request.attachments),
+        *attach_flags,
         "--json",
     ]
 
@@ -1272,11 +1279,27 @@ class OrcaProvider(ProviderAdapter):
             or "new-child"
         )
         # Do NOT stage into the parent project checkout. Prefer absolute paths
-        # for Orca --attach; optionally stage under a temp dir outside the repo.
+        # for Orca --attach when supported; never invent an unsupported flag.
         delivery = stage_attachments(request.attachments, None)
-        attach_flags = orca_attach_flags(
-            delivery.staged or delivery.resolved or request.attachments
-        )
+        attach_paths = delivery.staged or delivery.resolved or request.attachments
+        attach_flags: list[str] = []
+        if attach_paths:
+            if not orca_worker_start_supports_attach(binary):
+                return self._failed_dispatch(
+                    ProviderTaskResult(
+                        ok=False,
+                        failure=FailureClass.UNAVAILABLE,
+                        detail=orca_attach_unsupported_detail(binary),
+                        session_id=session.session_id,
+                        metadata={
+                            "attachment_delivery": delivery.to_dict(),
+                            "orca_attach_supported": False,
+                        },
+                    ),
+                    steps,
+                    session.session_id,
+                )
+            attach_flags = orca_attach_flags(attach_paths)
         worker_argv = [
             binary,
             "orchestration",

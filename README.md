@@ -200,8 +200,10 @@ The editor includes Coordinator separately from Coding.
    No direct Codex/Cursor fallback in Mode C (use Mode A for native tools).
    Optional provider toggles: `--no-codex`, `--no-cursor`, `--no-local`
    (and `--no-orca`, which fails Mode C closed).
-   Attachments: `--attach screenshot.png` delivers native file bytes
-   (Orca `--attach` / staged inbox; Codex `--image` in Mode A).
+   Attachments: `--attach screenshot.png` forwards native file bytes when the
+   installed Orca `worker-start` still advertises `--attach` (staged outside the
+   parent checkout). If Orca lacks that primitive, Mode C fails closed honestly
+   rather than metadata-only path lists. Codex Mode A uses `--image` / `-i`.
 4. **Codex→Cursor handoff** — one-action inside the same Orca Run:
    `python -m aichestra handoff --prompt "…" --run-id <run_id>`
    (or `--repo /path/to/project` to auto-resolve a recent Mode C run from

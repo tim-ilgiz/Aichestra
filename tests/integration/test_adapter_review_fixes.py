@@ -304,6 +304,10 @@ def test_real_adapter_coordinator_contract(monkeypatch, tmp_path, provider, loca
     adapter = OrcaProvider()
     monkeypatch.setattr(adapter, "probe", lambda: ProviderStatus(
         kind=ProviderKind.ORCA, available=True, binary_path="orca"))
+    monkeypatch.setattr(
+        "aichestra.providers.orca.orca_worker_start_supports_attach",
+        lambda _binary: True,
+    )
     calls = []
     def run(**kwargs):
         argv = kwargs["argv"]

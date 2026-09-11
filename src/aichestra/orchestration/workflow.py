@@ -835,7 +835,29 @@ class ModeCRunController:
             )
             return True
 
-        from aichestra.providers.attachments import stage_attachments
+        from aichestra.providers.attachments import (
+            orca_attach_unsupported_detail,
+            orca_worker_start_supports_attach,
+            stage_attachments,
+        )
+        from aichestra.providers.orca import resolve_orca_binary
+        from aichestra.providers.quota_guard import real_provider_execution_blocked
+
+        # MODE-C-010: fail closed before Run handoff when live Orca cannot attach.
+        # Fake-provider CI still exercises attach flag wiring against fakes.
+        if not real_provider_execution_blocked():
+            binary = resolve_orca_binary()
+            if not orca_worker_start_supports_attach(binary):
+                self._fail_gate(
+                    GateKind.ATTACHMENTS,
+                    detail=orca_attach_unsupported_detail(binary),
+                    result={
+                        "ok": False,
+                        "failure": FailureClass.UNAVAILABLE.value,
+                        "orca_attach_supported": False,
+                    },
+                )
+                return False
 
         prompt = self.bindings.task_prompt or ""
         decision = route_media(

@@ -12,6 +12,7 @@ from aichestra.providers.attachments import (
 )
 from aichestra.providers.codex import CodexProvider
 from aichestra.providers.base import ProviderTaskRequest
+import json
 
 
 def test_suggest_profile_powerful_before_capable() -> None:
@@ -58,6 +59,75 @@ def test_codex_and_orca_attach_flags(tmp_path: Path) -> None:
         "--attach",
         str(log.resolve()),
     ]
+
+
+def test_orca_attach_support_probe_uses_agent_context(monkeypatch) -> None:
+    from aichestra.providers.attachments import (
+        clear_orca_attach_support_cache,
+        orca_worker_start_supports_attach,
+    )
+
+    clear_orca_attach_support_cache()
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        class Proc:
+            returncode = 0
+            stdout = json.dumps(
+                {
+                    "commands": [
+                        {
+                            "command": "orchestration worker-start",
+                            "flags": ["task", "agent", "json"],
+                        }
+                    ]
+                }
+            )
+            stderr = ""
+        return Proc()
+
+    monkeypatch.setattr(
+        "aichestra.providers.attachments.subprocess.run", fake_run
+    )
+    assert orca_worker_start_supports_attach("/bin/orca") is False
+    assert calls and calls[0][:2] == ["/bin/orca", "agent-context"]
+    cached_calls = len(calls)
+    # Cached — no additional probes
+    assert orca_worker_start_supports_attach("/bin/orca") is False
+    assert len(calls) == cached_calls
+
+    clear_orca_attach_support_cache()
+
+    def fake_run_supported(argv, **kwargs):
+        class Proc:
+            returncode = 0
+            stdout = json.dumps(
+                {
+                    "commands": [
+                        {
+                            "command": "orchestration worker-start",
+                            "flags": ["task", "attach", "json"],
+                        }
+                    ]
+                }
+            )
+            stderr = ""
+        return Proc()
+
+    monkeypatch.setattr(
+        "aichestra.providers.attachments.subprocess.run", fake_run_supported
+    )
+    assert orca_worker_start_supports_attach("/bin/orca") is True
+
+
+def test_orca_attach_unsupported_detail_is_honest() -> None:
+    from aichestra.providers.attachments import orca_attach_unsupported_detail
+
+    detail = orca_attach_unsupported_detail("/Applications/Orca.app/bin/orca")
+    assert "FAIL CLOSED" in detail
+    assert "--attach" in detail
+    assert "MODE-C-010" in detail
 
 
 def test_codex_provider_appends_image_after_prompt(tmp_path: Path, monkeypatch) -> None:
