@@ -95,6 +95,7 @@ def init_project(
             "ok": True,
             "created": False,
             "path": str(path),
+            "project_root": str(root),
             "config": existing,
         }
 
@@ -105,7 +106,13 @@ def init_project(
         cfg = interactive_settings(root, config=cfg, save=False)
     save_project_config(root, cfg)
     _ensure_gitignore_user_local(root)
-    return {"ok": True, "created": True, "path": str(path), "config": cfg}
+    return {
+        "ok": True,
+        "created": True,
+        "path": str(path),
+        "project_root": str(root),
+        "config": cfg,
+    }
 
 
 def _layered_known_runtimes(
@@ -511,6 +518,8 @@ def interactive_settings(project_root, *, config=None, save=True):
         )
 
     def print_main_menu() -> None:
+        from aichestra.console_ui import box, use_pretty
+
         coordinator = (cfg.get("orchestration") or {}).get("coordinator")
         roles = cfg.get("roles") if isinstance(cfg.get("roles"), Mapping) else {}
         items = [
@@ -525,8 +534,19 @@ def interactive_settings(project_root, *, config=None, save=True):
             ("0", "Cancel", "discard unsaved edits"),
         ]
         print()
-        print("Aichestra project settings")
-        print("Pick a number to edit that role. Save writes the project file.")
+        if use_pretty():
+            print(
+                box(
+                    [
+                        "Pick a number to edit that role.",
+                        "Save writes the project file.",
+                    ],
+                    title="Project settings",
+                )
+            )
+        else:
+            print("Aichestra project settings")
+            print("Pick a number to edit that role. Save writes the project file.")
         print()
         for number, title, detail in items:
             print(f"  {empty}  {number}. {title}")

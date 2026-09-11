@@ -1,373 +1,688 @@
 # Aichestra
 
-Portable, project-agnostic AI development orchestration environment centered on
-Orca, with Codex as preferred lead, Cursor as fallback lead, and an optional
-OpenCode + Ollama local worker.
+[![Version](https://img.shields.io/badge/version-0.1.0-blue)](https://github.com/tim-ilgiz/Aichestra)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## Install
+**Use the right AI for each part of software development — as one coordinated team.**
 
-From this repository (runtime only):
+Aichestra is a portable AI development environment for coordinating multiple AI agents, models and developer tools inside any software project.
 
-```bash
-python3 -m pip install -e .
+Instead of choosing one AI tool for everything, you can assign different agents or models to different roles:
+
+* **Coding**
+* **Research**
+* **Tests**
+* **Documentation**
+
+Aichestra keeps this configuration inside your project and connects your project, AI tools and orchestration engine into one development workflow.
+
+Today, Aichestra uses **Orca (`stablyai/orca`)** as its primary orchestration backend.
+
+```text
+You
+ │
+ ▼
+Aichestra
+ │
+ ▼
+Orca
+ │
+ ├── Codex
+ ├── Cursor
+ ├── Claude
+ ├── Gemini
+ ├── OpenCode
+ └── local models
 ```
 
-For contributors who also run tests:
+Aichestra is intentionally designed not to be tied to a single AI provider, model, IDE or orchestration engine.
+
+**Orca is the first supported orchestration backend. Additional orchestration engines may be supported in the future.**
+
+---
+
+## Mission
+
+AI-assisted development should not depend on one model doing everything.
+
+Different AI systems are better suited to different tasks. One may be better at implementation, another at research, another at tests or documentation.
+
+Aichestra makes it possible to combine them into one configurable development environment.
+
+The goal is simple:
+
+> Enter any project, run `aichestra init`, choose which AI should do what, and let Aichestra coordinate the rest.
+
+Aichestra aims to make AI-assisted development:
+
+* **Portable** — configuration belongs to the project, not to one machine or IDE.
+* **Provider-independent** — use different AI providers, runtimes and models.
+* **Role-based** — choose the best AI for coding, research, tests and documentation.
+* **Orchestrator-independent** — use Orca today while keeping the architecture open to other orchestration engines.
+* **Coordinated** — agents working on the same task can exchange context and results.
+* **Verifiable** — real project tests and checks can decide whether work is complete.
+* **Optional** — you can always continue using Codex, Cursor or other tools directly.
+
+---
+
+# How it works
+
+Aichestra sits between your project and the tools performing AI work.
+
+```text
+                   ┌────────────────┐
+                   │  Your project  │
+                   └───────┬────────┘
+                           │
+                           ▼
+                   ┌────────────────┐
+                   │    Aichestra   │
+                   │                │
+                   │ configuration  │
+                   │ role routing   │
+                   │ policies       │
+                   │ verification   │
+                   └───────┬────────┘
+                           │
+                  orchestration backend
+                           │
+                           ▼
+                      ┌─────────┐
+                      │  Orca   │
+                      └────┬────┘
+                           │
+          ┌────────────────┼────────────────┐
+          │                │                │
+          ▼                ▼                ▼
+       Coding           Research        Tests / Docs
+       Codex             Cursor         Claude / local
+```
+
+### Aichestra is responsible for
+
+* project-level AI configuration;
+* role → runtime/model assignments;
+* provider and model selection;
+* project context and instructions;
+* quota fallback policy;
+* verification rules;
+* preparing a task for orchestration.
+
+### Orca is responsible for
+
+* Runs and Tasks;
+* agent workers;
+* execution state;
+* isolated worktrees;
+* agent lifecycle;
+* actual workflow execution.
+
+Aichestra does **not** hard-code the agent workflow itself.
+
+The orchestration engine owns how a task is decomposed and executed.
+
+Today that engine is **Orca**.
+
+---
+
+# Installation
+
+Aichestra requires:
+
+```text
+Python 3.11+
+```
+
+Clone the repository and install the package:
+
+```bash
+git clone <Aichestra repository>
+cd Aichestra
+
+python3 -m pip install .
+```
+
+Verify the installation:
+
+```bash
+aichestra doctor
+```
+
+For Aichestra development:
 
 ```bash
 python3 -m pip install -e ".[dev]"
 pytest
 ```
 
-Or run without install by setting `PYTHONPATH=src`.
+---
 
-After install, `aichestra …` and `python -m aichestra …` are equivalent.
+# Quick start
 
-## Config locations
+## 1. Open your project
 
-| Mode | Machine-local settings |
-|------|------------------------|
-| Contributor clone (cwd is this repo) | `.local/machine.local.json` (gitignored) |
-| Installed package / foreign project | Portable user config home (see below) |
+Aichestra is not tied to any particular repository.
 
-User config home (override with `AICHESTRA_CONFIG_HOME`):
-
-- macOS: `~/Library/Application Support/aichestra/`
-- Linux: `$XDG_CONFIG_HOME/aichestra/` or `~/.config/aichestra/`
-- Windows: `%APPDATA%\aichestra\`
-
-`local.enabled` defaults to `false` and remains valid on any hardware.
-Large local model downloads require explicit approval
-(`--approve-model-download` records approval; it does not download weights).
-
-Target-project settings live in `.aichestra/project.json` (via `aichestra init`).
-
-## Bootstrap (idempotent config / doctor)
-
-Pick the entrypoint for your OS (thin wrappers around the shared Python core):
-
-- macOS: `bootstrap/macos/setup.sh`
-- Linux: `bootstrap/linux/setup.sh`
-- Windows (native PowerShell): `bootstrap/windows/setup.ps1`
-
-Equivalent Python:
+Go to the project where you want to use it:
 
 ```bash
-python -m aichestra bootstrap
-python -m aichestra update
+cd ~/projects/my-project
 ```
 
-Bootstrap writes/merges config, runs discovery + doctor, and can set
-`bootstrap_complete=true` when doctor is ok and no blocking remaining steps
-remain. It does **not** install Orca/Codex/Cursor/OpenCode/Ollama — install
-those tools separately; doctor reports what is missing.
+---
 
-## Daily commands
+## 2. Initialize Aichestra
+
+Run:
 
 ```bash
-# Platform
-python -m aichestra doctor            # PASS/WARN/FAIL health check
-python -m aichestra profile           # deterministic machine profile (JSON)
-python -m aichestra bootstrap         # idempotent setup
-python -m aichestra update            # after git pull; preserves machine-local
-
-# Target project
-aichestra init --yes                  # create .aichestra/project.json
-aichestra settings                    # interactive role/model/quota editor
-aichestra settings show               # print roles / quota / verification
-aichestra settings set KEY=VALUE …    # mutate project.json (see below)
-
-# Mode C / research / handoff (require Orca where noted)
-python -m aichestra orchestrate --prompt "…" --project-root /path/to/target
-python -m aichestra handoff --prompt "…" --run-id <run_id>
-python -m aichestra research /path/to/target-project --query "auth"
-python -m aichestra prove-launch --project-root /path/to/target --candidate-id <id>
-python -m aichestra abort-launch --token <cleanup_lease>
-python -m aichestra dispatch-role --role tests --run <run_id> --task <task_id> \
-  --from "<ORCA_TERMINAL_HANDLE>" --project-root /path/to/target
-
-# Staging diagnostics (typed, allowlist-gated)
-python -m aichestra staging STAGE_ALIAS --op uptime --dry-run
-python -m aichestra staging STAGE_ALIAS --op disk_usage
+aichestra init
 ```
 
-### Target project init + role settings
+Aichestra creates a project-local configuration:
 
-From any target project:
+```text
+my-project/
+├── .aichestra/
+│   └── project.json
+├── src/
+├── tests/
+└── ...
+```
+
+This configuration belongs only to this project.
+
+Another project can use a completely different set of agents and models.
+
+For non-interactive initialization:
 
 ```bash
-cd /path/to/your-project
 aichestra init --yes
-aichestra init --yes --force                          # overwrite existing project.json
-aichestra init --yes --set roles.implement=cursor     # init + one-shot sets
+```
+
+---
+
+## 3. Configure your AI team
+
+Run:
+
+```bash
+aichestra settings
+```
+
+You can configure the AI used for different responsibilities:
+
+```text
+Coordinator     → Cursor
+Coding          → Codex
+Research        → Gemini
+Tests           → OpenCode + Ollama
+Documentation   → Claude
+```
+
+The exact combination is up to you.
+
+Inspect the current configuration:
+
+```bash
 aichestra settings show
 ```
 
-All `aichestra settings set` keys:
+Settings can also be changed directly:
 
 ```bash
-# Coordinator LLM (Mode C bootstrap) — independent of coding workers
-aichestra settings set orchestration.coordinator=cursor
-
-# Worker roles (implement | research | tests | docs)
 aichestra settings set roles.implement=codex
 aichestra settings set roles.research=cursor
 aichestra settings set roles.tests=cursor
-aichestra settings set roles.docs=cursor
-aichestra settings set roles.tests.runtime=opencode
-aichestra settings set roles.tests.model=qwen2.5-coder:14b
-aichestra settings set roles.tests.provider=ollama
-aichestra settings set 'roles.tests={"runtime":"opencode","model":"qwen2.5-coder:14b"}'
-
-# Quota (manual | auto) — coding-worker fallback only
-aichestra settings set quota.mode=manual
-aichestra settings set quota.mode=auto
-aichestra settings set quota.roles.implement=cursor
-aichestra settings set quota.implement_fallback=cursor   # alias for quota.roles.implement
-
-# Verification gate (JSON boolean only; fail-closed when disabled)
-aichestra settings set verification.enabled=false
-aichestra settings set verification.enabled=true
-aichestra settings set verify='["pytest","-q"]'
-aichestra settings set verify='[["npm","test"],["npm","run","lint"]]'
-aichestra settings set verify=null
+aichestra settings set roles.docs=claude
 ```
 
-Works in **any** target project directory (not tied to a specific app). Role
-values are AgentRuntime ids (`codex`, `cursor`, `gemini`, `claude`, `opencode`)
-with optional `provider` / `model` (OpenCode + local/Ollama). Aliases `local` /
-`local-worker` map to `opencode`. `roles.*` are worker roles only.
-`orchestration.coordinator` is the Mode C coordinator LLM and is independent
-of `roles.implement`. Config lives in `.aichestra/project.json`.
-`verify` is separate from the toggle. Init sets `verification.enabled=false`;
-until enabled with a real JSON boolean `true` and non-empty verify commands,
-orchestration stops at preflight before creating a Run. The verification gate
-also remains fail-closed.
+---
 
-Mode C resolves the coordinator and each worker role into exact supported
-ExecutionTargets before creating a Run. Bootstrap uses
-`orchestration.coordinator`, never `roles.implement`. `execution.runtimes`
-can register additional runtime ids (including from machine/global layered
-config — bindings are stored in the project; runtimes need not be copied into
-`project.json`).
-Disabled or unresolved bindings fail with a settings error. Orca owns task
-creation; Aichestra emits a typed `role_dispatch_contract`
-(`role → execution_target_id`, with `requires_launch_proof` for provisionable
-candidates). Inner worker Dispatch MUST use
-`aichestra dispatch-role --run --task --role --from <ORCA_TERMINAL_HANDLE>` to
-worker-start the exact bound target. Direct Orca worker-start of an inner
-worker does not settle. Before handoff, Aichestra persists an
-immutable contract by Run id in the config home. Later settings changes do not
-retarget that Run; unavailable or disabled targets fail closed. Missing contracts
-require a new Run, including with `--resume-run-id`: resume never creates a
-contract and rejects changed policy. Restore the original settings to resume,
-or start a new Run to apply new settings. Dispatch of an existing Task resolves
-the saved runtime/provider/model independently of current role settings, while
-current availability and explicit compatibility restrictions remain authoritative.
-Endpoint fingerprints distinguish tenant/query differences without storing the
-full URL in the coordinator contract. Task role and same-Run association are
-checked before launch. Canonical task/worker receipts are audited for role, Run and
-effective runtime/provider/model/endpoint. Missing or mismatched evidence
-fails the Run. Inner workers also require a matching Aichestra dispatch-role
-adoption receipt (coordinator bootstrap does not). An Orca version that omits
-durable `launch.effective` cannot fully close live post-dispatch audit.
+## Models and providers
 
-`quota.mode=manual` stops and asks the operator to change settings and start a
-new Run with the remaining objective/context; it cannot retarget the old Run.
-`quota.roles.implement` is the coding-worker fallback (precedence:
-`quota.roles.implement` → `quota.implement_fallback` → default). Auto mode does
-**not** replace the coordinator LLM; coordinator quota is a separate failure
-(`orchestration.coordinator`). Inner-task implement fallback must have a prior
-structured primary-worker quota receipt. Use `dispatch-role --role implement
---reason quota-fallback --run <run_id> --task <task_id> --project-root <root>`;
-this selects the Run contract fallback only in auto mode and checks canonical
-quota evidence before starting a worker. Evidence must be typed
-(`failure=quota`, durable `lastFailure.failure=quota`, or the settling
-`worker_done` message `payload.failure=quota` — Orca 1.4.200 stores the class
-on the message even when `lastFailure` omits it). Body/subject prose is not
-enough. Live quota recovery via `dispatch-role --reason quota-fallback` was
-validated on Orca 1.4.200 (run `run_b3f15bcba245`).
+Roles can optionally specify a provider and model.
 
-From a project or subdirectory, use `aichestra orchestrate --prompt "..."`.
-The nearest ancestor `.aichestra/project.json` selects the project root, with
-cwd as the fallback; `--project-root` overrides this. `aichestra init` opens
-the settings editor on a terminal; `--yes` accepts defaults for automation.
-The editor includes Coordinator separately from Coding.
-
-### Modes in practice
-
-1. **Native** — run `codex` / Cursor IDE / `cursor` as usual (unchanged).
-2. **Orca interactive** — open Orca app; work with one agent (`orca open` / UI).
-3. **Mode C** — start explicitly from a live Orca terminal (requires Orca,
-   its runtime-issued `ORCA_TERMINAL_HANDLE`, **and** `--project-root`):
-   `python -m aichestra orchestrate --prompt "…" --project-root /path/to/target`
-   Creates **one Orca Run**; agent work goes through Orca tasks/workers/worktrees;
-   Aichestra applies policy + deterministic gates on the adopted worktree.
-   No direct Codex/Cursor fallback in Mode C (use Mode A for native tools).
-   Optional provider toggles: `--no-codex`, `--no-cursor`, `--no-local`
-   (and `--no-orca`, which fails Mode C closed).
-   Attachments: `--attach screenshot.png` forwards native file bytes when the
-   installed Orca `worker-start` still advertises `--attach` (staged outside the
-   parent checkout). If Orca lacks that primitive, Mode C fails closed honestly
-   rather than metadata-only path lists. Codex Mode A uses `--image` / `-i`.
-4. **Codex→Cursor handoff** — one-action inside the same Orca Run:
-   `python -m aichestra handoff --prompt "…" --run-id <run_id>`
-   (or `--repo /path/to/project` to auto-resolve a recent Mode C run from
-   `.aichestra/last_mode_c_run.json`). Execute binds `task-create --run <id>`
-   after successful `run-use`. Use `--prepare-only` for packet-only output.
-   Without `--run-id` / resolvable recent run, execute fails closed.
-5. **Disable local inference** — keep `local.enabled: false` in
-   machine-local config (default).
-6. **Local repository research** —
-   `python -m aichestra research /path/to/target-project --query "auth"`
-7. **Machine/local AI** — `python -m aichestra profile` and doctor local-AI section.
-8. **Staging diagnostics** (typed, allowlist-gated; alias in machine-local config):
-
-   ```bash
-   python -m aichestra staging STAGE_ALIAS --op uptime --dry-run
-   python -m aichestra staging STAGE_ALIAS --op disk_usage
-   ```
-
-   Unknown aliases fail closed. Production SSH is not supported.
-9. **Worktree / diff** — prefer Orca:
-   `orca worktree list`, `orca worktree show`, and the Orca UI diff for the
-   active worktree (do not `git reset --hard` the user's real checkout).
-10. **Update** — `git pull` then `python -m aichestra update` (clone) or
-    reinstall / `pip install -e .` after pulling (contributor).
-
-Orca CLI may live on PATH or at the macOS app bundle
-`/Applications/Orca.app/Contents/Resources/bin/orca` (discovered automatically).
-
-Convenience scripts:
+For example, tests could be executed using OpenCode with a local Ollama model:
 
 ```bash
-python scripts/doctor.py
-python scripts/machine_profile.py
-python scripts/smoke_mac.py         # Mac-oriented live smoke report
+aichestra settings set roles.tests.runtime=opencode
+aichestra settings set roles.tests.provider=ollama
+aichestra settings set roles.tests.model=qwen2.5-coder:14b
 ```
 
-## Three modes
+This makes it possible to mix cloud and local AI inside the same project.
 
-| Mode | Name | Behavior |
-|------|------|----------|
-| A | `native` | Use Codex/Cursor directly. Aichestra does **not** intercept native CLIs. |
-| B | `orca_interactive` | Single-agent Orca session; no automatic full multi-role orchestration. |
-| C | `orchestrated` | One Orca Run + Aichestra policy/gates (agent steps via Orca; local maintenance-reviewer + verification on adopted worktree). |
+For example:
 
-Orca is opt-in and **required for Mode C**. Codex is the preferred lead; Cursor is the fallback.
-Quota behavior uses project `quota.mode` and its exact configured fallback.
-Legacy handoff helpers retain their manual semantics; Mode C recovery is owned
-by the Run controller and executed only through Orca.
+```text
+Coding          → Codex
+Research        → Gemini
+Tests           → local Qwen
+Documentation   → Claude
+```
 
-## Staging diagnostics
+---
 
-Only **STAGING** SSH diagnostics are integrated. Dangerous commands
-(`sudo`, `rm`, restart/stop, `docker rm/stop`, `kubectl apply/delete`, …)
-are rejected **before** execution. Production SSH has **no** integration path.
+# Verification
 
-## Validation status (truthful)
+Aichestra can run real project commands before considering work complete.
 
-| Surface | Status |
-|---------|--------|
-| Automated CI (macOS / Windows / Linux matrix) | Validates core code with **fake providers** (no real Codex/Cursor quota) |
-| macOS live smoke | May be live-validated separately via `scripts/smoke_mac.py` for components actually present |
-| Windows live smoke | **NOT VALIDATED** until a real Windows smoke run |
-| Linux live smoke | **NOT VALIDATED** until a real Linux smoke run |
-| Live auto quota fallback via `dispatch-role` | **VALIDATED** on Orca 1.4.200 via durable `worker_done` `payload.failure=quota` (2026-09-11) |
-| Live coordinator `dispatch-role` adoption + `launch.effective` | **VALIDATED** on Orca 1.4.200 (2026-09-11), run `run_46902f941734` |
+For a Python project:
 
-Do not treat CI green as live OS smoke for Windows/Linux.
+```bash
+aichestra settings set verify='["pytest","-q"]'
+aichestra settings set verification.enabled=true
+```
 
-## Architecture (high level)
+For a project with several checks:
 
-- **Orca** — opt-in UI / **orchestration engine** for Mode C (one Run per task)
-- **Aichestra** — policy, bootstrap, discovery, deterministic gates (not a second orchestrator)
-- **Codex** — preferred lead (via Orca in Mode C; native in Mode A)
-- **Cursor** — fallback lead
-- **OpenCode + Ollama** — optional `local-worker` (via Orca in Mode C)
-- **maintenance-reviewer** — structured TEST/DOC/ADR/SPEC gate (may choose none/none)
-- **verification-runner** — real subprocess commands; exit codes are authoritative
-- Native Codex/Cursor usage remains independent of Orca
+```bash
+aichestra settings set verify='[["npm","test"],["npm","run","lint"]]'
+aichestra settings set verification.enabled=true
+```
 
-## Spec Kit
+These are actual subprocess commands.
 
-- Spec: [`specs/001-portable-ai-orchestration/spec.md`](specs/001-portable-ai-orchestration/spec.md)
-- Plan: [`specs/001-portable-ai-orchestration/plan.md`](specs/001-portable-ai-orchestration/plan.md)
-- Tasks: [`specs/001-portable-ai-orchestration/tasks.md`](specs/001-portable-ai-orchestration/tasks.md)
-- Project init / role routing: [`specs/002-project-init-role-routing/spec.md`](specs/002-project-init-role-routing/spec.md)
-- Constitution: [`.specify/memory/constitution.md`](.specify/memory/constitution.md)
-- Agent contract: [`AGENTS.md`](AGENTS.md)
+Their exit codes determine whether verification succeeds.
 
-## Tests
+---
+
+# Run a task
+
+Once the project is configured:
+
+```bash
+aichestra orchestrate \
+  --prompt "Implement user authentication, add tests and update the documentation" \
+  --project-root .
+```
+
+Aichestra prepares the project context and creates one coordinated Orca Run.
+
+The configured AI workers can then be used for the appropriate parts of the task.
+
+Conceptually:
+
+```text
+                         User task
+                             │
+                             ▼
+                         Aichestra
+                             │
+                             ▼
+                           Orca
+                             │
+              ┌──────────────┼──────────────┐
+              │              │              │
+              ▼              ▼              ▼
+          Research      Implementation     Tests
+              │              │              │
+           Cursor           Codex       Local model
+              │              │              │
+              └──────────────┼──────────────┘
+                             │
+                             ▼
+                       Documentation
+                             │
+                           Claude
+                             │
+                             ▼
+                       Verification
+```
+
+The exact task graph is controlled by Orca.
+
+Aichestra supplies the project configuration, role bindings, policies and verification around that workflow.
+
+---
+
+# Orca integration
+
+**Orca is currently Aichestra's primary orchestration backend.**
+
+Orca provides the execution environment Aichestra needs for coordinated multi-agent work, including:
+
+* agent workers;
+* isolated Git worktrees;
+* task execution;
+* Run state;
+* worker lifecycle;
+* agent communication.
+
+Aichestra builds on top of those execution primitives.
+
+The responsibilities are intentionally separated:
+
+```text
+Aichestra
+    │
+    │  What AI should do what?
+    │  Which policies apply?
+    │  Which model/provider should be used?
+    │  How should the result be verified?
+    │
+    ▼
+Orchestration backend
+    │
+    │  Run the tasks
+    │  Manage workers
+    │  Maintain execution state
+    │  Isolate worktrees
+    │
+    ▼
+AI agents
+```
+
+Today:
+
+```text
+Aichestra
+    │
+    ▼
+Orca
+```
+
+The architecture is intended to allow other orchestration backends in the future:
+
+```text
+                     ┌──► Orca
+                     │
+Aichestra ────────────┼──► Future orchestrator
+                     │
+                     └──► ...
+```
+
+A project should not need to redesign its AI roles simply because the underlying orchestration backend changes.
+
+---
+
+# You can still use AI tools directly
+
+Aichestra does not replace Codex, Cursor, Claude or other AI tools.
+
+It does not intercept their normal usage.
+
+You can continue using them exactly as before.
+
+For example:
+
+```bash
+codex
+```
+
+or open Cursor normally.
+
+Aichestra orchestration is **opt-in**.
+
+---
+
+# Ways to work
+
+There are currently three main ways to use the tools.
+
+### Direct
+
+Use an AI tool directly:
+
+```text
+You
+ │
+ ▼
+Codex / Cursor / Claude / ...
+```
+
+Aichestra and Orca are not involved.
+
+---
+
+### Orca directly
+
+Use Orca's own environment and agents:
+
+```text
+You
+ │
+ ▼
+Orca
+ │
+ ▼
+AI agent
+```
+
+Aichestra is not required.
+
+---
+
+### Aichestra orchestration
+
+Use project-specific roles, policy and verification:
+
+```text
+You
+ │
+ ▼
+Aichestra
+ │
+ ▼
+Orca
+ │
+ ├── Coding agent
+ ├── Research agent
+ ├── Test agent
+ └── Documentation agent
+```
+
+You can switch between these approaches whenever you want.
+
+---
+
+# Supported AI runtimes
+
+Aichestra can work with runtimes such as:
+
+* Codex
+* Cursor
+* Claude
+* Gemini
+* OpenCode
+
+OpenCode can also be connected to providers such as Ollama for local inference.
+
+The important part is that **roles are not tied to vendors**.
+
+For example:
+
+```text
+Project A
+
+Coding          → Codex
+Research        → Cursor
+Tests           → Ollama
+Documentation   → Claude
+```
+
+while another project could use:
+
+```text
+Project B
+
+Coding          → Cursor
+Research        → Gemini
+Tests           → Codex
+Documentation   → Gemini
+```
+
+Each project owns its own configuration.
+
+---
+
+# Quota fallback
+
+A coding runtime can have a fallback.
+
+For example:
+
+```bash
+aichestra settings set roles.implement=codex
+
+aichestra settings set quota.mode=auto
+aichestra settings set quota.roles.implement=cursor
+```
+
+Conceptually:
+
+```text
+Codex
+  │
+  │ quota exhausted
+  ▼
+Cursor
+```
+
+Automatic fallback applies only when Aichestra receives supported quota-failure evidence from the running worker.
+
+To require manual intervention instead:
+
+```bash
+aichestra settings set quota.mode=manual
+```
+
+---
+
+# Useful commands
+
+Check the environment:
+
+```bash
+aichestra doctor
+```
+
+Initialize the current project:
+
+```bash
+aichestra init
+```
+
+Configure agents and models:
+
+```bash
+aichestra settings
+```
+
+Show project settings:
+
+```bash
+aichestra settings show
+```
+
+Change one setting:
+
+```bash
+aichestra settings set roles.implement=codex
+```
+
+Run an orchestrated task:
+
+```bash
+aichestra orchestrate \
+  --prompt "Implement the feature" \
+  --project-root .
+```
+
+Inspect the detected machine environment:
+
+```bash
+aichestra profile
+```
+
+---
+
+# Machine-local configuration
+
+Project configuration lives in:
+
+```text
+.aichestra/project.json
+```
+
+Machine-specific configuration is kept separately.
+
+Local AI is disabled by default:
+
+```text
+local.enabled = false
+```
+
+This means Aichestra does not assume that every machine has Ollama or local models installed.
+
+Run:
+
+```bash
+aichestra doctor
+```
+
+to see which supported tools are available on the current machine.
+
+---
+
+# External tools
+
+Aichestra coordinates existing AI development tools rather than replacing them.
+
+Depending on your project configuration, you may use:
+
+* Orca
+* Codex
+* Cursor
+* Claude Code
+* Gemini CLI
+* OpenCode
+* Ollama
+
+**Orca is currently required only for Aichestra's orchestrated mode.**
+
+Direct usage of AI tools remains independent from Aichestra.
+
+---
+
+# For contributors
+
+This README intentionally focuses on the **user experience**.
+
+Detailed architecture, execution contracts, design decisions and implementation details belong in the project documentation rather than in the getting-started guide.
+
+See:
+
+```text
+specs/
+├── 001-portable-ai-orchestration/
+├── 002-project-init-role-routing/
+└── ...
+
+AGENTS.md
+.specify/memory/constitution.md
+```
+
+Run the test suite with:
 
 ```bash
 python3 -m pip install -e ".[dev]"
 pytest
 ```
 
-Fixture projects under `fixtures/project_a` (Python) and `fixtures/project_b`
-(Node) prove isolation. CI sets `AICHESTRA_FAKE_PROVIDERS=1` and
-`AICHESTRA_NO_REAL_QUOTA=1`.
+---
 
-Mode C bootstraps one explicit coordinator from `orchestration.coordinator`
-(independent of `roles.implement`) using one runnable ExecutionTarget. Legacy
-provider fields do not select the coordinator. The coordinator reads project
-context, including scoped nested AGENTS.md, owns which Tasks to create and
-when, and must Dispatch each worker role through
-`role_dispatch_contract` exact `execution_target_id`s (MUST use
-`aichestra dispatch-role`; direct Orca worker-start does not settle). It waits for outcomes
-and converges results before completing. At the implementation boundary it calls
-`orchestration ask --question AICHESTRA_GATE:maintenance`; Aichestra replies with
-TEST/DOC/ADR/SPEC decisions before Orca dispatches required writers. The
-coordinator releases settled child workers; Aichestra releases the coordinator
-and checks reclaimable resources. Success requires this handshake, explicit
-successful completion, passing verification, and a confirmed canonical Run with
-all Tasks completed. Missing or failed state is a non-success result.
+# Project status
 
-The production resolver probes the installed Orca `agent-context --json` launch
-contract. Native adapters support runtime-managed inference for Codex, Cursor,
-Claude Code and Gemini CLI; explicit `execution.bindings` may select supported
-runtimes. Only runnable targets enter the coordinator package. Every native
-coordinator launch must return the matching `launch.effective.agent`; missing
-or mismatched binding receipts fail closed. Runtime-specific launch adapters
-can be registered without adding workflow product branches.
+Aichestra is under active development.
 
-Explicit provider/model/endpoint combinations become dispatchable through a
-launch adapter. Native ``--agent`` alone does not prove a backend binding;
-native ``--model`` covers opaque runtime model preferences when Orca returns
-matching ``launch.effective.model``. Backend bindings use
-``orca-terminal-bridge`` (create → wait → **live** ``terminal read`` process
-proof → ``worker-start --terminal``) or an attested ``orca-existing-terminal``
-handle (``ORCA_WORKER_TERMINAL_HANDLE`` / context). Schema support for a bridge
-marks a target **provisionable**, not **runnable**; ``runnable`` requires a
-proven process/contract binding. Create-receipt ``startupCommand`` echoes are
-not proof. Prompt text, discovery alone, and Aichestra-process environment
-variables are not proof. Bridge-owned terminals are closed on prepare/dispatch
-failure before attach; foreign existing terminals are never closed. Abort-launch
-closes a bridge only after claiming an Aichestra-issued opaque cleanup lease
-and proving via Orca ``worker-list`` that the stored handle is not bound to a
-Dispatch — callers cannot pass a raw terminal handle. A structured Dispatch
-binding consumes the lease and leaves the terminal running. Failed close
-restores the lease. After an exact ``dispatch_id`` exists, failure paths
-attempt bounded worker-release
-cleanup. Local-only live acceptance remains NOT VALIDATED (no proven local
-ExecutionTarget on the current machine). Cloud/native Mode C live smoke passed via T168 (`run_3d12b2f31039`) for the
-pre-T180 handshake. In-Run `AICHESTRA_GATE:verification` live smoke passed via
-T180 (`run_27377a46c199`). Fresh GitHub CI (T167) accepted on final
-implementation HEAD `8c159f85` (GitHub Actions run #78: Ubuntu + macOS +
-Windows).
+The current implementation uses Orca as its orchestration backend and focuses on building a portable, role-based AI development environment that can be reused across different software projects.
 
-Worker release distinguishes `released`, `already_released`, `release_pending`
-and `release_unknown`. Recovery executes only exact-dispatch allowlisted
-commands from Orca's receipt, bounded to three recovery attempts, and inspects
-the exact worker again. Automatic recovery can settle a pending release without
-a retry. Unresolved Run resources prevent success; broad never close is
-never used. Failed starts release an exact ``dispatch_id`` when present, or
-close only a bridge-owned terminal handle created by this prepare() when
-worker-start never produced a dispatch.
+Expect APIs, commands and supported integrations to evolve while the project matures.
 
-An ordinary headless shell without Orca terminal authority is unsupported and
-fails before Run creation. Do not invent or reuse a stale terminal handle.
-Adapter contract tests validate launch construction and receipts, not a live DAG.
-See the active tasks' T167 entry for CI matrix close-out evidence (run #78 on
-`8c159f85`) and T168 for live Mode C acceptance evidence.
+---
+
+# License
+
+MIT License — see [LICENSE](LICENSE) for details.

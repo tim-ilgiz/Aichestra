@@ -352,7 +352,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.json:
             sys.stdout.write(doctor_json(report))
         else:
-            sys.stdout.write(format_doctor_report(report) + "\n")
+            from aichestra.console_ui import format_doctor_pretty, use_pretty
+
+            if use_pretty():
+                sys.stdout.write(
+                    format_doctor_pretty(report, version=__version__)
+                )
+            else:
+                sys.stdout.write(format_doctor_report(report) + "\n")
         return 0 if report.ok else 1
 
     if args.command == "profile":
@@ -371,12 +378,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             enable_local=True if args.enable_local else None,
             approve_model_download=args.approve_model_download,
         )
-        _print_result(result.to_dict(), as_json=args.json)
+        _print_bootstrap_result(
+            result.to_dict(), as_json=args.json, command="bootstrap"
+        )
         return 0 if result.ok else 1
 
     if args.command == "update":
         result = update(repo_root=args.repo_root)
-        _print_result(result.to_dict(), as_json=args.json)
+        _print_bootstrap_result(
+            result.to_dict(), as_json=args.json, command="update"
+        )
         return 0 if result.ok else 1
 
     if args.command == "staging":
@@ -453,6 +464,22 @@ def _cmd_init(args: argparse.Namespace) -> int:
     from aichestra.config.project_settings import init_project
 
     root = Path(args.project_root or Path.cwd()).resolve()
+    pretty = False
+    if not args.json:
+        from aichestra.console_ui import banner, step, use_pretty
+
+        pretty = use_pretty()
+        if pretty:
+            sys.stdout.write(banner(version=__version__) + "\n\n")
+            sys.stdout.write(
+                step("progress", f"Project root: {root}") + "\n"
+            )
+            if not args.yes and sys.stdin.isatty():
+                sys.stdout.write(
+                    step("info", "Configure roles in the console editor")
+                    + "\n"
+                )
+            sys.stdout.flush()
     try:
         result = init_project(
             root,
@@ -463,8 +490,19 @@ def _cmd_init(args: argparse.Namespace) -> int:
     except (OSError, ValueError, NotADirectoryError) as exc:
         sys.stderr.write(str(exc) + "\n")
         return 2
+    result = dict(result)
+    result.setdefault("project_root", str(root))
     if args.json:
         sys.stdout.write(json.dumps(result, indent=2) + "\n")
+    elif pretty:
+        from aichestra.console_ui import format_init_report
+
+        sys.stdout.write(
+            "\n"
+            + format_init_report(
+                result, version=__version__, include_banner=False
+            )
+        )
     else:
         action = "created" if result.get("created") else "updated/existing"
         sys.stdout.write(f"aichestra init ({action}): {result.get('path')}\n")
@@ -875,6 +913,24 @@ def _print_result(data: dict, *, as_json: bool) -> None:
         return
     for key, value in data.items():
         sys.stdout.write(f"{key}: {value}\n")
+
+
+def _print_bootstrap_result(
+    data: dict, *, as_json: bool, command: str = "bootstrap"
+) -> None:
+    if as_json:
+        sys.stdout.write(json.dumps(data, indent=2) + "\n")
+        return
+    from aichestra.console_ui import format_bootstrap_report, use_pretty
+
+    if use_pretty():
+        sys.stdout.write(
+            format_bootstrap_report(
+                data, command=command, version=__version__
+            )
+        )
+        return
+    _print_result(data, as_json=False)
 
 
 if __name__ == "__main__":
