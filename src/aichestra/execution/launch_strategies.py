@@ -82,6 +82,15 @@ def expected_binding(target: ExecutionTarget) -> dict[str, str | None]:
     }
 
 
+def _with_v1_path(endpoint: str) -> str:
+    """Add the API suffix to the path, preserving query and fragment identity."""
+    parts = urlsplit(endpoint)
+    path = parts.path.rstrip("/")
+    if not path.endswith("/v1"):
+        path += "/v1"
+    return urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
+
+
 def _endpoints_equal(left: str | None, right: str | None) -> bool:
     a = _normalize_endpoint(left)
     b = _normalize_endpoint(right)
@@ -90,9 +99,7 @@ def _endpoints_equal(left: str | None, right: str | None) -> bool:
     if a == b:
         return True
     # OpenCode baseURL may include a trailing /v1 the discovery endpoint omitted.
-    a_v1 = a if a.endswith("/v1") else f"{a}/v1"
-    b_v1 = b if b.endswith("/v1") else f"{b}/v1"
-    return a_v1 == b_v1
+    return _with_v1_path(a) == _with_v1_path(b)
 
 
 @dataclass(frozen=True)
@@ -655,7 +662,7 @@ def _opencode_bridge_command(
         return None
     model_ref = f"{provider}/{model_id}"
     binary = target.runtime.binary_path or target.runtime.id
-    base = endpoint if endpoint.endswith("/v1") else f"{endpoint}/v1"
+    base = _with_v1_path(endpoint)
     config = {
         "$schema": "https://opencode.ai/config.json",
         "model": model_ref,
