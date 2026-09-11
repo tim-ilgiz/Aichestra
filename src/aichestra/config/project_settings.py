@@ -315,12 +315,142 @@ def _ensure_gitignore_user_local(project_root: Path) -> None:
         )
 
 
+_RUNTIME_LABELS = {
+    "codex": "Codex",
+    "cursor": "Cursor",
+    "gemini": "Gemini",
+    "opencode": "OpenCode",
+    "ollama": "Ollama",
+}
+
+
 def resolve_project_root(override=None) -> Path:
     if override is not None:
         return Path(override).expanduser().resolve()
     cwd = Path.cwd().resolve()
     return next((p for p in (cwd, *cwd.parents)
                  if project_config_path(p).is_file()), cwd)
+
+
+def _radio_glyphs() -> tuple[str, str]:
+    """Empty / filled radio marks (BMAD/inquirer style), ASCII if needed."""
+    empty, filled = "◯", "◉"
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        f"{empty}{filled}".encode(encoding)
+        return empty, filled
+    except (LookupError, UnicodeEncodeError):
+        return "( )", "(*)"
+
+
+def _runtime_label(runtime_id: str) -> str:
+    return _RUNTIME_LABELS.get(runtime_id, runtime_id)
+
+
+def _binding_summary(value: Any) -> str:
+    if not isinstance(value, Mapping) or not value.get("runtime"):
+        return "not set"
+    runtime = _runtime_label(str(value["runtime"]))
+    model = value.get("model")
+    provider = value.get("provider")
+    if model:
+        name = f"{provider}/{model}" if provider else str(model)
+        return f"{runtime} · {name}"
+    return f"{runtime} · runtime default"
+
+
+def _quota_summary(cfg: Mapping[str, Any]) -> str:
+    quota = cfg.get("quota") if isinstance(cfg.get("quota"), Mapping) else {}
+    mode = str(quota.get("mode") or "manual")
+    if mode == "auto":
+        roles = quota.get("roles") if isinstance(quota.get("roles"), Mapping) else {}
+        fallback = roles.get("implement") or quota.get("implement_fallback")
+        return f"auto · {_binding_summary(fallback)}"
+    return "manual · stop and notify"
+
+
+def _verification_summary(cfg: Mapping[str, Any]) -> str:
+    verification = cfg.get("verification") if isinstance(cfg.get("verification"), Mapping) else {}
+    if verification.get("enabled") and cfg.get("verify"):
+        return "on"
+    return "off"
+
+
+def _print_radio_menu(
+    question: str,
+    options: list[tuple[str, Any]],
+    *,
+    selected_index: int | None = None,
+    hint: str | None = None,
+) -> None:
+    empty, filled = _radio_glyphs()
+    print()
+    print(f"? {question}")
+    if hint:
+        print(f"  {hint}")
+    print()
+    for i, (name, _) in enumerate(options):
+        mark = filled if i == selected_index else empty
+        print(f"  {mark}  {i + 1}. {name}")
+    print()
+
+
+def _prompt_choice(
+    question: str,
+    options: list[tuple[str, Any]],
+    *,
+    selected: Any = None,
+    hint: str | None = None,
+    compare=None,
+) -> Any:
+    if not options:
+        raise ValueError(
+            f"No discovered {question}; install/configure a runtime, then retry"
+        )
+    selected_index = None
+    matcher = compare or (lambda left, right: left == right)
+    if selected is not None:
+        for i, (_, value) in enumerate(options):
+            if matcher(value, selected):
+                selected_index = i
+                break
+    _print_radio_menu(question, options, selected_index=selected_index, hint=hint)
+    raw = input("Enter number (Enter cancels): ").strip()
+    if not raw:
+        return None
+    if not raw.isdigit() or not 1 <= int(raw) <= len(options):
+        raise ValueError("Invalid selection")
+    return options[int(raw) - 1][1]
+
+
+def _discovered_model_options(runtime: str, facts, layered) -> list[tuple[str, dict[str, Any]]]:
+    options: list[tuple[str, dict[str, Any]]] = [
+        (
+            f"Use {_runtime_label(runtime)}'s default model",
+            {"runtime": runtime},
+        )
+    ]
+    from aichestra.execution.compatibility import load_compatibility_bindings
+    from aichestra.execution.targets import resolve_targets
+
+    for t in resolve_targets(facts, load_compatibility_bindings(layered)):
+        if t.runtime.id == runtime and t.model and t.enabled and t.available and t.capable:
+            label = f"{t.provider.id + '/' if t.provider else ''}{t.model.id}"
+            payload: dict[str, Any] = {"runtime": runtime, "model": t.model.id}
+            if t.provider:
+                payload["provider"] = t.provider.id
+            options.append((label, payload))
+    return options
+
+
+def _same_binding(left: Any, right: Any) -> bool:
+    if not isinstance(left, Mapping) or not isinstance(right, Mapping):
+        return left == right
+    return (
+        left.get("runtime") == right.get("runtime")
+        and (left.get("model") or None) == (right.get("model") or None)
+        and (left.get("provider") or None) == (right.get("provider") or None)
+    )
 
 
 def interactive_settings(project_root, *, config=None, save=True):
@@ -337,41 +467,75 @@ def interactive_settings(project_root, *, config=None, save=True):
     layered = resolve_config(repo_root=resolve_aichestra_config_root(project_root=root), project_root=root)
     facts = discover_execution_facts(layered)
     runtimes = [r for r in facts.runtimes if r.available and r.enabled]
+    empty = _radio_glyphs()[0]
 
-    def choose(label, options):
-        if not options:
-            raise ValueError(f"No discovered {label}; install/configure a runtime, then retry")
-        print(label)
-        for i, (name, _) in enumerate(options, 1):
-            print(f"  {i}. {name}")
-        raw = input("Choose number (Enter cancels): ").strip()
-        if not raw:
-            return None
-        if not raw.isdigit() or not 1 <= int(raw) <= len(options):
-            raise ValueError("Invalid selection")
-        return options[int(raw) - 1][1]
+    def choose(question, options, *, selected=None, hint=None, compare=None):
+        return _prompt_choice(
+            question, options, selected=selected, hint=hint, compare=compare
+        )
 
-    def binding():
-        runtime = choose("Available runtimes", [(r.id, r.id) for r in runtimes])
+    def binding(role_label: str, current: Any = None):
+        print()
+        print(f"Editing: {role_label}")
+        current_runtime = (
+            current.get("runtime") if isinstance(current, Mapping) else None
+        )
+        runtime = choose(
+            f"Choose a runtime for {role_label}",
+            [(_runtime_label(r.id), r.id) for r in runtimes],
+            selected=current_runtime,
+            hint="This picks which agent stack runs this role.",
+        )
         if runtime is None:
             return None
-        options = [("Runtime default model", {"runtime": runtime})]
-        # Only present compatible discovered models, not a cross-product.
-        from aichestra.execution.compatibility import load_compatibility_bindings
-        from aichestra.execution.targets import resolve_targets
-        for t in resolve_targets(facts, load_compatibility_bindings(layered)):
-            if t.runtime.id == runtime and t.model and t.enabled and t.available and t.capable:
-                options.append((f"{t.provider.id + '/' if t.provider else ''}{t.model.id}", {
-                    "runtime": runtime, "model": t.model.id,
-                    **({"provider": t.provider.id} if t.provider else {})}))
-        return choose("Models", options)
+        options = _discovered_model_options(runtime, facts, layered)
+        current_for_models = current if current_runtime == runtime else None
+        if len(options) == 1:
+            print()
+            print(
+                f"  No extra models were discovered for {_runtime_label(runtime)}."
+            )
+            print(
+                f"  {role_label} will use {_runtime_label(runtime)}'s default model."
+            )
+            return options[0][1]
+        return choose(
+            f"Choose a model for {role_label} on {_runtime_label(runtime)}",
+            options,
+            selected=current_for_models,
+            hint=(
+                f"Pick a specific discovered model, or keep "
+                f"{_runtime_label(runtime)}'s own default."
+            ),
+            compare=_same_binding,
+        )
+
+    def print_main_menu() -> None:
+        coordinator = (cfg.get("orchestration") or {}).get("coordinator")
+        roles = cfg.get("roles") if isinstance(cfg.get("roles"), Mapping) else {}
+        items = [
+            ("1", "Coordinator", _binding_summary(coordinator)),
+            ("2", "Coding", _binding_summary(roles.get("implement"))),
+            ("3", "Research", _binding_summary(roles.get("research"))),
+            ("4", "Tests", _binding_summary(roles.get("tests"))),
+            ("5", "Documentation", _binding_summary(roles.get("docs"))),
+            ("6", "Quota fallback", _quota_summary(cfg)),
+            ("7", "Verification", _verification_summary(cfg)),
+            ("8", "Save", "write .aichestra/project.json"),
+            ("0", "Cancel", "discard unsaved edits"),
+        ]
+        print()
+        print("Aichestra project settings")
+        print("Pick a number to edit that role. Save writes the project file.")
+        print()
+        for number, title, detail in items:
+            print(f"  {empty}  {number}. {title}")
+            print(f"        {detail}")
+        print()
 
     while True:
-        print(
-            "\n1. Coordinator  2. Coding  3. Research  4. Tests  "
-            "5. Documentation  6. Quota fallback  7. Verification  8. Save  0. Cancel"
-        )
-        action = input("Settings: ").strip()
+        print_main_menu()
+        action = input("Enter number: ").strip()
         if action == "0":
             return config if config is not None else load_project_config(root)
         if action == "8":
@@ -386,28 +550,62 @@ def interactive_settings(project_root, *, config=None, save=True):
                 save_project_config(root, cfg)
             return cfg
         if action == "1":
-            value = binding()
+            value = binding(
+                "Coordinator",
+                (cfg.get("orchestration") or {}).get("coordinator"),
+            )
             if value:
                 cfg.setdefault("orchestration", {})["coordinator"] = value
+                print(f"  Set Coordinator → {_binding_summary(value)}")
         elif action in {"2", "3", "4", "5"}:
-            value = binding()
+            role_key = ROLE_KEYS[int(action) - 2]
+            labels = {
+                "implement": "Coding",
+                "research": "Research",
+                "tests": "Tests",
+                "docs": "Documentation",
+            }
+            roles = cfg.setdefault("roles", {})
+            value = binding(labels[role_key], roles.get(role_key) if isinstance(roles, dict) else None)
             if value:
-                cfg.setdefault("roles", {})[ROLE_KEYS[int(action) - 2]] = value
+                roles[role_key] = value
+                print(f"  Set {labels[role_key]} → {_binding_summary(value)}")
         elif action == "6":
-            mode = choose("Quota mode", [("Manual: stop and notify", "manual"), ("Auto: continue same Run", "auto")])
+            quota = cfg.setdefault("quota", {})
+            mode = choose(
+                "How should coding quota exhaustion be handled?",
+                [
+                    ("Manual — stop and notify (do not switch runtime)", "manual"),
+                    ("Auto — continue the same Run on a fallback runtime", "auto"),
+                ],
+                selected=quota.get("mode") if isinstance(quota, dict) else None,
+            )
             if mode:
-                quota = cfg.setdefault("quota", {})
                 quota["mode"] = mode
                 if mode == "auto":
-                    value = binding()
+                    roles = quota.setdefault("roles", {})
+                    current = (
+                        roles.get("implement")
+                        if isinstance(roles, dict)
+                        else None
+                    ) or quota.get("implement_fallback")
+                    value = binding("Quota fallback for coding", current)
                     if value:
-                        roles = quota.setdefault("roles", {})
                         if not isinstance(roles, dict):
                             raise ValueError("quota.roles must be an object")
                         roles["implement"] = value
                         quota.pop("implement_fallback", None)
+                        print(
+                            f"  Set quota fallback → {_binding_summary(value)}"
+                        )
+                else:
+                    print("  Set quota mode → manual (stop and notify)")
         elif action == "7":
-            raw = input('Verification argv JSON (e.g. [["python", "-m", "pytest"]]): ').strip()
+            print()
+            print("? Verification commands")
+            print("  JSON argv list. Leave empty to cancel.")
+            print()
+            raw = input('Enter JSON (e.g. [["python", "-m", "pytest"]]): ').strip()
             if raw:
                 value = json.loads(raw)
                 from aichestra.orchestration.verification import verification_commands_from_config
@@ -415,3 +613,4 @@ def interactive_settings(project_root, *, config=None, save=True):
                     raise ValueError("Verification requires non-empty commands")
                 cfg["verify"] = value
                 cfg["verification"] = {"enabled": True}
+                print("  Set Verification → on")

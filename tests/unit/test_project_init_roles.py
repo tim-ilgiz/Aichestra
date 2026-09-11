@@ -251,7 +251,7 @@ def test_user_config_home_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     assert user_config_home() == home.resolve()
 
 
-def test_settings_menu_uses_discovery_and_preserves_cancel(tmp_path, monkeypatch):
+def test_settings_menu_uses_discovery_and_preserves_cancel(tmp_path, monkeypatch, capsys):
     import sys
     from aichestra.config.project_settings import interactive_settings, load_project_config
     from aichestra.execution.domain import AgentRuntime, DiscoveryFacts
@@ -259,14 +259,51 @@ def test_settings_menu_uses_discovery_and_preserves_cancel(tmp_path, monkeypatch
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr("aichestra.execution.discovery.discover_execution_facts",
                         lambda _: DiscoveryFacts(runtimes=(AgentRuntime("cursor", available=True),)))
-    replies = iter(["2", "1", "1", "8"])
+    replies = iter(["2", "1", "8"])
     monkeypatch.setattr("builtins.input", lambda _: next(replies))
     interactive_settings(tmp_path)
     assert load_project_config(tmp_path)["roles"]["implement"] == {"runtime": "cursor"}
+    out = capsys.readouterr().out
+    assert "1. Coordinator" in out
+    assert "2. Coding" in out
+    assert "1. Coordinator  2. Coding" not in out
+    assert "Choose a runtime for Coding" in out
+    assert "No extra models were discovered for Cursor." in out
+    assert "Coding will use Cursor's default model." in out
     before = load_project_config(tmp_path)
-    replies = iter(["6", "2", "1", "1", "0"])
+    replies = iter(["6", "2", "1", "0"])
     interactive_settings(tmp_path)
     assert load_project_config(tmp_path) == before
+
+
+def test_settings_menu_prompts_for_model_when_extras_exist(tmp_path, monkeypatch):
+    import sys
+    from aichestra.config.project_settings import interactive_settings, load_project_config
+    from aichestra.execution.domain import AgentRuntime, DiscoveryFacts
+    init_project(tmp_path, yes=True)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(
+        "aichestra.execution.discovery.discover_execution_facts",
+        lambda _: DiscoveryFacts(runtimes=(AgentRuntime("cursor", available=True),)),
+    )
+    monkeypatch.setattr(
+        "aichestra.config.project_settings._discovered_model_options",
+        lambda runtime, facts, layered: [
+            (f"Use {runtime}'s default model", {"runtime": runtime}),
+            (
+                "ollama/qwen2.5-coder:14b",
+                {"runtime": runtime, "provider": "ollama", "model": "qwen2.5-coder:14b"},
+            ),
+        ],
+    )
+    replies = iter(["2", "1", "2", "8"])
+    monkeypatch.setattr("builtins.input", lambda _: next(replies))
+    interactive_settings(tmp_path)
+    assert load_project_config(tmp_path)["roles"]["implement"] == {
+        "runtime": "cursor",
+        "provider": "ollama",
+        "model": "qwen2.5-coder:14b",
+    }
 
 
 def test_custom_runtime_settings_and_invalid_mutation_are_atomic(tmp_path):
