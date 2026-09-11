@@ -438,15 +438,33 @@ def _discovered_model_options(runtime: str, facts, layered) -> list[tuple[str, d
             {"runtime": runtime},
         )
     ]
-    from aichestra.execution.compatibility import load_compatibility_bindings
-    from aichestra.execution.targets import resolve_targets
-
-    for t in resolve_targets(facts, load_compatibility_bindings(layered)):
-        if t.runtime.id == runtime and t.model and t.enabled and t.available and t.capable:
-            label = f"{t.provider.id + '/' if t.provider else ''}{t.model.id}"
-            payload: dict[str, Any] = {"runtime": runtime, "model": t.model.id}
-            if t.provider:
-                payload["provider"] = t.provider.id
+    # Only the normalized Orca inventory may supply selectable model ids.
+    # Production leaves it absent until a documented transport is available.
+    catalog = facts.orca_catalog
+    if catalog is None or any(r.id == runtime and not r.enabled for r in facts.runtimes):
+        return options
+    execution = layered.get("execution", {})
+    provider_config = execution.get("model_providers", {})
+    seen = set()
+    for capability in catalog.runtimes:
+        if capability.id != runtime or not capability.available:
+            continue
+        for model in capability.models:
+            if not model.available:
+                continue
+            entry = provider_config.get(model.provider, {}) if model.provider else {}
+            if entry.get("enabled") is False:
+                continue
+            if entry.get("models", {}).get(model.id, {}).get("enabled") is False:
+                continue
+            key = (model.provider, model.id)
+            if key in seen:
+                continue
+            seen.add(key)
+            payload = {"runtime": runtime, "model": model.id}
+            if model.provider is not None:
+                payload["provider"] = model.provider
+            label = f"{model.provider} / {model.id}" if model.provider else model.id
             options.append((label, payload))
     return options
 
@@ -513,7 +531,9 @@ def interactive_settings(project_root, *, config=None, save=True):
         if len(options) == 1:
             print()
             print(
-                f"  No extra models were discovered for {_runtime_label(runtime)}."
+                "  Orca model catalog unavailable; add/manage models in Orca."
+                if facts.orca_catalog is None else
+                "  No selectable Orca catalog models; add/manage models in Orca."
             )
             print(
                 f"  {role_label} will use {_runtime_label(runtime)}'s default model."
@@ -537,8 +557,6 @@ def interactive_settings(project_root, *, config=None, save=True):
             list_registered_providers,
             list_registered_runtimes,
             register_agent_runtime,
-            register_ollama_provider,
-            register_openai_compatible_provider,
         )
         from aichestra.execution.runtimes import DEFAULT_RUNTIME_BINARIES
 
@@ -556,11 +574,11 @@ def interactive_settings(project_root, *, config=None, save=True):
             print()
             print("Agents & Models (machine-local — not committed)")
             print("  Policy selection only: runtime / provider / model.")
-            print("  Credentials and cloud auth live in Orca — never here.")
+            print("  Models, providers and credentials are managed only in Orca.")
             print()
             print(f"  {empty}  1. Discover from Orca")
             print(f"  {empty}  2. Add agent runtime (Codex / Cursor / …)")
-            print(f"  {empty}  3. Add local inference backend")
+            print(f"  {empty}  3. Manage models in Orca")
             print(f"  {empty}  4. Show discovered")
             print(f"  {empty}  0. Back")
             print()
@@ -576,7 +594,7 @@ def interactive_settings(project_root, *, config=None, save=True):
                     )
                     print(
                         "  Authenticate agents in Orca, or use "
-                        "Add agent runtime / Add local inference backend."
+                        "Add agent runtime. Models are managed only in Orca."
                     )
                     continue
                 print()
@@ -654,77 +672,9 @@ def interactive_settings(project_root, *, config=None, save=True):
                 print(f"  Registered runtime {picked}")
                 layered, facts, runtimes = refresh_discovery()
             elif action == "3":
-                kind = choose(
-                    "What kind of local inference backend?",
-                    [
-                        ("Ollama (local)", "ollama"),
-                        (
-                            "Local OpenAI-compatible (LM Studio / local vLLM / custom)",
-                            "openai",
-                        ),
-                    ],
-                    hint=(
-                        "For OpenRouter / OpenAI / Anthropic / cloud Gemini — "
-                        "authenticate in Orca; discovery currently exposes account hints only. "
-                        "Do not configure API keys here."
-                    ),
-                )
-                if kind is None:
-                    continue
-                pair = choose(
-                    "Pair with OpenCode so models can be used as workers?",
-                    [
-                        ("Yes — recommended for local/coding workers", True),
-                        ("No — register provider only", False),
-                    ],
-                    selected=True,
-                )
-                if pair is None:
-                    continue
-                if kind == "ollama":
-                    print()
-                    raw_ep = input(
-                        "Ollama endpoint [http://127.0.0.1:11434]: "
-                    ).strip()
-                    endpoint = raw_ep or "http://127.0.0.1:11434"
-                    register_ollama_provider(
-                        endpoint=endpoint,
-                        enable_local=True,
-                        pair_opencode=bool(pair),
-                        repo_root=config_root,
-                    )
-                    print(f"  Registered ollama @ {endpoint}")
-                    pid = "ollama"
-                else:
-                    print()
-                    pid = input(
-                        "Provider id (e.g. lmstudio, vllm): "
-                    ).strip()
-                    endpoint = input(
-                        "Base endpoint (e.g. http://127.0.0.1:1234/v1): "
-                    ).strip()
-                    register_openai_compatible_provider(
-                        pid,
-                        endpoint=endpoint,
-                        pair_opencode=bool(pair),
-                        repo_root=config_root,
-                    )
-                    print(f"  Registered {pid} @ {endpoint}")
-                layered, facts, runtimes = refresh_discovery()
-                matched = next(
-                    (p for p in facts.providers if p.id == pid),
-                    None,
-                )
-                if matched and matched.available:
-                    models = [m for m in facts.models if m.provider == matched.id]
-                    print(
-                        f"  Reachable — {len(models)} model(s) discovered."
-                    )
-                else:
-                    print(
-                        "  Configured. Local endpoint not reachable yet "
-                        "(start the backend, then rediscover)."
-                    )
+                print("  Add models and providers in Orca settings.")
+                print("  Orca model catalog unavailable: account hints do not list models.")
+                print("  Aichestra cannot import specific models until Orca exposes a catalog.")
             elif action == "4":
                 print()
                 hints = discover_orca_agent_hints()
@@ -743,7 +693,7 @@ def interactive_settings(project_root, *, config=None, save=True):
                             f"  {mark} {_runtime_label(h['runtime'])}: {status}"
                         )
                 if providers:
-                    print("  Local inference:")
+                    print("  Legacy local diagnostics (not an Orca model catalog):")
                     for row in providers:
                         matched = next(
                             (p for p in facts.providers if p.id == row["id"]),
@@ -778,7 +728,7 @@ def interactive_settings(project_root, *, config=None, save=True):
                 if not hints and not providers and not rts:
                     print("  Nothing discovered or registered yet.")
                     print(
-                        "  Try Discover from Orca, or add a local runtime / backend."
+                        "  Try Discover from Orca. Add/manage models in Orca settings."
                     )
 
     def print_main_menu() -> None:
@@ -794,7 +744,7 @@ def interactive_settings(project_root, *, config=None, save=True):
             ("5", "Documentation", _binding_summary(roles.get("docs"))),
             ("6", "Quota fallback", _quota_summary(cfg)),
             ("7", "Verification", _verification_summary(cfg)),
-            ("8", "Agents & Models", "Orca discovery / runtimes / local backends"),
+            ("8", "Agents & Models", "Orca accounts / runtimes / models in Orca"),
             ("9", "Save", "write .aichestra/project.json"),
             ("0", "Cancel", "discard unsaved project edits"),
         ]

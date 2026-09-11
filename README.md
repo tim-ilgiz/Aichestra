@@ -254,16 +254,24 @@ Choose **Agents & Models** to:
 * **Discover from Orca** — see which agent runtimes are authenticated there
   (Codex, Cursor, Claude, Gemini, OpenCode, …) without copying credentials;
 * **Add agent runtime** — extend the selectable list (built-in or custom binary);
-* **Add local inference backend** — Ollama or a local OpenAI-compatible endpoint
-  (LM Studio / local vLLM). Cloud providers with API keys are **not** configured here.
+* **Manage models in Orca** — add local and cloud providers/models in Orca settings.
 
-Endpoints for local backends live in machine-local config (not committed).
-Aichestra never stores API keys or env-var names for secrets — that stays with Orca
-and the agent runtime.
+Aichestra does not register model providers or request endpoints/credentials.
+Legacy registration helpers reject writes. Existing local backend diagnostics remain
+available, but their HTTP-discovered models are not selectable in settings.
 
-A model provider alone is not a Mode C worker. Pairing with OpenCode (offered in the menu) lets discovered models be selected for roles; Orca still owns launch.
+**Orca model catalog is unavailable in the supported integration.** Account signals
+are not a model catalog or launch proof. Interactive role selection currently offers
+runtime defaults only. The internal `OrcaCapabilityCatalog` boundary in
+`DiscoveryFacts` supports runtime/model inventory with availability, optional
+provider metadata, capabilities and effort choices. Production transport awaits a
+documented Orca catalog contract; no model ids or catalog commands are invented.
+Model ids are opaque and remain unchanged (including any `/`); provider is optional.
+Catalog entries are not launch proof: selected agent/model must match the Orca
+`launch.effective` receipt. Effort choices are inventory metadata for now.
 
-Non-interactive example for tests via OpenCode + Ollama:
+Existing non-interactive role policy can reference a model already configured in Orca
+(this does not add a model or prove it is available):
 
 ```bash
 aichestra settings set roles.tests.runtime=opencode
@@ -590,7 +598,7 @@ Configure agents and models:
 aichestra settings
 ```
 
-(Use **Agents & Models** to discover Orca agents or add local runtimes / backends.)
+(Use **Agents & Models** to discover Orca agents or manage models in Orca.)
 
 Show project settings:
 

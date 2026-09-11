@@ -4,7 +4,9 @@
 
 **Created**: 2026-09-11
 
-**Status**: In progress
+**Status**: Foundation; model registration and selection superseded by
+[006](../006-orca-model-catalog/spec.md). Local addition described below is historical
+feature intent, no longer the current settings behavior.
 
 **Input**: Users must choose agent runtimes and (when needed) local inference
 backends for project roles without editing JSON by hand. Prefer an interactive
@@ -99,7 +101,8 @@ suggests enabling matching runtimes — without copying credentials.
 ## Review gaps (2026-09-11)
 
 - **OPEN — Orca model catalog:** Discover from Orca must ultimately supply
-  selectable runtime/provider/model tuples for Coding, Research, Tests, and Docs.
+  selectable runtime/model pairs for Coding, Research, Tests, and Docs (provider
+  is optional; see 006 for the current selection contract).
   The installed CLI agent-context schema has account list and opaque worker-start
   --model support, but no model/provider catalog command. Do not invent model ids,
   read credentials, or claim account hints implement this requirement. Integration

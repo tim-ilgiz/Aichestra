@@ -1,8 +1,8 @@
 """Machine-local registration helpers for Agents & Models setup.
 
-Writes only to untracked machine-local config. Aichestra records policy
-selection facts (runtime / local endpoint ids) — never API keys, tokens, or
-``api_key_env`` names. Authenticated cloud availability comes from Orca.
+Runtime registration writes only untracked machine-local policy. Legacy model
+provider registration is rejected: models/providers belong to Orca settings.
+Account signals are hints, never a model catalog or launch proof.
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ from aichestra.config.layering import (
     save_machine_local,
 )
 from aichestra.execution.runtimes import DEFAULT_RUNTIME_BINARIES
-from aichestra.local_runtime.http import validate_local_endpoint
 
 _PROVIDER_ID = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 _RUNTIME_ID = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
@@ -69,24 +68,7 @@ def register_ollama_provider(
     pair_opencode: bool = True,
     repo_root: Path | None = None,
 ) -> dict[str, Any]:
-    endpoint = validate_local_endpoint(endpoint)
-    patch: dict[str, Any] = {
-        "local": {"enabled": bool(enable_local), "ollama_host": endpoint},
-        "execution": {
-            "model_providers": {
-                "ollama": {
-                    "enabled": True,
-                    "endpoint": endpoint,
-                    "locality": "local",
-                }
-            }
-        },
-    }
-    merged = merge_machine_local(patch, repo_root=repo_root)
-    if pair_opencode:
-        merged = apply_opencode_binding(merged, "ollama")
-        save_machine_local(merged, repo_root=repo_root)
-    return merged
+    raise ValueError("Models and providers must be added in Orca settings")
 
 
 def register_openai_compatible_provider(
@@ -96,29 +78,8 @@ def register_openai_compatible_provider(
     pair_opencode: bool = True,
     repo_root: Path | None = None,
 ) -> dict[str, Any]:
-    """Register a local OpenAI-compatible inference backend (no credentials).
-
-    Intended for LM Studio / local vLLM / similar. Authenticated remote
-    providers (OpenRouter, OpenAI, …) belong to Orca discovery — do not pass
-    API keys or env-var names here.
-    """
-    pid = validate_provider_id(provider_id)
-    endpoint = validate_local_endpoint(endpoint)
-    entry: dict[str, Any] = {
-        "enabled": True,
-        "endpoint": endpoint,
-        "api_style": "openai",
-        "configured": True,
-        "locality": "local",
-    }
-    patch: dict[str, Any] = {
-        "execution": {"model_providers": {pid: entry}},
-    }
-    merged = merge_machine_local(patch, repo_root=repo_root)
-    if pair_opencode:
-        merged = apply_opencode_binding(merged, pid)
-        save_machine_local(merged, repo_root=repo_root)
-    return merged
+    """Reject legacy registration without modifying machine configuration."""
+    raise ValueError("Models and providers must be added in Orca settings")
 
 
 def register_agent_runtime(

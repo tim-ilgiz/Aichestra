@@ -27,66 +27,61 @@ def test_validate_provider_id_rejects_bad_values():
     assert validate_provider_id("lmstudio") == "lmstudio"
 
 
-def test_register_openai_compatible_writes_machine_local(tmp_path, monkeypatch):
-    monkeypatch.setenv("AICHESTRA_CONFIG_HOME", str(tmp_path / "cfg"))
-    # Force user-config-home layout (not Aichestra clone .local/).
-    from aichestra.config import layering
+@pytest.mark.parametrize("register", [
+    lambda root: register_ollama_provider(repo_root=root),
+    lambda root: register_openai_compatible_provider(
+        "lmstudio", endpoint="http://127.0.0.1:1234/v1", repo_root=root),
+])
+def test_model_registration_requires_orca_without_writing(tmp_path, monkeypatch, register):
+    path = tmp_path / "machine.local.json"
+    path.write_text('{"existing": true}', encoding="utf-8")
+    monkeypatch.setattr("aichestra.config.provider_setup.machine_local_path", lambda repo_root=None: path)
+    with pytest.raises(ValueError, match="Orca settings"):
+        register(tmp_path)
+    assert json.loads(path.read_text()) == {"existing": True}
 
-    monkeypatch.setattr(
-        layering,
-        "machine_local_path",
-        lambda repo_root=None: Path(tmp_path / "cfg" / "machine.local.json"),
+
+def test_local_discovery_cannot_supply_settings_model_options():
+    from aichestra.config.project_settings import _discovered_model_options
+    from aichestra.execution.domain import DiscoveryFacts, Model
+    facts = DiscoveryFacts(models=(Model("qwen", "ollama", available=True),))
+    options = _discovered_model_options("opencode", facts, {})
+    assert [payload for _, payload in options] == [{"runtime": "opencode"}]
+
+
+def test_orca_catalog_options_preserve_opaque_ids_and_filter_availability():
+    from dataclasses import replace
+    from aichestra.config.project_settings import _discovered_model_options
+    from aichestra.execution.domain import (
+        AgentRuntime, DiscoveryFacts, OrcaCapabilityCatalog,
+        RuntimeCapability, RuntimeModel,
     )
-    register_openai_compatible_provider(
-        "lmstudio",
-        endpoint="http://127.0.0.1:1234/v1",
-        pair_opencode=True,
-        repo_root=tmp_path / "cfg",
+
+    facts = DiscoveryFacts(
+        runtimes=(AgentRuntime("custom", available=True),),
+        orca_catalog=OrcaCapabilityCatalog(runtimes=(
+            RuntimeCapability("custom", available=True, models=(
+                RuntimeModel("upstream/model", available=True, efforts=("high",)),
+                RuntimeModel("offline"),
+                RuntimeModel("blocked", available=True, provider="disabled"),
+                RuntimeModel("explicit", available=True, provider="backend"),
+            )),
+            RuntimeCapability("other", available=True, models=(
+                RuntimeModel("wrong-runtime", available=True),
+            )),
+            RuntimeCapability("custom", models=(
+                RuntimeModel("unavailable-runtime", available=True),
+            )),
+        )),
     )
-    data = load_json(Path(tmp_path / "cfg" / "machine.local.json"))
-    entry = data["execution"]["model_providers"]["lmstudio"]
-    assert entry["api_style"] == "openai"
-    assert entry["endpoint"] == "http://127.0.0.1:1234/v1"
-    assert "api_key_env" not in entry
-    assert {"runtime": "opencode", "provider": "lmstudio"} in data["execution"]["bindings"]
-    assert data["execution"]["runtimes"]["opencode"]["enabled"] is True
-
-
-def test_register_openai_compatible_rejects_api_key_env_kwarg():
-    import inspect
-
-    sig = inspect.signature(register_openai_compatible_provider)
-    assert "api_key_env" not in sig.parameters
-
-
-def test_register_ollama_preserves_existing_bindings(tmp_path, monkeypatch):
-    path = Path(tmp_path / "machine.local.json")
-    path.write_text(
-        json.dumps(
-            {
-                "execution": {
-                    "bindings": [{"runtime": "opencode", "provider": "openrouter"}]
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(
-        "aichestra.config.provider_setup.machine_local_path",
-        lambda repo_root=None: path,
-    )
-    monkeypatch.setattr(
-        "aichestra.config.provider_setup.save_machine_local",
-        lambda data, repo_root=None: path.write_text(
-            json.dumps(data, indent=2) + "\n", encoding="utf-8"
-        )
-        or path,
-    )
-    register_ollama_provider(endpoint="http://127.0.0.1:11434", repo_root=tmp_path)
-    data = json.loads(path.read_text(encoding="utf-8"))
-    bindings = data["execution"]["bindings"]
-    assert {"runtime": "opencode", "provider": "openrouter"} in bindings
-    assert {"runtime": "opencode", "provider": "ollama"} in bindings
+    config = {"execution": {"model_providers": {"disabled": {"enabled": False}}}}
+    assert [p for _, p in _discovered_model_options("custom", facts, config)] == [
+        {"runtime": "custom"},
+        {"runtime": "custom", "model": "upstream/model"},
+        {"runtime": "custom", "model": "explicit", "provider": "backend"},
+    ]
+    disabled = replace(facts, runtimes=(AgentRuntime("custom", enabled=False),))
+    assert len(_discovered_model_options("custom", disabled, config)) == 1
 
 
 def test_openai_compatible_probe_lists_models_without_auth(monkeypatch):
@@ -210,7 +205,7 @@ def test_register_agent_runtime_extends_builtin_list(tmp_path, monkeypatch):
     assert data["execution"]["runtimes"]["acme-agent"]["binaries"] == ["acme-cli"]
 
 
-def test_settings_agents_menu_registers_local_openai(tmp_path, monkeypatch):
+def test_settings_models_redirects_to_orca_without_writing(tmp_path, monkeypatch, capsys):
     import sys
 
     from aichestra.config.project_settings import (
@@ -237,25 +232,14 @@ def test_settings_agents_menu_registers_local_openai(tmp_path, monkeypatch):
         )
         or machine,
     )
-    # 8 Agents & Models → 3 local backend → 2 openai → pair yes → id/endpoint → back → save
-    replies = iter(
-        [
-            "8",
-            "3",
-            "2",
-            "1",
-            "lmstudio",
-            "http://127.0.0.1:1234/v1",
-            "0",
-            "9",
-        ]
-    )
+    replies = iter(["8", "3", "0", "9"])
     monkeypatch.setattr("builtins.input", lambda _: next(replies))
     interactive_settings(tmp_path)
-    data = json.loads(machine.read_text(encoding="utf-8"))
-    entry = data["execution"]["model_providers"]["lmstudio"]
-    assert entry["api_style"] == "openai"
-    assert "api_key_env" not in entry
+    assert not machine.exists()
+    output = capsys.readouterr().out
+    assert "Add models and providers in Orca settings" in output
+    assert "Orca model catalog unavailable" in output
+    assert "Add local inference backend" not in output
 
 
 @pytest.mark.parametrize("endpoint", [

@@ -270,7 +270,7 @@ def test_settings_menu_uses_discovery_and_preserves_cancel(tmp_path, monkeypatch
     assert "9. Save" in out
     assert "1. Coordinator  2. Coding" not in out
     assert "Choose a runtime for Coding" in out
-    assert "No extra models were discovered for Cursor." in out
+    assert "Orca model catalog unavailable; add/manage models in Orca." in out
     assert "Coding will use Cursor's default model." in out
     before = load_project_config(tmp_path)
     replies = iter(["6", "2", "1", "0"])
