@@ -476,6 +476,14 @@ def interactive_settings(project_root, *, config=None, save=True):
     runtimes = [r for r in facts.runtimes if r.available and r.enabled]
     empty = _radio_glyphs()[0]
 
+    from aichestra import __version__
+    from aichestra.console_ui import banner, use_pretty
+
+    if use_pretty():
+        print()
+        print(banner(version=__version__))
+        print()
+
     def choose(question, options, *, selected=None, hint=None, compare=None):
         return _prompt_choice(
             question, options, selected=selected, hint=hint, compare=compare
