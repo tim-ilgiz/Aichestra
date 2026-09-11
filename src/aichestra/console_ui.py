@@ -1,6 +1,7 @@
 """Zero-dependency terminal chrome for interactive CLI output.
 
 Pretty boxes/steps when stdout is a TTY; ASCII + no color otherwise.
+Includes a BMAD-style brand banner (gradient wordmark + tagline).
 Machine-readable ``--json`` paths must not use this module.
 """
 
@@ -21,7 +22,7 @@ def stdout_is_tty(stream: TextIO | None = None) -> bool:
 def supports_unicode(stream: TextIO | None = None) -> bool:
     target = stream if stream is not None else sys.stdout
     encoding = getattr(target, "encoding", None) or "utf-8"
-    sample = "╭─╮│╰╯●◇▲✓✗"
+    sample = "╭─╮│╰╯●◇▲✓✗█╔═╗║╚╝◦╱╲·"
     try:
         sample.encode(encoding)
         return True
@@ -43,6 +44,18 @@ def use_color(stream: TextIO | None = None) -> bool:
     return True
 
 
+def use_truecolor(stream: TextIO | None = None) -> bool:
+    """24-bit ANSI when color is on and the terminal advertises truecolor."""
+    if not use_color(stream):
+        return False
+    colorterm = (os.environ.get("COLORTERM") or "").lower()
+    if "truecolor" in colorterm or "24bit" in colorterm:
+        return True
+    # Common modern terminals support truecolor even without COLORTERM.
+    term = (os.environ.get("TERM") or "").lower()
+    return any(token in term for token in ("256color", "truecolor", "xterm-ghostty", "alacritty"))
+
+
 def use_pretty(stream: TextIO | None = None) -> bool:
     """Interactive chrome for humans; off when piped / CI-friendly plain logs."""
     return stdout_is_tty(stream)
@@ -58,9 +71,53 @@ def _term_width(stream: TextIO | None = None, *, default: int = 72) -> int:
     return max(48, min(width, 88))
 
 
+# Brand wordmark (FIGlet-style "ANSI Shadow"); 68 columns.
+_LOGO_WORDMARK_UNICODE: tuple[str, ...] = (
+    " █████╗ ██╗ ██████╗██╗  ██╗███████╗███████╗████████╗██████╗  █████╗ ",
+    "██╔══██╗██║██╔════╝██║  ██║██╔════╝██╔════╝╚══██╔══╝██╔══██╗██╔══██╗",
+    "███████║██║██║     ███████║█████╗  ███████╗   ██║   ██████╔╝███████║",
+    "██╔══██║██║██║     ██╔══██║██╔══╝  ╚════██║   ██║   ██╔══██╗██╔══██║",
+    "██║  ██║██║╚██████╗██║  ██║███████╗███████║   ██║   ██║  ██║██║  ██║",
+    "╚═╝  ╚═╝╚═╝ ╚═════╝╚═╝  ╚═╝╚══════╝╚══════╝   ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝",
+)
+
+_LOGO_WORDMARK_ASCII: tuple[str, ...] = (
+    "   _    _      _               _             ",
+    "  / \\  (_) ___| |__   ___  ___| |_ _ __ __ _ ",
+    " / _ \\ | |/ __| '_ \\ / _ \\/ __| __| '__/ _` |",
+    "/ ___ \\| | (__| | | |  __/\\__ \\ |_| | | (_| |",
+    "/_/   \\_\\_|\\___|_| |_|\\___||___/\\__|_|  \\__,_|",
+)
+
+# Stylized "A" + agent nodes (brand mark), ~centered for 68-col wordmark.
+_LOGO_MARK_UNICODE: tuple[str, ...] = (
+    "              ◦     /╲     ◦",
+    "           ◦     ╱╱──╲╲     ◦",
+    "             ·  ╱╱    ╲╲  ·",
+    "               ╱╱──·───╲╲",
+    "              ╱╱         ╲╲",
+)
+
+_LOGO_MARK_ASCII: tuple[str, ...] = (
+    "              o     /\\     o",
+    "           o     //--\\\\     o",
+    "             .  //    \\\\  .",
+    "               //--.--\\\\",
+    "              //         \\\\",
+)
+
+_LOGO_TAGLINE = "ORCHESTRATE INTELLIGENCE TOGETHER"
+_LOGO_WORDMARK_WIDTH = 68
+
+# Brand gradient: electric cyan -> violet (matches product logo).
+_GRADIENT_START = (0, 212, 255)
+_GRADIENT_END = (180, 77, 255)
+
+
 class _Style:
-    def __init__(self, enabled: bool) -> None:
+    def __init__(self, enabled: bool, *, truecolor: bool = False) -> None:
         self.enabled = enabled
+        self.truecolor = truecolor and enabled
 
     def _wrap(self, code: str, text: str) -> str:
         if not self.enabled:
@@ -84,6 +141,47 @@ class _Style:
 
     def cyan(self, text: str) -> str:
         return self._wrap("36", text)
+
+    def magenta(self, text: str) -> str:
+        return self._wrap("35", text)
+
+    def blue(self, text: str) -> str:
+        return self._wrap("34", text)
+
+    def rgb(self, r: int, g: int, b: int, text: str) -> str:
+        if not self.enabled:
+            return text
+        if self.truecolor:
+            return f"\033[38;2;{r};{g};{b}m{text}\033[0m"
+        # Approximate cyan/magenta split for basic ANSI.
+        mid = (r + g + b) / 3
+        if r >= g and r >= 140:
+            return self.magenta(text)
+        if b >= mid:
+            return self.cyan(text)
+        return self.magenta(text)
+
+    def gradient(self, text: str) -> str:
+        """Apply brand cyan→purple gradient across non-space characters."""
+        if not self.enabled or not text:
+            return text
+        chars = list(text)
+        span = max(1, sum(1 for ch in chars if not ch.isspace()) - 1)
+        out: list[str] = []
+        painted = 0
+        sr, sg, sb = _GRADIENT_START
+        er, eg, eb = _GRADIENT_END
+        for ch in chars:
+            if ch.isspace():
+                out.append(ch)
+                continue
+            t = painted / span
+            r = int(sr + (er - sr) * t)
+            g = int(sg + (eg - sg) * t)
+            b = int(sb + (eb - sb) * t)
+            out.append(self.rgb(r, g, b, ch))
+            painted += 1
+        return "".join(out)
 
 
 def _glyphs(*, unicode: bool) -> dict[str, str]:
@@ -148,7 +246,7 @@ def box(
 ) -> str:
     """Render a rounded (or ASCII) panel. ``lines`` may contain ANSI."""
     g = _glyphs(unicode=supports_unicode(stream))
-    style = _Style(use_color(stream))
+    style = _Style(use_color(stream), truecolor=use_truecolor(stream))
     total = width if width is not None else _term_width(stream)
     inner = max(20, total - 4)
 
@@ -171,18 +269,36 @@ def box(
 def banner(
     *,
     product: str = "Aichestra",
-    tagline: str = "Portable AI development orchestration",
+    tagline: str = _LOGO_TAGLINE,
     version: str | None = None,
     stream: TextIO | None = None,
 ) -> str:
-    style = _Style(use_color(stream))
-    lines = [
-        style.bold(product),
-        style.dim(tagline),
-    ]
-    if version:
-        lines.append(style.dim(f"v{version}"))
-    return box(lines, stream=stream)
+    """BMAD-style free-standing brand logo (gradient wordmark + tagline)."""
+    style = _Style(use_color(stream), truecolor=use_truecolor(stream))
+    unicode = supports_unicode(stream)
+    cols = _term_width(stream, default=_LOGO_WORDMARK_WIDTH)
+    wide = cols >= _LOGO_WORDMARK_WIDTH
+
+    lines: list[str] = []
+    if wide:
+        mark = _LOGO_MARK_UNICODE if unicode else _LOGO_MARK_ASCII
+        word = _LOGO_WORDMARK_UNICODE if unicode else _LOGO_WORDMARK_ASCII
+        for row in mark:
+            lines.append(style.cyan(row.center(_LOGO_WORDMARK_WIDTH)))
+        lines.append("")
+        for row in word:
+            lines.append(style.gradient(row))
+        subtitle = tagline or _LOGO_TAGLINE
+        lines.append(style.magenta(subtitle.center(_LOGO_WORDMARK_WIDTH)))
+        if version:
+            ver = f"v{version}"
+            lines.append(style.blue(ver.center(_LOGO_WORDMARK_WIDTH)))
+    else:
+        lines.append(style.gradient(product))
+        lines.append(style.magenta(tagline or _LOGO_TAGLINE))
+        if version:
+            lines.append(style.dim(f"v{version}"))
+    return "\n".join(lines)
 
 
 def step(
@@ -193,7 +309,7 @@ def step(
 ) -> str:
     """One status line: progress | done | warn | info | fail."""
     g = _glyphs(unicode=supports_unicode(stream))
-    style = _Style(use_color(stream))
+    style = _Style(use_color(stream), truecolor=use_truecolor(stream))
     kind = kind.lower()
     if kind == "progress":
         mark = style.cyan(g["progress"])
@@ -216,7 +332,7 @@ def checklist(
     stream: TextIO | None = None,
 ) -> str:
     g = _glyphs(unicode=supports_unicode(stream))
-    style = _Style(use_color(stream))
+    style = _Style(use_color(stream), truecolor=use_truecolor(stream))
     lines: list[str] = []
     for ok, label in items:
         mark = style.green(g["check"]) if ok else style.yellow(g["warn"])
@@ -378,7 +494,7 @@ def format_doctor_pretty(
     checks = getattr(report, "checks", ()) or ()
     live = getattr(report, "live_validation", {}) or {}
     ok = bool(getattr(report, "ok", False))
-    style = _Style(use_color(stream))
+    style = _Style(use_color(stream), truecolor=use_truecolor(stream))
 
     parts: list[str | None] = [
         banner(version=version, stream=stream),

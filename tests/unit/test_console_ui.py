@@ -48,15 +48,38 @@ def test_ascii_fallback_when_encoding_cannot_encode_boxes() -> None:
     assert "hello" in rendered
 
 
-def test_banner_and_steps_render_stable_markers() -> None:
+def test_banner_and_steps_render_stable_markers(monkeypatch) -> None:
     stream = _FakeStream(tty=False, encoding="utf-8")
+    monkeypatch.setenv("TERM", "xterm-256color")
+    # Force wide logo path regardless of host terminal size.
+    monkeypatch.setattr(
+        "aichestra.console_ui._term_width",
+        lambda stream=None, default=72: 80,
+    )
     text = banner(version="0.1.0", stream=stream)
-    assert "Aichestra" in text
+    assert "ORCHESTRATE INTELLIGENCE TOGETHER" in text
     assert "v0.1.0" in text
-    assert "╭" in text or "+" in text
+    assert "█" in text or "Aichestra" in text
     assert "●" in step("progress", "go", stream=stream) or "*" in step(
         "progress", "go", stream=stream
     )
+
+
+def test_banner_ascii_fallback_on_narrow_or_ascii(monkeypatch) -> None:
+    ascii_stream = _FakeStream(tty=True, encoding="ascii")
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr(
+        "aichestra.console_ui._term_width",
+        lambda stream=None, default=72: 80,
+    )
+    text = banner(version="1.2.3", stream=ascii_stream)
+    assert "ORCHESTRATE INTELLIGENCE TOGETHER" in text
+    assert "v1.2.3" in text
+    assert "█" not in text
+    assert "╔" not in text
+    # ASCII mark uses plain slashes; wordmark uses underscore glyphs.
+    assert "/\\" in text or "_" in text
 
 
 def test_format_init_report_includes_path_and_next_steps() -> None:
