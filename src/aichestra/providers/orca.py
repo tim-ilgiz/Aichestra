@@ -724,20 +724,29 @@ class OrcaProvider(ProviderAdapter):
                 )
             agent = target.runtime.id
             from aichestra.execution.serialize import (
+                ROLE_DISPATCH_OPERATION,
+                dispatch_role_invocation,
                 prove_launch_invocation,
                 render_cli_invocation,
             )
 
+            repo_root_ctx = (
+                str(request.context.get("aichestra_repo_root")).strip()
+                if isinstance(request.context.get("aichestra_repo_root"), str)
+                and str(request.context.get("aichestra_repo_root")).strip()
+                else None
+            )
             prove_invocation = prove_launch_invocation(
                 project_root=str(request.context.get("project_root") or "<root>"),
-                repo_root=(
-                    str(request.context.get("aichestra_repo_root")).strip()
-                    if isinstance(request.context.get("aichestra_repo_root"), str)
-                    and str(request.context.get("aichestra_repo_root")).strip()
-                    else None
-                ),
+                repo_root=repo_root_ctx,
             )
             prove_display = render_cli_invocation(prove_invocation)
+            dispatch_invocation = dispatch_role_invocation(
+                project_root=str(request.context.get("project_root") or "<root>"),
+                repo_root=repo_root_ctx,
+                run_id=str(request.context.get("run_id") or "<run-id>"),
+            )
+            dispatch_display = render_cli_invocation(dispatch_invocation)
             # Preserve the complete policy; generic bounded_prompt truncates context.
             contract = (
                 "Target:\nYou are the explicit Mode C coordinator for project_root in ProjectContext. "
@@ -751,16 +760,22 @@ class OrcaProvider(ProviderAdapter):
                 "ExecutionTargets:\n"
                 "The coordinator owns the DAG: which Tasks to create and when. "
                 "Aichestra owns POLICY_PACKAGE.role_dispatch_contract: each worker "
-                "role maps to one exact execution_target_id. Orca MUST Dispatch "
-                "that execution_target_id for the Task role. The coordinator MUST "
-                "NOT choose a different runtime or target for a bound role. "
+                "role maps to one exact execution_target_id. Prefer "
+                f"`{ROLE_DISPATCH_OPERATION}` via structured role_dispatch_invocation "
+                f"`{dispatch_display}` after Task create (pass --run/--task/--role). "
+                "That entrypoint resolves the project binding, proves launch when "
+                "requires_launch_proof is true, and worker-starts only the bound "
+                "target — another target cannot be Dispatched through it. "
+                "The coordinator MUST NOT choose a different runtime or target for a "
+                "bound role. "
                 "The coordinator package includes canonical execution_targets "
                 "(runnable only), execution_target_candidates (non-dispatchable), "
                 "and execution_policy (execution_target_contract_version). "
-                "For inner workers, Dispatch only the contracted execution_target_id "
-                "from role_dispatch_contract.bindings, which must also appear in "
-                "execution_targets "
+                "For direct Orca worker-start, Dispatch only a contracted "
+                "execution_target_id that also appears in execution_targets "
                 "(enabled, available, capable, allowed, and runnable). "
+                "When bindings[role].requires_launch_proof is true, prove-launch "
+                "candidate_id first (or use dispatch-role which proves then starts). "
                 "orca-existing-terminal targets include launch_ref; Dispatch that "
                 "handle — do not invent a terminal. "
                 "Candidates require aichestra.prove_launch via "
@@ -781,7 +796,7 @@ class OrcaProvider(ProviderAdapter):
                 "Never pass a raw terminal handle to abort-launch. "
                 "Target locality may be local, remote, or cloud according to ExecutionPolicy. "
                 "Do not infer workers from raw providers. "
-                "Every inner task must use its exact role (implement/research/tests/docs) as task-title. Canonical worker-show launch.effective receipts are audited; missing or mismatched evidence fails the Run. This audit is post-dispatch and is not a substitute for Orca pinning Dispatch to execution_target_id. "
+                "Every inner task must use its exact role (implement/research/tests/docs) as task-title. Canonical worker-show launch.effective receipts are audited; missing or mismatched evidence fails the Run. This audit is post-dispatch and is not a substitute for pinning Dispatch to execution_target_id via dispatch-role. "
                 "orchestration.coordinator is this coordinator LLM and is independent of roles.implement. "
                 "POLICY_PACKAGE.role_dispatch_contract.bindings is a typed binding: "
                 "for each child Task declare role in {implement,research,tests,docs} and "
@@ -796,7 +811,7 @@ class OrcaProvider(ProviderAdapter):
                 "mode=manual escalate/ask the operator to change roles via "
                 "`aichestra settings` and finish with worker_done failed if blocked; "
                 "if mode=auto, same-Run Dispatch of quota.roles.implement "
-                "execution_target_id via Orca (never call Cursor/Codex outside Orca, "
+                "execution_target_id via dispatch-role or Orca (never call Cursor/Codex outside Orca, "
                 "and never replace this coordinator). "
                 "Do not invent additional hard-coded phase→product maps beyond "
                 "role_dispatch_contract. "
@@ -848,6 +863,8 @@ class OrcaProvider(ProviderAdapter):
                         "execution_target_contract_version",
                         "launch_proof_operation",
                         "launch_proof_invocation",
+                        "role_dispatch_operation",
+                        "role_dispatch_invocation",
                         "role_bindings",
                         "quota_policy",
                         "coordinator_binding",

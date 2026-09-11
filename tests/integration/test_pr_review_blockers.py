@@ -334,6 +334,126 @@ def test_bootstrap_uses_coordinator_not_implement(tmp_path):
     assert package["quota_policy"]["roles"]["implement"]["runtime"] == "cursor"
 
 
+def test_custom_coordinator_survives_mode_c_run_all(tmp_path):
+    """Registered execution.runtimes must survive controller re-parse."""
+    orca = fake_orca()
+    custom = fake_execution_targets("my-agent")
+    native = fake_execution_targets()
+    ctl = ModeCRunController(bindings=WorkflowBindings(
+        orca=orca, project_root=str(tmp_path), task_prompt="fix typo",
+        execution_targets=native + custom, verification_enabled=True,
+        verification_commands=[[sys.executable, "-c", "pass"]],
+        coordinator_binding={"runtime": "my-agent"},
+        role_bindings={r: {"runtime": "codex"} for r in ("implement", "research", "tests", "docs")},
+    ))
+    state = ctl.run_all()
+    assert not state.failed, state.failed
+    handoff = next(r for r in orca.sent if (r.role or "") == MODE_C_HANDOFF_ROLE)
+    assert handoff.execution_target.runtime.id == "my-agent"
+    package = state.metadata["mode_c_policy_package"]
+    assert package["coordinator_binding"]["runtime"] == "my-agent"
+    assert package["role_dispatch_contract"]["bindings"]["implement"]["runtime"] == "codex"
+
+
+def test_custom_quota_fallback_survives_policy_package(tmp_path):
+    orca = fake_orca()
+    targets = (
+        fake_execution_targets()
+        + fake_execution_targets("cursor")
+        + fake_execution_targets("quota-agent")
+    )
+    ctl = ModeCRunController(bindings=WorkflowBindings(
+        orca=orca, project_root=str(tmp_path), task_prompt="fix typo",
+        execution_targets=targets, verification_enabled=True,
+        verification_commands=[[sys.executable, "-c", "pass"]],
+        coordinator_binding={"runtime": "codex"},
+        role_bindings={r: {"runtime": "codex"} for r in ("implement", "research", "tests", "docs")},
+        quota_policy={"mode": "auto", "roles": {"implement": {"runtime": "quota-agent"}}},
+    ))
+    state = ctl.run_all()
+    assert not state.failed, state.failed
+    package = state.metadata["mode_c_policy_package"]
+    assert package["quota_policy"]["roles"]["implement"]["runtime"] == "quota-agent"
+    assert package["role_dispatch_contract"]["quota"]["roles"]["implement"]["runtime"] == "quota-agent"
+    assert package["role_dispatch_contract"]["quota"]["roles"]["implement"]["execution_target_id"]
+
+
+def test_provisionable_worker_binding_emits_proof_contract(tmp_path, monkeypatch):
+    from aichestra.execution.domain import (
+        AgentRuntime,
+        Compatibility,
+        DiscoveryFacts,
+        ExecutionCapabilities as Caps,
+        LaunchCapability,
+        LaunchStrategy,
+        Locality,
+        Model,
+        ModelProvider,
+    )
+    from aichestra.execution.launch_strategies import PreparedLaunch, mark_launch_proven
+    from aichestra.execution.targets import resolve_targets
+
+    runtime = AgentRuntime("opencode", True, binary_path="/usr/bin/opencode")
+    provider = ModelProvider(
+        "ollama", True, endpoint="http://127.0.0.1:11434", locality=Locality.LOCAL
+    )
+    model = Model("qwen", "ollama", True, capabilities=Caps(frozenset({"code"})))
+    bridge = resolve_targets(
+        DiscoveryFacts(runtimes=(runtime,), providers=(provider,), models=(model,)),
+        (Compatibility("opencode", "ollama", "qwen"),),
+        known_launches=(
+            LaunchCapability(
+                "opencode",
+                "ollama",
+                "qwen",
+                endpoint="http://127.0.0.1:11434",
+                strategy=LaunchStrategy.ORCA_TERMINAL_BRIDGE,
+                proven=False,
+            ),
+        ),
+    )[0]
+    native = fake_execution_targets()[0]
+
+    def prove_ok(target, ctx):
+        proven = mark_launch_proven(target) if target.provisionable else target
+        handle = "term_boot" if target.provisionable else None
+        args = ["--terminal", handle] if handle else ["--agent", target.runtime.id]
+        return proven, PreparedLaunch(
+            arguments=args, terminal_handle=handle, owns_terminal=bool(handle)
+        )
+
+    monkeypatch.setattr(
+        "aichestra.execution.launch_strategies.prove_bootstrap_launch", prove_ok
+    )
+    monkeypatch.setattr(
+        "aichestra.providers.orca.resolve_orca_binary", lambda: "orca-test"
+    )
+    orca = fake_orca()
+    ctl = ModeCRunController(bindings=WorkflowBindings(
+        orca=orca, project_root=str(tmp_path), task_prompt="fix typo",
+        execution_targets=(native, bridge), verification_enabled=True,
+        verification_commands=[[sys.executable, "-c", "pass"]],
+        coordinator_binding={"runtime": "codex"},
+        role_bindings={
+            "implement": {"runtime": "codex"},
+            "research": {"runtime": "codex"},
+            "tests": {"runtime": "opencode", "provider": "ollama", "model": "qwen"},
+            "docs": {"runtime": "codex"},
+        },
+    ))
+    state = ctl.run_all()
+    assert not state.failed, state.failed
+    package = state.metadata["mode_c_policy_package"]
+    tests = package["role_dispatch_contract"]["bindings"]["tests"]
+    assert tests["state"] == "provisionable"
+    assert tests["requires_launch_proof"] is True
+    assert tests["candidate_id"] == bridge.id
+    assert tests["execution_target_id"] == bridge.id
+    assert bridge.id not in {row["id"] for row in package["execution_targets"]}
+    assert bridge.id in {row["id"] for row in package["execution_target_candidates"]}
+    assert package["role_dispatch_contract"]["enforcer"] == "aichestra.dispatch_role"
+
+
 def test_production_run_status_audits_effective_role_receipts(monkeypatch, tmp_path):
     import json
     from aichestra.providers.orca import OrcaProvider

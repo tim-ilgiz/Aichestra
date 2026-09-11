@@ -232,6 +232,50 @@ def build_parser() -> argparse.ArgumentParser:
     )
     abort_p.add_argument("--json", action="store_true", default=True)
 
+    dispatch_p = sub.add_parser(
+        "dispatch-role",
+        help=(
+            "Policy-enforced Dispatch for a configured worker role on an "
+            "existing Orca Task (resolve binding → prove if needed → "
+            "worker-start exact target; coordinator still owns the DAG)"
+        ),
+    )
+    dispatch_p.add_argument(
+        "--role",
+        required=True,
+        help="Worker role: implement, research, tests, or docs",
+    )
+    dispatch_p.add_argument(
+        "--run",
+        required=True,
+        dest="run_id",
+        help="Existing Mode C Orca run id",
+    )
+    dispatch_p.add_argument(
+        "--task",
+        required=True,
+        dest="task_id",
+        help="Existing Orca task id created by the coordinator",
+    )
+    dispatch_p.add_argument(
+        "--project-root",
+        type=Path,
+        required=True,
+        help="Target project root (layered config + role bindings)",
+    )
+    dispatch_p.add_argument(
+        "--repo-root",
+        type=Path,
+        default=None,
+        help="Aichestra repository root (machine-local + tracked policies)",
+    )
+    dispatch_p.add_argument(
+        "--worktree",
+        default="current",
+        help="Orca worktree context for worker-start (default: current)",
+    )
+    dispatch_p.add_argument("--json", action="store_true", default=True)
+
     orch_p = sub.add_parser(
         "orchestrate",
         help=(
@@ -381,6 +425,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "abort-launch":
         return _cmd_abort_launch(args)
 
+    if args.command == "dispatch-role":
+        return _cmd_dispatch_role(args)
+
     if args.command == "orchestrate":
         return _cmd_orchestrate(args)
 
@@ -469,6 +516,22 @@ def _cmd_abort_launch(args: argparse.Namespace) -> int:
     payload = abort_launch_by_token(
         str(args.token or ""),
         repo_root=Path(args.repo_root).resolve() if args.repo_root else None,
+    )
+    sys.stdout.write(json.dumps(payload, indent=2, default=str) + "\n")
+    return 0 if payload.get("ok") else 1
+
+
+def _cmd_dispatch_role(args: argparse.Namespace) -> int:
+    """Policy-enforced role Dispatch — resolve binding → prove → worker-start."""
+    from aichestra.execution.dispatch_role import dispatch_role
+
+    payload = dispatch_role(
+        role=str(args.role),
+        run_id=str(args.run_id),
+        task_id=str(args.task_id),
+        project_root=Path(args.project_root).resolve(),
+        repo_root=Path(args.repo_root).resolve() if args.repo_root else None,
+        worktree=str(getattr(args, "worktree", "current") or "current"),
     )
     sys.stdout.write(json.dumps(payload, indent=2, default=str) + "\n")
     return 0 if payload.get("ok") else 1

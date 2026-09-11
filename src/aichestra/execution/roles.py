@@ -28,12 +28,71 @@ class RoleBindingResolver:
 
 
 def target_contract_entry(target: ExecutionTarget) -> dict:
-    return {
+    """Typed role→target entry for POLICY_PACKAGE.role_dispatch_contract.
+
+    Runnable targets may be Dispatched immediately and MUST appear in
+    ``execution_targets``. Provisionable targets are candidates only: the
+    contract records ``requires_launch_proof`` so the coordinator (or
+    ``aichestra dispatch-role``) must prove-launch before Dispatch. That keeps
+    the package internally consistent without forcing every worker prove up
+    front.
+    """
+    entry = {
         "execution_target_id": target.id,
         "runtime": target.runtime.id,
         "provider": target.provider.id if target.provider else None,
         "model": target.model.id if target.model else None,
     }
+    if target.runnable:
+        entry["state"] = "runnable"
+        entry["requires_launch_proof"] = False
+    elif target.provisionable:
+        entry["state"] = "provisionable"
+        entry["candidate_id"] = target.id
+        entry["requires_launch_proof"] = True
+    else:
+        entry["state"] = "unavailable"
+        entry["requires_launch_proof"] = False
+    return entry
+
+
+def assert_role_dispatch_package_consistent(package: dict) -> None:
+    """Fail closed when contract targets disagree with runnable/candidate sets."""
+    runnable_ids = {
+        row.get("id") for row in list(package.get("execution_targets") or [])
+        if isinstance(row, dict)
+    }
+    candidate_ids = {
+        row.get("id") for row in list(package.get("execution_target_candidates") or [])
+        if isinstance(row, dict)
+    }
+    contract = package.get("role_dispatch_contract") or {}
+    bindings = contract.get("bindings") or {}
+    for role, entry in bindings.items():
+        if not isinstance(entry, dict):
+            raise ValueError(f"role_dispatch_contract.bindings.{role} must be an object")
+        target_id = entry.get("execution_target_id")
+        if not target_id:
+            raise ValueError(f"role_dispatch_contract.bindings.{role} missing execution_target_id")
+        needs_proof = bool(entry.get("requires_launch_proof"))
+        state = entry.get("state")
+        if needs_proof or state == "provisionable":
+            if target_id not in candidate_ids:
+                raise ValueError(
+                    f"role_dispatch_contract.bindings.{role} is provisionable but "
+                    f"{target_id!r} is missing from execution_target_candidates"
+                )
+            if target_id in runnable_ids:
+                raise ValueError(
+                    f"role_dispatch_contract.bindings.{role} requires launch proof "
+                    f"but {target_id!r} also appears in execution_targets"
+                )
+        else:
+            if target_id not in runnable_ids:
+                raise ValueError(
+                    f"role_dispatch_contract.bindings.{role} is runnable but "
+                    f"{target_id!r} is missing from execution_targets"
+                )
 
 
 def _worker_record(payload):

@@ -29,7 +29,11 @@
 
 - [x] T011 Resolve role runtime/provider/model into an exact preparable target
 - [x] T012 Audit all canonical role dispatch receipts; fail closed on mismatch
-- [x] T013 Same-Run configured auto quota retry; manual stop; bounded exhaustion
+- [ ] T013 BLOCKED by T022: Same-Run configured auto quota retry is described by
+  `role_dispatch_contract.quota` / `aichestra dispatch-role`; Aichestra no longer
+  auto-retries coding workers itself. Live automatic implement fallback still
+  requires coordinator (or operator) to call dispatch-role for the fallback
+  target, plus durable launch receipts where Orca provides them.
 - [x] T014 Remove disabled implement remap; preserve exact provider/model binding
 - [x] T015 Infer project root from nearest project config or resolved cwd
 - [x] T016 Interactive settings and init editor using runtime/model discovery
@@ -38,12 +42,12 @@
 - [x] T019 Add wheel-build/clean-venv/foreign-cwd CLI smoke to the OS matrix
 - [x] T020 Remove machine-local IDE workspace and account metadata; ignore .idea
 - [x] T021 Complete regression tests and local installed-wheel smoke
-- [ ] T022 BLOCKED: installed Orca workerShow returns dispatch/worker/startOptions
-  but no durable effective launch binding, and Orca does not pin inner Dispatch
-  to Aichestra `execution_target_id`. Do not substitute requested options for
-  execution evidence. Exact-role and automatic quota live acceptance require
-  that upstream contract. Fake CI is not live evidence. Do not mark this
-  feature implemented while T022 is open.
+- [ ] T022 PARTIAL: `aichestra dispatch-role` provides policy-enforced
+  worker-start for the exact role binding (pre-dispatch pin without making
+  Aichestra a scheduler). Remaining: durable Orca `launch.effective` receipts
+  for post-dispatch audit, and live coordinator adoption of dispatch-role.
+  Fake CI is not live evidence. Do not mark this feature fully implemented
+  while T022 is open.
 
 
 ## PR #2 REQUEST CHANGES (coordinator ≠ implement)
@@ -64,3 +68,16 @@
 - [x] T027 Behavioural tests: distinct coordinator vs implement bootstrap;
   disabled coordinator vs disabled implement; auto quota does not replace
   coordinator; contract carries exact worker target ids.
+
+## PR #2 REQUEST CHANGES (custom runtime / provisionable / dispatch-role)
+
+- [x] T028 Pass `execution.runtimes` allowlist into every ModeCRunController
+  re-parse of coordinator binding and quota policy; e2e custom coordinator
+  through `run_all()` and custom quota through policy package.
+- [x] T029 Provisionable worker bindings emit `state` /
+  `requires_launch_proof` / `candidate_id` in `role_dispatch_contract`;
+  package consistency asserts runnable↔execution_targets or
+  provisionable↔candidates.
+- [x] T030 `aichestra dispatch-role --run --task --role`: resolve project
+  binding → prove if needed → Orca worker-start exact target. Coordinator
+  still owns the DAG; this is the policy-enforced Dispatch adapter for T022.

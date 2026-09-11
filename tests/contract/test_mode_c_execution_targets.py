@@ -283,7 +283,7 @@ def test_coordinator_context_receives_capabilities_locality_policy(
     assert "OpenCode launch is unavailable" not in adapter_src
     assert "The coordinator owns the DAG: which Tasks to create and when" in adapter_src
     assert "role_dispatch_contract" in adapter_src
-    assert "Orca MUST Dispatch" in adapter_src
+    assert "ROLE_DISPATCH_OPERATION" in adapter_src or "dispatch-role" in adapter_src
     assert "temporary legacy launch path" not in adapter_src
     assert "Unsupported targets MUST NOT be dispatched" in adapter_src
     assert "Target locality may be local, remote, or cloud" in adapter_src

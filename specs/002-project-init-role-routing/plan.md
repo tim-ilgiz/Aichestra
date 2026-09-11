@@ -50,14 +50,15 @@ does not schedule Tasks. Coordinator under Orca still decides which Tasks
 to create and when. Aichestra emits:
 
 ```text
-role=tests → execution_target_id=X → Orca MUST Dispatch X
+role=tests → execution_target_id=X → Dispatch X
+  (runnable) or prove-launch then Dispatch (provisionable)
 ```
 
-That mapping lives in POLICY_PACKAGE `role_dispatch_contract`. The
-coordinator LLM is instructed not to choose a different target. Current
-Orca has no durable inner Dispatch pin and no `launch.effective` receipt,
-so this is a contract Aichestra can state and audit, not a pre-dispatch
-sandbox. Missing evidence fails closed. Fake CI is not live proof.
+Preferred enforcer: `aichestra dispatch-role --run --task --role` resolves
+the project binding and worker-starts only that exact target. That mapping
+also lives in POLICY_PACKAGE `role_dispatch_contract`. Durable
+`launch.effective` receipts remain required for post-dispatch audit; missing
+evidence fails closed. Fake CI is not live proof.
 
 **Decision 3 — quota targets coding workers.** `quota.mode=auto` binds
 `quota.roles.implement` as the exact fallback ExecutionTarget for

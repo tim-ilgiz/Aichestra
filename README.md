@@ -59,6 +59,8 @@ python -m aichestra handoff --prompt "…" --run-id <run_id>
 python -m aichestra research /path/to/target-project --query "auth"
 python -m aichestra prove-launch --project-root /path/to/target --candidate-id <id>
 python -m aichestra abort-launch --token <cleanup_lease>
+python -m aichestra dispatch-role --role tests --run <run_id> --task <task_id> \
+  --project-root /path/to/target
 
 # Staging diagnostics (typed, allowlist-gated)
 python -m aichestra staging STAGE_ALIAS --op uptime --dry-run
@@ -127,24 +129,21 @@ ExecutionTargets before creating a Run. Bootstrap uses
 can register additional runtime ids.
 Disabled or unresolved bindings fail with a settings error. Orca owns task
 creation; Aichestra emits a typed `role_dispatch_contract`
-(`role → execution_target_id`) that Orca MUST honor on Dispatch. Canonical
-task/worker receipts are audited for role, Run and effective
-runtime/provider/model/endpoint. Missing or mismatched evidence fails the Run.
-This audit happens after dispatch and does not prevent earlier worker edits.
-An Orca version that omits required evidence, or that cannot pin inner
-Dispatch to `execution_target_id`, cannot pass this contract. The
-installed version inspected during this change exposes `dispatch`, `worker` and
-`startOptions` from worker-show, but no durable effective launch binding. Full
-live role/quota acceptance is blocked on that upstream receipt and Dispatch
-pinning capability. Do not treat this feature as fully implemented until that
-exists.
+(`role → execution_target_id`, with `requires_launch_proof` for provisionable
+candidates). Prefer `aichestra dispatch-role --run --task --role` to
+worker-start the exact bound target (policy-enforced adapter; not a second
+scheduler). Canonical task/worker receipts are audited for role, Run and
+effective runtime/provider/model/endpoint. Missing or mismatched evidence
+fails the Run. An Orca version that omits durable `launch.effective` cannot
+fully close live post-dispatch audit. Full live role/quota acceptance remains
+partial until coordinators adopt dispatch-role and receipts are proven live.
 
 `quota.mode=manual` stops and asks the operator to change settings.
 `quota.roles.implement` is the coding-worker fallback. Auto mode does **not**
 replace the coordinator LLM; coordinator quota is a separate failure
 (`orchestration.coordinator`). Inner-task implement fallback must have a prior
-structured quota receipt. Live inner Dispatch pinning and live quota recovery
-remain NOT VALIDATED.
+structured quota receipt. Live quota recovery via dispatch-role and durable
+receipts remain NOT VALIDATED end-to-end.
 
 From a project or subdirectory, use `aichestra orchestrate --prompt "..."`.
 The nearest ancestor `.aichestra/project.json` selects the project root, with
@@ -268,7 +267,8 @@ Mode C bootstraps one explicit coordinator from `orchestration.coordinator`
 provider fields do not select the coordinator. The coordinator reads project
 context, including scoped nested AGENTS.md, owns which Tasks to create and
 when, and must Dispatch each worker role through
-`role_dispatch_contract` exact `execution_target_id`s. It waits for outcomes
+`role_dispatch_contract` exact `execution_target_id`s (prefer
+`aichestra dispatch-role`). It waits for outcomes
 and converges results before completing. At the implementation boundary it calls
 `orchestration ask --question AICHESTRA_GATE:maintenance`; Aichestra replies with
 TEST/DOC/ADR/SPEC decisions before Orca dispatches required writers. The

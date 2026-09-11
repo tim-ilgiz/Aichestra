@@ -24,10 +24,14 @@ the coordinator.
   provider/model for local/OpenCode targets.
 - Coordinator under Orca still owns the DAG: which Tasks to create and when.
   Aichestra MUST emit a typed role-dispatch contract
-  (`role=R → exact execution_target_id=X`). Orca MUST Dispatch X for that
-  role. The coordinator LLM MUST NOT interpret or substitute another target.
-  Current Orca does not pin inner Dispatch to that id; post-dispatch audit
-  remains fail-closed and is not pre-dispatch enforcement.
+  (`role=R → exact execution_target_id=X`, with `state` /
+  `requires_launch_proof` when the bound target is still a candidate).
+  Preferred enforcer is `aichestra dispatch-role` (policy-enforced
+  worker-start on an existing Task). Direct Orca Dispatch of X remains
+  allowed for runnable targets already in `execution_targets`. The
+  coordinator LLM MUST NOT interpret or substitute another target.
+  Durable `launch.effective` receipts for post-dispatch audit still depend
+  on Orca; missing evidence fails closed and is not claimed as live proof.
 
 ## User stories
 
@@ -100,9 +104,12 @@ Coordinator quota is a different failure: fail closed and tell the operator
 to change `orchestration.coordinator`. `quota.roles.implement` MUST NOT
 replace the coordinator.
 
-Live inner-Dispatch quota switching requires Orca to honor the typed
-contract. Until then, Aichestra audits receipts after the fact and fails
-closed on mismatch; it does not claim pre-dispatch prevention.
+Live inner-Dispatch quota switching uses `aichestra dispatch-role` (or
+direct Orca Dispatch of the exact `quota.roles.implement` target). Until
+coordinators adopt that entrypoint and Orca provides durable
+`launch.effective` receipts, Aichestra audits receipts after the fact and
+fails closed on mismatch; it does not claim soft-pass when evidence is
+missing.
 
 ### US5 — Verification deferred by default (P2)
 
@@ -156,8 +163,9 @@ still run when present. Language-aware verification is a follow-up.
 
 ## Known external blocker
 
-Current installed Orca worker-show exposes dispatch/worker/startOptions but
-no durable effective launch binding, and it does not accept a typed
-Aichestra `execution_target_id` as a mandatory inner Dispatch pin. Full live
-role/quota acceptance remains blocked on that upstream contract. Do not mark
-this feature implemented until that evidence exists.
+`aichestra dispatch-role` provides a policy-enforced Dispatch path that pins
+the project role binding to an exact ExecutionTarget without making Aichestra
+a second orchestrator. Remaining live gaps: coordinator adoption of that
+entrypoint, and durable Orca `launch.effective` receipts for post-dispatch
+audit. Do not mark this feature fully implemented until those are proven live.
+Fake CI providers are not live evidence.

@@ -105,6 +105,8 @@ from aichestra.execution.serialize import (
     LAUNCH_PROOF_OPERATION,
     LEGACY_COMPATIBILITY_FIELDS,
     OWNERSHIP_METADATA,
+    ROLE_DISPATCH_OPERATION,
+    dispatch_role_invocation,
     prove_launch_invocation,
     render_cli_invocation,
     safe_endpoint_for_context,
@@ -368,6 +370,12 @@ class ModeCPolicyPackage:
                 project_root=self.project_root or "<root>",
                 repo_root=self.aichestra_repo_root or None,
             ),
+            "role_dispatch_operation": ROLE_DISPATCH_OPERATION,
+            "role_dispatch_invocation": dispatch_role_invocation(
+                project_root=self.project_root or "<root>",
+                repo_root=self.aichestra_repo_root or None,
+                run_id=self.run_id or "<run-id>",
+            ),
             # Explicit project/user role policy (002) — not hard-coded core routing.
             "role_bindings": dict(self.role_bindings),
             "quota_policy": dict(self.quota_policy),
@@ -472,11 +480,8 @@ class ModeCRunController:
             )
             from aichestra.execution.roles import RoleBindingResolver
 
-            runtime_cfg = {
-                "execution": {
-                    "runtimes": {t.runtime.id: {} for t in self.bindings.execution_targets}
-                }
-            }
+            runtime_cfg = self._runtime_cfg()
+            known = frozenset(runtime_cfg["execution"]["runtimes"])
             if self.bindings.role_bindings or self.bindings.coordinator_binding:
                 try:
                     resolver = RoleBindingResolver(self.bindings.execution_targets)
@@ -492,6 +497,7 @@ class ModeCRunController:
                             parse_role_binding(
                                 self.bindings.coordinator_binding,
                                 field="orchestration.coordinator",
+                                known=known,
                             ),
                         )
                     quota = load_quota_policy(
@@ -882,6 +888,12 @@ class ModeCRunController:
             repo_root=package.aichestra_repo_root or None,
         )
         prove_display = render_cli_invocation(prove_invocation)
+        dispatch_invocation = dispatch_role_invocation(
+            project_root=package.project_root or "<root>",
+            repo_root=package.aichestra_repo_root or None,
+            run_id=run_id,
+        )
+        dispatch_display = render_cli_invocation(dispatch_invocation)
 
         context = sanitize_mapping(
             {
@@ -906,6 +918,8 @@ class ModeCRunController:
                 ),
                 "launch_proof_operation": LAUNCH_PROOF_OPERATION,
                 "launch_proof_invocation": prove_invocation,
+                "role_dispatch_operation": ROLE_DISPATCH_OPERATION,
+                "role_dispatch_invocation": dispatch_invocation,
                 "aichestra_repo_root": package.aichestra_repo_root,
                 # Capability hints — ExecutionTargets are canonical; legacy secondary.
                 "capabilities": {
@@ -942,7 +956,13 @@ class ModeCRunController:
                 "Coordinator running under Orca owns the concrete workflow/DAG, "
                 "task dependencies and ordering, and which Tasks to create. "
                 "POLICY_PACKAGE.role_dispatch_contract binds each worker role to "
-                "one exact execution_target_id; Orca MUST Dispatch that target. "
+                "one exact execution_target_id. Prefer policy-enforced Dispatch via "
+                f"`{ROLE_DISPATCH_OPERATION}` / structured role_dispatch_invocation "
+                f"`{dispatch_display}` (create the Task first, then pass --run/--task/"
+                "--role). That entrypoint resolves the project binding, proves launch "
+                "when requires_launch_proof is true, and worker-starts only the bound "
+                "target. Direct Orca worker-start of bindings[role].execution_target_id "
+                "is allowed only for runnable targets already in execution_targets. "
                 "The coordinator MUST NOT choose a different runtime or target. "
                 "Orca owns canonical Run/Task/Dispatch lifecycle, worker "
                 "lifecycle, terminal/worktree lifecycle, and messages/handoffs. "
@@ -952,7 +972,8 @@ class ModeCRunController:
                 "instructions from project_context with stated precedence. "
                 "For inner workers, Dispatch only ExecutionTargets listed in "
                 "execution_targets (enabled, available, capable, allowed, and "
-                "runnable). execution_target_candidates are NOT dispatchable; "
+                "runnable) unless using dispatch-role which may prove a candidate. "
+                "execution_target_candidates are NOT directly dispatchable; "
                 f"promote a candidate only via `{LAUNCH_PROOF_OPERATION}` / "
                 f"structured launch_proof_invocation `{prove_display}` "
                 "(argv contract — never shell-concatenate paths or JSON "
@@ -1195,6 +1216,16 @@ class ModeCRunController:
             "scheduler": "coordinator_under_orca",
         }
 
+    def _runtime_cfg(self) -> dict[str, Any]:
+        """Allowlist registered runtime ids for every workflow re-parse."""
+        return {
+            "execution": {
+                "runtimes": {
+                    t.runtime.id: {} for t in self.bindings.execution_targets
+                }
+            }
+        }
+
     def _target_contract_entry(self, target: ExecutionTarget | None, extra: Mapping[str, Any] | None = None) -> dict[str, Any]:
         from aichestra.execution.roles import target_contract_entry
         if target is None:
@@ -1202,6 +1233,7 @@ class ModeCRunController:
         entry = target_contract_entry(target)
         if extra:
             for key, value in extra.items():
+                # Contract state/proof fields are authoritative over raw settings.
                 entry.setdefault(key, value)
         return entry
 
@@ -1211,7 +1243,9 @@ class ModeCRunController:
 
     def _quota_policy_contract(self) -> dict[str, Any]:
         from aichestra.config.roles import load_quota_policy
-        quota = load_quota_policy({"quota": self.bindings.quota_policy or {}})
+        quota = load_quota_policy(
+            {"quota": self.bindings.quota_policy or {}, **self._runtime_cfg()}
+        )
         payload = quota.to_dict()
         if self._quota_target is not None:
             payload["roles"] = dict(payload.get("roles") or {})
@@ -1227,14 +1261,18 @@ class ModeCRunController:
         }
         quota = self._quota_policy_contract()
         return {
-            "version": 1,
+            "version": 2,
             "owner": "aichestra_policy",
-            "enforcer": "orca",
+            "enforcer": "aichestra.dispatch_role",
             "dag_owner": "coordinator_under_orca",
             "rule": (
-                "For each Task whose role is a key in bindings, Orca MUST Dispatch "
-                "bindings[role].execution_target_id. The coordinator chooses which "
-                "Tasks to create and when; it MUST NOT choose a different target."
+                "For each Task whose role is a key in bindings, Dispatch the bound "
+                "target via aichestra dispatch-role (policy-enforced worker-start) "
+                "or Orca worker-start of the exact execution_target_id. When "
+                "requires_launch_proof is true, prove-launch the candidate_id first "
+                "and Dispatch only the returned runnable target. The coordinator "
+                "chooses which Tasks to create and when; it MUST NOT choose a "
+                "different target."
             ),
             "bindings": bindings,
             "quota": {
@@ -1258,6 +1296,16 @@ class ModeCRunController:
         def _effective(target: ExecutionTarget) -> ExecutionTarget:
             return proven_by_id.get(target.id, target)
 
+        # Keep role/quota contract aligned with runnable promotion (same id).
+        if proven_by_id:
+            self._resolved_roles = {
+                role: _effective(target) for role, target in self._resolved_roles.items()
+            }
+            if self._quota_target is not None:
+                self._quota_target = _effective(self._quota_target)
+            if self._coordinator_target is not None:
+                self._coordinator_target = _effective(self._coordinator_target)
+
         serialized_targets = tuple(
             serialize_execution_target(_effective(t))
             for t in self.bindings.execution_targets
@@ -1269,7 +1317,7 @@ class ModeCRunController:
             if t.provisionable and t.id not in proven_by_id
         )
         serialized_policy = serialize_execution_policy(self.bindings.execution_policy)
-        return ModeCPolicyPackage(
+        package = ModeCPolicyPackage(
             run_id=run_id,
             task_prompt=self.bindings.task_prompt or "Mode C task",
             research_query=self.bindings.research_query
@@ -1313,6 +1361,10 @@ class ModeCRunController:
             quota_policy=self._quota_policy_contract(),
             role_dispatch_contract=self._role_dispatch_contract(),
         )
+        from aichestra.execution.roles import assert_role_dispatch_package_consistent
+
+        assert_role_dispatch_package_consistent(package.to_dict())
+        return package
 
     def _effective_project_root(self) -> str | None:
         adopted = self.state.metadata.get("orca_worktree_path")

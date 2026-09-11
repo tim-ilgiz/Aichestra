@@ -106,3 +106,149 @@ def test_installed_orca_worker_shape_fails_without_effective_launch_evidence():
         validate_role_receipts("r", [task], [worker], {"d": payload}, {"tests": target})
     payload["launch"] = {"effective": {"agent": "codex"}}
     assert validate_role_receipts("r", [task], [worker], {"d": payload}, {"tests": target})["ok"]
+
+
+def test_provisionable_worker_contract_is_internally_consistent():
+    from aichestra.execution.domain import (
+        AgentRuntime,
+        Compatibility,
+        DiscoveryFacts,
+        ExecutionCapabilities as Caps,
+        LaunchCapability,
+        LaunchStrategy,
+        Locality,
+        Model,
+        ModelProvider,
+    )
+    from aichestra.execution.roles import (
+        assert_role_dispatch_package_consistent,
+        target_contract_entry,
+    )
+    from aichestra.execution.serialize import serialize_execution_target, serialize_launch_candidate
+    from aichestra.execution.targets import resolve_targets
+
+    runtime = AgentRuntime("opencode", True, binary_path="/usr/bin/opencode")
+    provider = ModelProvider(
+        "ollama", True, endpoint="http://127.0.0.1:11434", locality=Locality.LOCAL
+    )
+    model = Model("qwen", "ollama", True, capabilities=Caps(frozenset({"code"})))
+    bridge = resolve_targets(
+        DiscoveryFacts(runtimes=(runtime,), providers=(provider,), models=(model,)),
+        (Compatibility("opencode", "ollama", "qwen"),),
+        known_launches=(
+            LaunchCapability(
+                "opencode",
+                "ollama",
+                "qwen",
+                endpoint="http://127.0.0.1:11434",
+                strategy=LaunchStrategy.ORCA_TERMINAL_BRIDGE,
+                proven=False,
+            ),
+        ),
+    )[0]
+    assert bridge.provisionable and not bridge.runnable
+    entry = target_contract_entry(bridge)
+    assert entry["state"] == "provisionable"
+    assert entry["requires_launch_proof"] is True
+    assert entry["candidate_id"] == bridge.id
+    package = {
+        "execution_targets": [],
+        "execution_target_candidates": [serialize_launch_candidate(bridge)],
+        "role_dispatch_contract": {"bindings": {"tests": entry}},
+    }
+    assert_role_dispatch_package_consistent(package)
+    with pytest.raises(ValueError, match="missing from execution_target_candidates"):
+        assert_role_dispatch_package_consistent({
+            "execution_targets": [],
+            "execution_target_candidates": [],
+            "role_dispatch_contract": {"bindings": {"tests": entry}},
+        })
+    runnable = fake_execution_targets()[0]
+    runnable_entry = target_contract_entry(runnable)
+    assert runnable_entry["state"] == "runnable"
+    assert runnable_entry["requires_launch_proof"] is False
+    assert_role_dispatch_package_consistent({
+        "execution_targets": [serialize_execution_target(runnable)],
+        "execution_target_candidates": [],
+        "role_dispatch_contract": {"bindings": {"implement": runnable_entry}},
+    })
+
+
+def test_dispatch_role_pins_exact_bound_target(tmp_path, monkeypatch):
+    from aichestra.execution.dispatch_role import dispatch_role
+    from aichestra.execution.serialize import ROLE_DISPATCH_OPERATION
+
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        from types import SimpleNamespace
+        if "run-use" in argv:
+            return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+        if "worker-start" in argv:
+            return SimpleNamespace(
+                returncode=0,
+                stdout='{"result":{"dispatchId":"d-pinned"}}',
+                stderr="",
+            )
+        return SimpleNamespace(returncode=1, stdout="", stderr="unexpected")
+
+    monkeypatch.setattr(
+        "aichestra.execution.dispatch_role.resolve_orca_binary", lambda: "orca-test"
+    )
+    monkeypatch.setattr(
+        "aichestra.execution.dispatch_role.looks_like_aichestra_root", lambda _p: True
+    )
+    monkeypatch.setattr(
+        "aichestra.execution.dispatch_role.resolve_aichestra_config_root",
+        lambda **_k: tmp_path,
+    )
+    target = fake_execution_targets("cursor")[0]
+    cfg = {
+        "roles": {
+            "tests": {"runtime": "cursor"},
+            "implement": {"runtime": "codex"},
+            "research": {"runtime": "codex"},
+            "docs": {"runtime": "codex"},
+        }
+    }
+    payload = dispatch_role(
+        role="tests",
+        run_id="run-1",
+        task_id="task-1",
+        project_root=tmp_path,
+        repo_root=tmp_path,
+        config=cfg,
+        targets=fake_execution_targets() + fake_execution_targets("cursor"),
+        binary="orca-test",
+        run=fake_run,
+    )
+    assert payload["ok"] is True
+    assert payload["operation"] == ROLE_DISPATCH_OPERATION
+    assert payload["execution_target_id"] == target.id
+    assert payload["dispatch_id"] == "d-pinned"
+    start = next(c for c in calls if "worker-start" in c)
+    assert "--agent" in start
+    assert start[start.index("--agent") + 1] == "cursor"
+    assert start[start.index("--task") + 1] == "task-1"
+
+    wrong = dispatch_role(
+        role="research",
+        run_id="run-1",
+        task_id="task-2",
+        project_root=tmp_path,
+        repo_root=tmp_path,
+        config={
+            "roles": {
+                "research": {"runtime": "missing-agent"},
+                "implement": {"runtime": "codex"},
+                "tests": {"runtime": "codex"},
+                "docs": {"runtime": "codex"},
+            }
+        },
+        targets=fake_execution_targets(),
+        binary="orca-test",
+        run=fake_run,
+    )
+    assert wrong["ok"] is False
+    assert "unavailable" in wrong["error"] or "unknown" in wrong["error"]
