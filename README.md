@@ -243,7 +243,23 @@ aichestra settings set roles.docs=claude
 
 Roles can optionally specify a provider and model.
 
-For example, tests could be executed using OpenCode with a local Ollama model:
+Interactive setup (recommended):
+
+```bash
+aichestra settings
+```
+
+Choose **Providers** to add:
+
+* an **agent runtime** (Codex, Cursor, Claude, Gemini, OpenCode, or custom binary);
+* a **model provider** (Ollama, or any OpenAI-compatible endpoint such as LM Studio / vLLM / OpenRouter);
+* optional **hints from Orca** for agents already signed in there.
+
+Provider endpoints are stored in machine-local config (not committed). API keys are never written — only an optional environment variable *name*.
+
+A model provider alone is not a Mode C worker. Pairing with OpenCode (offered in the menu) lets discovered models be selected for roles; Orca still owns launch.
+
+Non-interactive example for tests via OpenCode + Ollama:
 
 ```bash
 aichestra settings set roles.tests.runtime=opencode
@@ -258,7 +274,7 @@ For example:
 ```text
 Coding          → Codex
 Research        → Gemini
-Tests           → local Qwen
+Tests           → OpenCode + local Qwen
 Documentation   → Claude
 ```
 
@@ -569,6 +585,8 @@ Configure agents and models:
 ```bash
 aichestra settings
 ```
+
+(Use the **Providers** item to add runtimes or LLM backends on this machine.)
 
 Show project settings:
 

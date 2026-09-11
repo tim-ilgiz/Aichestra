@@ -24,6 +24,8 @@ from .model_providers import (
     PROVIDER_PROBE_REGISTRY,
     ModelProviderProbe,
     ProviderProbeRegistry,
+    is_openai_compatible_entry,
+    openai_compatible_probe,
 )
 from .runtimes import discover_agent_runtimes
 
@@ -68,6 +70,21 @@ def discover_execution_facts(
             provider_config,
             default_endpoints={"ollama": ollama_host},
         )
+        # Config-declared OpenAI-compatible backends without a named factory.
+        seen = {p.id for p in probes}
+        for name, entry in provider_config.items():
+            if name in seen or not isinstance(entry, Mapping):
+                continue
+            if not is_openai_compatible_entry(entry):
+                continue
+            endpoint = entry.get("endpoint")
+            probes.append(
+                openai_compatible_probe(
+                    name,
+                    endpoint=str(endpoint) if endpoint else None,
+                    config=entry,
+                )
+            )
     else:
         probes = list(provider_probes)
 
