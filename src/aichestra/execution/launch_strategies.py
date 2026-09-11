@@ -44,15 +44,69 @@ def _flags(command: dict[str, Any] | None) -> set[str]:
     return set(raw) if isinstance(raw, (list, tuple, set)) else set()
 
 
-def _effective(receipt: Mapping[str, Any]) -> dict[str, Any] | None:
-    data = receipt.get("result", receipt)
-    if not isinstance(data, dict):
-        return None
-    launch = data.get("launch")
-    if not isinstance(launch, dict):
+def _as_mapping(value: Any) -> Mapping[str, Any] | None:
+    if isinstance(value, Mapping):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return parsed if isinstance(parsed, Mapping) else None
+    return None
+
+
+def _launch_with_effective(value: Any) -> dict[str, Any] | None:
+    """Return a launch object that already carries durable ``effective`` evidence.
+
+    Bare ``startOptions.agent`` (requested preference only) is not enough.
+    Live Orca worker-show nests durable evidence under
+    ``startOptions.launch.effective`` (and the JSON twin ``start_options``).
+    """
+    launch = _as_mapping(value)
+    if launch is None:
         return None
     effective = launch.get("effective")
-    return effective if isinstance(effective, dict) else None
+    if isinstance(effective, Mapping):
+        return dict(launch)
+    return None
+
+
+def receipt_launch(receipt: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Locate durable launch evidence on a worker-show / confirm receipt."""
+    data = receipt.get("result", receipt)
+    if not isinstance(data, Mapping):
+        return None
+    worker = data.get("worker")
+    worker_map = worker if isinstance(worker, Mapping) else {}
+    # Prefer explicit top-level launch; then Orca 1.4+ startOptions nesting.
+    candidates = (
+        data.get("launch"),
+        worker_map.get("launch"),
+        data.get("startOptions"),
+        data.get("start_options"),
+        worker_map.get("startOptions"),
+        worker_map.get("start_options"),
+    )
+    for candidate in candidates:
+        direct = _launch_with_effective(candidate)
+        if direct is not None:
+            return direct
+        opts = _as_mapping(candidate)
+        if opts is None:
+            continue
+        nested = _launch_with_effective(opts.get("launch"))
+        if nested is not None:
+            return nested
+    return None
+
+
+def _effective(receipt: Mapping[str, Any]) -> dict[str, Any] | None:
+    launch = receipt_launch(receipt)
+    if launch is None:
+        return None
+    effective = launch.get("effective")
+    return dict(effective) if isinstance(effective, Mapping) else None
 
 
 def _normalize_endpoint(endpoint: str | None) -> str | None:

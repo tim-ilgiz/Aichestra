@@ -97,15 +97,73 @@ def test_installed_orca_worker_shape_fails_without_effective_launch_evidence():
     target = fake_execution_targets()[0]
     task = {"id": "t", "run_id": "r", "task_title": "tests"}
     worker = {"dispatchId": "d", "taskId": "t", "runId": "r"}
-    # Shape from installed Orca's workerShow handler. startOptions describes
-    # requested options, which cannot substitute for an effective receipt.
+    # Bare startOptions.agent is requested preference only — not durable evidence.
     payload = {"dispatch": {"id": "d", "task_id": "t", "run_id": "r"},
                "worker": {"dispatch_id": "d", "state": "succeeded",
                           "startOptions": {"agent": "codex"}}}
     with pytest.raises(ValueError, match="no effective launch binding"):
         validate_role_receipts("r", [task], [worker], {"d": payload}, {"tests": target})
-    payload["launch"] = {"effective": {"agent": "codex"}}
+    # Live Orca 1.4+ nests durable launch.effective under startOptions.launch.
+    payload["worker"]["startOptions"] = {
+        "agent": "codex",
+        "launch": {
+            "requested": {"agent": "codex", "model": None},
+            "effective": {"agent": "codex", "model": None},
+        },
+    }
     assert validate_role_receipts("r", [task], [worker], {"d": payload}, {"tests": target})["ok"]
+    # Top-level launch.effective remains accepted.
+    payload = {"dispatch": {"id": "d", "task_id": "t", "run_id": "r"},
+               "worker": {"dispatch_id": "d", "state": "succeeded"},
+               "launch": {"effective": {"agent": "codex"}}}
+    assert validate_role_receipts("r", [task], [worker], {"d": payload}, {"tests": target})["ok"]
+    # JSON twin start_options string (Orca worker-show) also counts.
+    import json
+    nested = {
+        "agent": "codex",
+        "launch": {"requested": {"agent": "codex"}, "effective": {"agent": "codex"}},
+    }
+    payload = {"dispatch": {"id": "d", "task_id": "t", "run_id": "r"},
+               "worker": {"dispatch_id": "d", "state": "succeeded",
+                          "start_options": json.dumps(nested)}}
+    assert validate_role_receipts("r", [task], [worker], {"d": payload}, {"tests": target})["ok"]
+
+
+def test_live_orca_worker_show_envelope_audits_start_options_launch():
+    """Regression: full worker-show envelope from Orca 1.4.198 Mode C settle."""
+    target = fake_execution_targets("cursor")[0]
+    task = {"id": "task_f1fdf8c349dc", "run_id": "run_503f0c73fcce",
+            "task_title": "mode_c_handoff"}
+    worker = {"dispatchId": "ctx_504d404beaea", "taskId": "task_f1fdf8c349dc",
+              "runId": "run_503f0c73fcce"}
+    payload = {
+        "dispatch": {
+            "id": "ctx_504d404beaea",
+            "run_id": "run_503f0c73fcce",
+            "task_id": "task_f1fdf8c349dc",
+            "status": "completed",
+        },
+        "worker": {
+            "dispatch_id": "ctx_504d404beaea",
+            "state": "succeeded",
+            "startOptions": {
+                "worktree": "current",
+                "agent": "cursor",
+                "launch": {
+                    "requested": {"agent": "cursor", "model": None, "effort": None},
+                    "effective": {"agent": "cursor", "model": None, "effort": None},
+                },
+            },
+        },
+    }
+    assert validate_role_receipts(
+        "run_503f0c73fcce",
+        [task],
+        [worker],
+        {"ctx_504d404beaea": payload},
+        {},
+        bootstrap_target=target,
+    )["ok"]
 
 
 def test_provisionable_worker_contract_is_internally_consistent():

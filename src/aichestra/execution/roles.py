@@ -168,7 +168,16 @@ def validate_role_receipts(run_id, tasks, workers, receipts, role_targets,
         expected = bootstrap_target if role == "mode_c_handoff" else role_targets.get(role)
         if expected is None:
             raise ValueError(f"Task {task_id} has undeclared role {role!r}")
-        launch = data.get("launch") or row.get("launch") or {}
+        from aichestra.execution.launch_strategies import receipt_launch
+
+        # Prefer top-level launch; accept Orca startOptions.launch.effective.
+        # Bare startOptions.agent is requested preference only — not evidence.
+        launch = (
+            receipt_launch(payload)
+            or receipt_launch(data)
+            or receipt_launch({"worker": row})
+            or {}
+        )
         actual = extract_attested_binding({"effective": launch.get("effective", {})})
         if not actual:
             raise ValueError(f"Dispatch {dispatch} has no effective launch binding")

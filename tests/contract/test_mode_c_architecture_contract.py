@@ -91,6 +91,14 @@ def test_mode_c_requires_orca(tmp_path: Path) -> None:
     assert "Orca" in outcome.detail
     assert outcome.result.get("failure") == FailureClass.UNAVAILABLE.value
     assert lead.sent == []
+    # CLI uses run_all(); must fail closed without AssertionError.
+    state = ModeCRunController(
+        mode=Mode.ORCHESTRATED,
+        bindings=_small_bindings(tmp_path, orca=None, lead=lead),
+    ).run_all()
+    assert state.stopped
+    assert GateKind.ORCA_HANDOFF.value in state.failed
+    assert lead.sent == []
 
 
 def test_mode_c_requires_project_root() -> None:

@@ -519,7 +519,16 @@ class ModeCRunController:
                 return self.state
 
             orca = self.bindings.orca
-            assert orca is not None
+            if orca is None:
+                self._fail_gate(
+                    GateKind.ORCA_HANDOFF,
+                    detail=(
+                        "Mode C requires Orca as the orchestration control plane; "
+                        "native Codex/Cursor remain Mode A and are not used as Mode C fallback"
+                    ),
+                    result={"ok": False, "failure": FailureClass.UNAVAILABLE.value},
+                )
+                return self.state
             status = orca.probe()
             binary = status.binary_path or resolve_orca_binary()
             if not binary:
