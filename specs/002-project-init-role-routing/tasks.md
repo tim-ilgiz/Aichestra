@@ -32,13 +32,16 @@
 - [ ] T013 BLOCKED by T022 / live Orca typed quota: Same-Run configured auto quota
   retry is described by `role_dispatch_contract.quota` /
   `aichestra dispatch-role --reason quota-fallback`; Aichestra no longer
-  auto-retries coding workers itself. Live probe on Orca 1.4.200 (2026-09-11):
-  primary implement can settle `worker.state=failed` with durable
-  `lastFailure` JSON, but worker_done payload only carries
-  `taskId`/`dispatchId`/`outcome` — **no typed `failure=quota`**. Body/subject
-  prose is not evidence. `authorize_task` correctly refuses quota-fallback.
-  Remaining: durable typed quota class on Orca receipts (or lastFailure.failure)
-  plus coordinator/operator dispatch-role adoption after that signal.
+  auto-retries coding workers itself. Live re-check 2026-09-11 (Orca 1.4.200,
+  run `run_159901bf6cfb`, dispatch `ctx_611bd667258a`): durable
+  `completedAt` + `lastFailure` JSON present, but schema fields are only
+  provenance/outcome/subject/body — **no `failure`**. Aichestra
+  `receipt_failure_code` → `None`; live
+  `dispatch-role --reason quota-fallback` → refuse
+  ("Quota fallback requires a completed primary implement quota receipt").
+  Orca `worker_done` CLI documents `--outcome` only (no typed failure flag).
+  Remaining: Orca must emit durable typed quota class, then re-run live
+  fallback; do not mark [x] from prose or Aichestra readiness alone.
 - [x] T014 Remove disabled implement remap; preserve exact provider/model binding
 - [x] T015 Infer project root from nearest project config or resolved cwd
 - [x] T016 Interactive settings and init editor using runtime/model discovery
