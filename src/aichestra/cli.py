@@ -12,7 +12,7 @@ from aichestra import __version__
 from aichestra.bootstrap.core import bootstrap, update
 from aichestra.doctor import doctor_json, format_doctor_report, run_doctor
 from aichestra.machine_profiler import profile_machine
-from aichestra.repo import find_repo_root, resolve_aichestra_config_root
+from aichestra.repo import resolve_aichestra_config_root
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -347,8 +347,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0 if report.ok else 1
 
     if args.command == "profile":
-        root = args.repo_root or find_repo_root()
-        profile = profile_machine(root=Path(root))
+        root = (
+            Path(args.repo_root).resolve()
+            if args.repo_root
+            else resolve_aichestra_config_root()
+        )
+        profile = profile_machine(root=root)
         sys.stdout.write(json.dumps(profile.to_dict(), indent=2) + "\n")
         return 0
 

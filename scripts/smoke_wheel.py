@@ -29,6 +29,31 @@ def main():
         run(python, "-m", "pip", "install", "--no-deps", wheel)
         print(run(cli, "--version").strip())
         run(cli, "init", "--yes")
+        run(cli, "profile")
+        doctor = subprocess.run(
+            [str(cli), "doctor", "--json"],
+            cwd=project,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert doctor.returncode in (0, 1), doctor.stderr
+        assert "Could not locate Aichestra" not in doctor.stderr
+        assert "config root resolved" in doctor.stdout
+        boot = subprocess.run(
+            [str(cli), "bootstrap", "--json"],
+            cwd=project,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert boot.returncode in (0, 1), boot.stderr
+        assert "Could not locate Aichestra" not in (boot.stderr or "")
+        boot_payload = json.loads(boot.stdout)
+        assert Path(boot_payload["repo_root"]).resolve() == Path(env["AICHESTRA_CONFIG_HOME"]).resolve()
+        assert (Path(env["AICHESTRA_CONFIG_HOME"]) / "machine.local.json").is_file()
+        assert not (project / ".local").exists()
+        assert not (project / ".gitignore").exists() or ".local/" not in (project / ".gitignore").read_text(encoding="utf-8")
         run(cli, "settings", "set", "orchestration.coordinator=codex",
             "roles.implement=cursor", "quota.mode=auto", "quota.roles.implement=cursor")
         settings = json.loads(run(cli, "settings", "show"))
@@ -52,7 +77,7 @@ def main():
             assert "Run contract missing" in dispatch["error"], dispatch
         location = run(python, "-c", "import aichestra; print(aichestra.__file__)").strip()
         assert Path(location).resolve().is_relative_to(env_dir.resolve())
-        print("Wheel installed; config boundaries for orchestrate/prove-launch/dispatch-role verified outside checkout")
+        print("Wheel installed; config boundaries for profile/doctor/bootstrap/orchestrate/prove-launch/dispatch-role verified outside checkout")
 
 
 if __name__ == "__main__":

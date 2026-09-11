@@ -88,7 +88,7 @@ def init_project(
     if path.is_file() and not force:
         existing = load_project_config(root)
         if sets:
-            existing = apply_settings_sets(existing, sets)
+            existing = apply_settings_sets(existing, sets, project_root=root)
             save_project_config(root, existing)
         _ensure_gitignore_user_local(root)
         return {
@@ -100,7 +100,7 @@ def init_project(
 
     cfg = default_project_config(project_root=root)
     if sets:
-        cfg = apply_settings_sets(cfg, sets)
+        cfg = apply_settings_sets(cfg, sets, project_root=root)
     if not yes and sys.stdin.isatty():
         cfg = interactive_settings(root, config=cfg, save=False)
     save_project_config(root, cfg)
@@ -108,13 +108,35 @@ def init_project(
     return {"ok": True, "created": True, "path": str(path), "config": cfg}
 
 
+def _layered_known_runtimes(
+    project_root: Path | str | None,
+    project_cfg: Mapping[str, Any] | None = None,
+) -> set[str]:
+    """Runtimes from package/OS/machine layers plus the draft project config."""
+    from aichestra.config.layering import deep_merge, resolve_config
+    from aichestra.repo import resolve_aichestra_config_root
+
+    root = Path(project_root).resolve() if project_root is not None else None
+    base = resolve_config(
+        repo_root=resolve_aichestra_config_root(project_root=root),
+        project_root=None,
+    )
+    merged = deep_merge(base, dict(project_cfg or {}))
+    return configured_runtimes(merged)
+
+
 def show_settings(project_root: Path | str) -> dict[str, Any]:
-    from aichestra.orchestration.verification import verification_enabled
+    from aichestra.orchestration.verification import (
+        require_verification_toggle,
+        verification_enabled,
+    )
 
     raw = load_project_config(project_root)
-    bindings = load_role_bindings(raw)
-    quota = load_quota_policy(raw)
-    coordinator = load_coordinator_binding(raw)
+    require_verification_toggle(raw)
+    known = _layered_known_runtimes(project_root, raw)
+    bindings = load_role_bindings(raw, known=known)
+    quota = load_quota_policy(raw, known=known)
+    coordinator = load_coordinator_binding(raw, known=known)
     return {
         "project_root": str(Path(project_root).resolve()),
         "path": str(project_config_path(project_root)),
@@ -129,7 +151,15 @@ def show_settings(project_root: Path | str) -> dict[str, Any]:
     }
 
 
-def apply_settings_sets(config: dict[str, Any], pairs: list[str]) -> dict[str, Any]:
+def apply_settings_sets(
+    config: dict[str, Any],
+    pairs: list[str],
+    *,
+    project_root: Path | str | None = None,
+    known=None,
+) -> dict[str, Any]:
+    from aichestra.orchestration.verification import require_verification_toggle
+
     out = copy.deepcopy(config)
     for pair in pairs:
         match = _SET_PAIR.match(pair.strip())
@@ -138,11 +168,21 @@ def apply_settings_sets(config: dict[str, Any], pairs: list[str]) -> dict[str, A
         key = match.group(1).strip()
         value_raw = match.group(2)
         value = _parse_value(value_raw)
-        _assign_dotted(out, key, value)
+        effective = (
+            known
+            if known is not None
+            else _layered_known_runtimes(project_root, out)
+        )
+        _assign_dotted(out, key, value, known=effective | configured_runtimes(out))
     # Re-validate coordinator/worker/quota after mutation.
-    load_coordinator_binding(out)
-    load_role_bindings(out)
-    load_quota_policy(out)
+    require_verification_toggle(out)
+    effective = (
+        known if known is not None else _layered_known_runtimes(project_root, out)
+    )
+    effective = effective | configured_runtimes(out)
+    load_coordinator_binding(out, known=effective)
+    load_role_bindings(out, known=effective)
+    load_quota_policy(out, known=effective)
     return out
 
 
@@ -153,7 +193,7 @@ def settings_set(project_root: Path | str, pairs: list[str]) -> dict[str, Any]:
             f"missing {path}; run `aichestra init` in the project first"
         )
     cfg = load_project_config(project_root)
-    cfg = apply_settings_sets(cfg, pairs)
+    cfg = apply_settings_sets(cfg, pairs, project_root=project_root)
     save_project_config(project_root, cfg)
     return show_settings(project_root)
 
@@ -180,10 +220,17 @@ def _parse_value(raw: str) -> Any:
         return text
 
 
-def _assign_dotted(target: dict[str, Any], dotted: str, value: Any) -> None:
+def _assign_dotted(
+    target: dict[str, Any],
+    dotted: str,
+    value: Any,
+    *,
+    known=None,
+) -> None:
     parts = [p for p in dotted.split(".") if p]
     if not parts:
         raise ValueError("empty settings key")
+    effective = known if known is not None else configured_runtimes(target)
     # Convenience: roles.implement=codex → roles.implement object
     if len(parts) == 2 and parts[0] == "roles" and parts[1] == "coordinator":
         raise ValueError(
@@ -195,7 +242,7 @@ def _assign_dotted(target: dict[str, Any], dotted: str, value: Any) -> None:
         and parts[1] in ROLE_KEYS
         and isinstance(value, str)
     ):
-        binding = parse_role_binding(value, field=dotted, known=configured_runtimes(target))
+        binding = parse_role_binding(value, field=dotted, known=effective)
         roles = target.setdefault("roles", {})
         if not isinstance(roles, dict):
             raise ValueError("roles must be an object")
@@ -207,7 +254,7 @@ def _assign_dotted(target: dict[str, Any], dotted: str, value: Any) -> None:
         and parts[1] == "coordinator"
         and isinstance(value, str)
     ):
-        binding = parse_role_binding(value, field=dotted, known=configured_runtimes(target))
+        binding = parse_role_binding(value, field=dotted, known=effective)
         orch = target.setdefault("orchestration", {})
         if not isinstance(orch, dict):
             raise ValueError("orchestration must be an object")
@@ -226,7 +273,7 @@ def _assign_dotted(target: dict[str, Any], dotted: str, value: Any) -> None:
         and isinstance(value, str)
     ):
         binding = parse_role_binding(
-            value, field="quota.roles.implement", known=configured_runtimes(target)
+            value, field="quota.roles.implement", known=effective
         )
         quota = target.setdefault("quota", {})
         if not isinstance(quota, dict):
@@ -328,9 +375,13 @@ def interactive_settings(project_root, *, config=None, save=True):
         if action == "0":
             return config if config is not None else load_project_config(root)
         if action == "8":
-            load_coordinator_binding(cfg)
-            load_role_bindings(cfg)
-            load_quota_policy(cfg)
+            from aichestra.orchestration.verification import require_verification_toggle
+
+            known = _layered_known_runtimes(root, cfg)
+            require_verification_toggle(cfg)
+            load_coordinator_binding(cfg, known=known)
+            load_role_bindings(cfg, known=known)
+            load_quota_policy(cfg, known=known)
             if save:
                 save_project_config(root, cfg)
             return cfg

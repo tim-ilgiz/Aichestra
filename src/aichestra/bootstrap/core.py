@@ -11,9 +11,11 @@ from aichestra.config.layering import (
     machine_local_path,
     resolve_config,
     save_machine_local,
+    uses_dot_local_machine_config,
 )
+from aichestra.config.paths import ensure_user_config_home
 from aichestra.machine_profiler import profile_machine
-from aichestra.repo import find_repo_root
+from aichestra.repo import resolve_aichestra_config_root
 
 
 @dataclass
@@ -51,16 +53,23 @@ def bootstrap(
     approve_model_download: bool = False,
 ) -> BootstrapResult:
     """Idempotent bootstrap: ensure dirs/config; preserve machine-local settings."""
-    root = Path(repo_root) if repo_root else find_repo_root()
-    root = root.resolve()
+    root = (
+        Path(repo_root).resolve()
+        if repo_root
+        else resolve_aichestra_config_root()
+    )
     actions: list[str] = []
 
-    local_dir = root / ".local"
-    local_dir.mkdir(parents=True, exist_ok=True)
-    actions.append("ensure_.local")
-
-    gitignore = root / ".gitignore"
-    _ensure_gitignore_entries(gitignore, actions)
+    if uses_dot_local_machine_config(root):
+        local_dir = root / ".local"
+        local_dir.mkdir(parents=True, exist_ok=True)
+        actions.append("ensure_.local")
+        _ensure_gitignore_entries(root / ".gitignore", actions)
+    else:
+        # Installed package: never treat a foreign project as Aichestra root.
+        ensure_user_config_home()
+        root.mkdir(parents=True, exist_ok=True)
+        actions.append("ensure_user_config_home")
 
     ml_path = machine_local_path(root)
     created = False

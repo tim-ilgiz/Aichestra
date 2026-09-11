@@ -108,3 +108,23 @@ these deterministic corrections do not claim live integration acceptance.
 
 - [x] T040 Emit deterministic `research_artifact` (`none`|`file`|`compacted`)
   in POLICY_PACKAGE with coordinator MUST instructions; not a phase scheduler.
+
+## PR #2 REQUEST CHANGES (installed package / layered runtimes / verification / dispatch ownership)
+
+- [x] T041 `profile` / `doctor` / `bootstrap` use `resolve_aichestra_config_root`
+  (never bare `find_repo_root` from a foreign project); bootstrap writes
+  machine-local under user config home without mutating foreign `.gitignore`.
+  Extend `smoke_wheel.py` with profile/doctor/bootstrap from unrelated cwd.
+- [x] T042 Settings validation accepts runtimes registered in layered
+  machine/global config without requiring a duplicate in project.json.
+- [x] T043 `verification.enabled` is strict boolean (`is True` / settings
+  reject non-bool with exit 2); string typos must not fail-open.
+- [x] T044 `dispatch-role` must not call `run-use` (avoids transferring Run
+  ownership away from the coordinator); authorize via task/run association
+  then `worker-start --task`.
+- [x] T045 Legacy `quota.implement_fallback` applies when `quota.roles` is
+  missing the implement key (including empty `roles: {}`); explicit
+  `quota.roles.implement` wins.
+
+T013/T022 still require live coordinator adoption and durable Orca launch receipts;
+these deterministic corrections do not claim live integration acceptance.

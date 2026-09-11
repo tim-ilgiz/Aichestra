@@ -18,8 +18,18 @@ from aichestra.execution.runtimes import DEFAULT_RUNTIME_BINARIES
 KNOWN_RUNTIMES = frozenset(DEFAULT_RUNTIME_BINARIES)
 
 
-def configured_runtimes(config):
-    return KNOWN_RUNTIMES | set((config or {}).get("execution", {}).get("runtimes", {}))
+def configured_runtimes(config, *, extra_known=None):
+    """Runtime ids accepted for role/quota bindings.
+
+    ``extra_known`` unions layered (machine/global) registrations so project.json
+    may bind a runtime registered outside the project file.
+    """
+    known = set(KNOWN_RUNTIMES)
+    known |= set((config or {}).get("execution", {}).get("runtimes", {}) or {})
+    if extra_known:
+        known |= set(extra_known)
+    return known
+
 
 
 _RUNTIME_ALIASES: dict[str, str] = {
@@ -112,7 +122,11 @@ def default_quota_policy() -> QuotaPolicy:
     )
 
 
-def load_role_bindings(config: Mapping[str, Any] | None) -> dict[str, RoleBinding]:
+def load_role_bindings(
+    config: Mapping[str, Any] | None,
+    *,
+    known=None,
+) -> dict[str, RoleBinding]:
     base = default_role_bindings()
     if not config:
         return base
@@ -131,28 +145,39 @@ def load_role_bindings(config: Mapping[str, Any] | None) -> dict[str, RoleBindin
             "Use orchestration.coordinator for the Mode C coordinator LLM"
         )
     out = dict(base)
-    known = configured_runtimes(config)
+    effective = known if known is not None else configured_runtimes(config)
     for key in ROLE_KEYS:
         if key in raw_roles:
-            out[key] = parse_role_binding(raw_roles[key], field=f"roles.{key}", known=known)
+            out[key] = parse_role_binding(
+                raw_roles[key], field=f"roles.{key}", known=effective
+            )
     return out
 
 
-def load_coordinator_binding(config: Mapping[str, Any] | None) -> RoleBinding:
+def load_coordinator_binding(
+    config: Mapping[str, Any] | None,
+    *,
+    known=None,
+) -> RoleBinding:
     base = default_coordinator_binding()
     if not config:
         return base
     raw = config.get("orchestration")
     if not isinstance(raw, Mapping) or "coordinator" not in raw:
         return base
+    effective = known if known is not None else configured_runtimes(config)
     return parse_role_binding(
         raw["coordinator"],
         field="orchestration.coordinator",
-        known=configured_runtimes(config),
+        known=effective,
     )
 
 
-def load_quota_policy(config: Mapping[str, Any] | None) -> QuotaPolicy:
+def load_quota_policy(
+    config: Mapping[str, Any] | None,
+    *,
+    known=None,
+) -> QuotaPolicy:
     base = default_quota_policy()
     if not config:
         return base
@@ -162,9 +187,11 @@ def load_quota_policy(config: Mapping[str, Any] | None) -> QuotaPolicy:
     mode = str(raw.get("mode") or base.mode).strip().lower()
     if mode not in {"manual", "auto"}:
         raise ValueError("quota.mode must be 'manual' or 'auto'")
-    known = configured_runtimes(config)
+    effective = known if known is not None else configured_runtimes(config)
     fallbacks = dict(base.role_fallbacks)
     roles_raw = raw.get("roles")
+    # Precedence: quota.roles.implement → legacy implement_fallback → default.
+    # An empty roles object must not suppress the legacy alias.
     if isinstance(roles_raw, Mapping):
         unknown = [key for key in roles_raw if key not in QUOTA_ROLE_KEYS]
         if unknown:
@@ -175,11 +202,17 @@ def load_quota_policy(config: Mapping[str, Any] | None) -> QuotaPolicy:
         for key in QUOTA_ROLE_KEYS:
             if key in roles_raw:
                 fallbacks[key] = parse_role_binding(
-                    roles_raw[key], field=f"quota.roles.{key}", known=known
+                    roles_raw[key], field=f"quota.roles.{key}", known=effective
+                )
+            elif key == "implement" and "implement_fallback" in raw:
+                fallbacks[key] = parse_role_binding(
+                    raw["implement_fallback"],
+                    field="quota.implement_fallback",
+                    known=effective,
                 )
     elif "implement_fallback" in raw:
         fallbacks["implement"] = parse_role_binding(
-            raw["implement_fallback"], field="quota.implement_fallback", known=known
+            raw["implement_fallback"], field="quota.implement_fallback", known=effective
         )
     return QuotaPolicy(mode=mode, role_fallbacks=fallbacks)
 

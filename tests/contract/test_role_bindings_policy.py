@@ -267,7 +267,7 @@ def test_dispatch_role_pins_exact_bound_target(tmp_path, monkeypatch):
         if "task-list" in argv:
             return SimpleNamespace(returncode=0, stdout='{"tasks":[{"id":"task-1","run_id":"run-1","role":"tests"}]}', stderr="")
         if "run-use" in argv:
-            return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+            raise AssertionError("dispatch-role must not call run-use (ownership transfer)")
         if "worker-start" in argv:
             return SimpleNamespace(
                 returncode=0,
@@ -357,7 +357,7 @@ def test_run_contract_is_immutable_and_project_bound(tmp_path):
         load_contract(tmp_path, "absent", tmp_path)
 
 
-@pytest.mark.parametrize("fault", [None, "manual", "missing", "cross-run", "wrong-primary", "future", "wrong-role", "disabled", "run-use"])
+@pytest.mark.parametrize("fault", [None, "manual", "missing", "cross-run", "wrong-primary", "future", "wrong-role", "disabled"])
 def test_quota_fallback_authorized_before_worker_start(tmp_path, monkeypatch, fault):
     import json
     from types import SimpleNamespace
@@ -385,18 +385,20 @@ def test_quota_fallback_authorized_before_worker_start(tmp_path, monkeypatch, fa
     def run(argv, **kwargs):
         command = argv[2]
         calls.append(command)
+        if command == "run-use":
+            raise AssertionError("dispatch-role must not call run-use")
         data = {"task-list": {"tasks": [task]},
                 "worker-list": {"workers": [] if fault == "missing" else [worker]},
-                "worker-show": payload, "run-use": {},
+                "worker-show": payload,
                 "worker-start": {"dispatchId": "fallback"}}[command]
-        return SimpleNamespace(returncode=1 if fault == "run-use" and command == "run-use" else 0,
-                               stdout=json.dumps(data), stderr="")
+        return SimpleNamespace(returncode=0, stdout=json.dumps(data), stderr="")
     result = dispatch_role(role="implement", reason="quota-fallback", run_id="r1", task_id="t1",
                            project_root=tmp_path, repo_root=tmp_path, config={},
                            targets=(primary, replace(fallback, enabled=fault != "disabled")),
                            binary="orca-test", run=run)
     assert result["ok"] is (fault is None), result
     assert ("worker-start" in calls) is (fault is None)
+    assert "run-use" not in calls
     if fault is None:
         assert result["execution_target_id"] == fallback.id
 
@@ -439,12 +441,13 @@ def test_saved_provider_binding_uses_production_resolver(tmp_path, monkeypatch, 
                 "runtime": "opencode", "provider": "beeline", "model": "Qwen",
                 "endpoint": "https://models.example/api?tenant=B" if fault == "wrong-terminal" else provider.endpoint}}), stderr="")
         data = {"task-list": {"tasks": [{"id": "t1", "run_id": "r1", "role": "tests"}]},
-                "run-use": {}, "worker-start": {"dispatchId": "d1"}}[argv[2]]
+                "worker-start": {"dispatchId": "d1"}}[argv[2]]
         return SimpleNamespace(returncode=0, stdout=json.dumps(data), stderr="")
     result = dispatch_role(role="tests", run_id="r1", task_id="t1", project_root=tmp_path,
                            repo_root=tmp_path, config=cfg, binary="orca-test", run=run)
     assert result["ok"] is (fault is None), result
     assert any("worker-start" in c for c in calls) is (fault is None)
+    assert not any("run-use" in c for c in calls)
     if fault is None:
         assert result["execution_target_id"] == target.id
         start = next(c for c in calls if "worker-start" in c)

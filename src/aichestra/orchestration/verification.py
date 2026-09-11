@@ -128,8 +128,8 @@ def verification_enabled(config: Mapping[str, Any] | None) -> bool:
     """Single on/off switch for Mode C verification (default: off).
 
     Canonical key: ``verification.enabled`` in layered / project config.
-    When false, the verification gate fails closed (non-zero exit, no
-    subprocesses) so Orca cannot soft-pass on LLM opinion. Turn on with
+    Only the JSON boolean ``true`` enables verification — string typos such as
+    ``"flase"`` MUST NOT fail-open via ``bool(str)``. Turn on with
     ``aichestra settings set verification.enabled=true`` and configure
     ``verify``.
     """
@@ -137,9 +137,20 @@ def verification_enabled(config: Mapping[str, Any] | None) -> bool:
         return False
     block = config.get("verification")
     if isinstance(block, Mapping) and "enabled" in block:
-        return bool(block.get("enabled"))
+        return block.get("enabled") is True
     # Legacy: bare verify list present does not auto-enable; require the toggle.
     return False
+
+
+def require_verification_toggle(config: Mapping[str, Any] | None) -> None:
+    """Reject non-boolean ``verification.enabled`` (settings / load validation)."""
+    if not config:
+        return
+    block = config.get("verification")
+    if not isinstance(block, Mapping) or "enabled" not in block:
+        return
+    if not isinstance(block.get("enabled"), bool):
+        raise ValueError("verification.enabled must be boolean")
 
 
 def verification_commands_from_config(config: Mapping[str, Any] | None) -> list[list[str]]:

@@ -54,11 +54,15 @@ def machine_local_path(repo_root: Path | None = None) -> Path:
     return Path(root) / MACHINE_LOCAL_FILENAME
 
 
-def _uses_dot_local_machine_config(root: Path) -> bool:
+def uses_dot_local_machine_config(root: Path) -> bool:
     """True for Aichestra clone (or test fake with policies/) layout."""
     return looks_like_aichestra_root(root) or (
         root / "policies" / "defaults.json"
     ).is_file()
+
+
+# Backward-compatible private alias.
+_uses_dot_local_machine_config = uses_dot_local_machine_config
 
 
 def package_defaults() -> dict[str, Any]:

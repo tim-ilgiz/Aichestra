@@ -13,7 +13,7 @@ from aichestra.local_runtime.discovery import discover_local_runtime_report
 from aichestra.machine_profiler import profile_machine
 from aichestra.platform_detect import platform_info, wsl_required
 from aichestra.providers.discovery import discover_providers_report
-from aichestra.repo import find_repo_root
+from aichestra.repo import resolve_aichestra_config_root
 from aichestra.security.staging_allowlist import PRODUCTION_SSH_SUPPORTED
 from aichestra.security.staging_ssh import staging_configured
 
@@ -70,16 +70,20 @@ def run_doctor(
     )
     root: Path | None = None
     try:
-        root = Path(repo_root).resolve() if repo_root else find_repo_root()
+        root = (
+            Path(repo_root).resolve()
+            if repo_root
+            else resolve_aichestra_config_root(project_root=project_root)
+        )
         version_detail = _aichestra_version_detail(root)
         report.checks.append(
             CheckResult(
                 "aichestra",
                 CheckStatus.PASS,
-                f"repository root resolved: {root}; {version_detail}",
+                f"config root resolved: {root}; {version_detail}",
             )
         )
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, ValueError, OSError) as exc:
         report.checks.append(
             CheckResult("aichestra", CheckStatus.FAIL, str(exc))
         )

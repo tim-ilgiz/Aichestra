@@ -200,27 +200,13 @@ def dispatch_role(
 
     run_fn = run if run is not None else subprocess.run
     try:
+        # Authorize against canonical Orca task/run state only. Do NOT call
+        # run-use here: Orca run-use transfers Run ownership to the calling
+        # terminal and can fence the coordinator that still owns the DAG.
+        # worker-start --task is sufficient for an already-associated Task.
         authorize_task(orca_binary, run_fn, rid, tid, role_key, contract, reason)
     except (ValueError, TypeError, KeyError, OSError, subprocess.SubprocessError) as exc:
         return {"ok": False, "operation": ROLE_DISPATCH_OPERATION, "error": str(exc)}
-    use = run_fn(
-        [orca_binary, "orchestration", "run-use", "--id", rid, "--json"],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    if use.returncode != 0:
-        return _payload({
-            "ok": False,
-            "operation": ROLE_DISPATCH_OPERATION,
-            "role": role_key,
-            "run_id": rid,
-            "task_id": tid,
-            "error": f"orca run-use exited {use.returncode}",
-            "orca_stderr": (use.stderr or "")[:2000],
-            "execution_target": serialize_execution_target(target),
-        })
 
     wt = str(worktree or "current").strip() or "current"
     launch_ctx = LaunchContext(
