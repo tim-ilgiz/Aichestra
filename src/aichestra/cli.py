@@ -240,6 +240,7 @@ def build_parser() -> argparse.ArgumentParser:
             "worker-start exact target; coordinator still owns the DAG)"
         ),
     )
+    dispatch_p.add_argument("--reason", choices=("primary", "quota-fallback"), default="primary")
     dispatch_p.add_argument(
         "--role",
         required=True,
@@ -527,6 +528,7 @@ def _cmd_dispatch_role(args: argparse.Namespace) -> int:
 
     payload = dispatch_role(
         role=str(args.role),
+        reason=args.reason,
         run_id=str(args.run_id),
         task_id=str(args.task_id),
         project_root=Path(args.project_root).resolve(),

@@ -183,6 +183,8 @@ def test_dispatch_role_pins_exact_bound_target(tmp_path, monkeypatch):
     def fake_run(argv, **kwargs):
         calls.append(list(argv))
         from types import SimpleNamespace
+        if "task-list" in argv:
+            return SimpleNamespace(returncode=0, stdout='{"tasks":[{"id":"task-1","run_id":"run-1","role":"tests"}]}', stderr="")
         if "run-use" in argv:
             return SimpleNamespace(returncode=0, stdout="{}", stderr="")
         if "worker-start" in argv:
@@ -197,7 +199,7 @@ def test_dispatch_role_pins_exact_bound_target(tmp_path, monkeypatch):
         "aichestra.execution.dispatch_role.resolve_orca_binary", lambda: "orca-test"
     )
     monkeypatch.setattr(
-        "aichestra.execution.dispatch_role.looks_like_aichestra_root", lambda _p: True
+        "aichestra.execution.dispatch_role.trusted_config_root", lambda _p: True
     )
     monkeypatch.setattr(
         "aichestra.execution.dispatch_role.resolve_aichestra_config_root",
@@ -212,6 +214,12 @@ def test_dispatch_role_pins_exact_bound_target(tmp_path, monkeypatch):
             "docs": {"runtime": "codex"},
         }
     }
+    from aichestra.execution.run_contract import save_contract
+    from aichestra.execution.roles import target_contract_entry
+    save_contract(tmp_path, "run-1", tmp_path, {
+        "bindings": {"tests": target_contract_entry(target)}, "quota": {"mode": "manual"}})
+    # Settings drift must not change the old Run's worker.
+    cfg["roles"]["tests"] = {"runtime": "codex"}
     payload = dispatch_role(
         role="tests",
         run_id="run-1",
@@ -252,3 +260,61 @@ def test_dispatch_role_pins_exact_bound_target(tmp_path, monkeypatch):
     )
     assert wrong["ok"] is False
     assert "unavailable" in wrong["error"] or "unknown" in wrong["error"]
+
+
+def test_run_contract_is_immutable_and_project_bound(tmp_path):
+    from aichestra.execution.run_contract import save_contract, load_contract
+    contract = {"bindings": {"tests": {"execution_target_id": "original"}}}
+    save_contract(tmp_path, "../run", tmp_path, contract)
+    save_contract(tmp_path, "../run", tmp_path, contract)
+    with pytest.raises(ValueError, match="different policy"):
+        save_contract(tmp_path, "../run", tmp_path, {"bindings": {}})
+    assert load_contract(tmp_path, "../run", tmp_path) == contract
+    with pytest.raises(ValueError, match="mismatch"):
+        load_contract(tmp_path, "../run", tmp_path / "other")
+    with pytest.raises(ValueError, match="missing"):
+        load_contract(tmp_path, "absent", tmp_path)
+
+
+@pytest.mark.parametrize("fault", [None, "manual", "missing", "cross-run", "wrong-primary", "future", "wrong-role", "disabled", "run-use"])
+def test_quota_fallback_authorized_before_worker_start(tmp_path, monkeypatch, fault):
+    import json
+    from types import SimpleNamespace
+    from aichestra.execution.dispatch_role import dispatch_role
+    from aichestra.execution.run_contract import save_contract
+    from aichestra.execution.roles import target_contract_entry
+    monkeypatch.setenv("AICHESTRA_CONFIG_HOME", str(tmp_path))
+    primary = fake_execution_targets("codex")[0]
+    fallback = fake_execution_targets("cursor")[0]
+    contract = {"bindings": {"implement": target_contract_entry(primary)},
+                "quota": {"mode": "manual" if fault == "manual" else "auto",
+                          "roles": {"implement": target_contract_entry(fallback)}}}
+    save_contract(tmp_path, "r1", tmp_path, contract)
+    task, worker, payload = receipt(role="implement")
+    worker.update(failure="quota", completed_at="2026-01-01T00:00:00Z")
+    if fault == "cross-run":
+        worker["run_id"] = "other"
+    if fault == "wrong-primary":
+        payload["launch"]["effective"]["agent"] = "cursor"
+    if fault == "future":
+        worker["completed_at"] = "9999-01-01T00:00:00Z"
+    if fault == "wrong-role":
+        task["title"] = "tests"
+    calls = []
+    def run(argv, **kwargs):
+        command = argv[2]
+        calls.append(command)
+        data = {"task-list": {"tasks": [task]},
+                "worker-list": {"workers": [] if fault == "missing" else [worker]},
+                "worker-show": payload, "run-use": {},
+                "worker-start": {"dispatchId": "fallback"}}[command]
+        return SimpleNamespace(returncode=1 if fault == "run-use" and command == "run-use" else 0,
+                               stdout=json.dumps(data), stderr="")
+    result = dispatch_role(role="implement", reason="quota-fallback", run_id="r1", task_id="t1",
+                           project_root=tmp_path, repo_root=tmp_path, config={},
+                           targets=(primary, replace(fallback, enabled=fault != "disabled")),
+                           binary="orca-test", run=run)
+    assert result["ok"] is (fault is None), result
+    assert ("worker-start" in calls) is (fault is None)
+    if fault is None:
+        assert result["execution_target_id"] == fallback.id

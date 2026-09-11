@@ -37,9 +37,11 @@ def target_contract_entry(target: ExecutionTarget) -> dict:
     the package internally consistent without forcing every worker prove up
     front.
     """
+    from aichestra.execution.serialize import safe_endpoint_for_context
     entry = {
         "execution_target_id": target.id,
         "runtime": target.runtime.id,
+        "endpoint": safe_endpoint_for_context(target.endpoint),
         "provider": target.provider.id if target.provider else None,
         "model": target.model.id if target.model else None,
     }

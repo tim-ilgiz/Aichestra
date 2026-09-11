@@ -164,8 +164,20 @@ still run when present. Language-aware verification is a follow-up.
 ## Known external blocker
 
 `aichestra dispatch-role` provides a policy-enforced Dispatch path that pins
-the project role binding to an exact ExecutionTarget without making Aichestra
+the immutable Run role binding to an exact ExecutionTarget without making Aichestra
 a second orchestrator. Remaining live gaps: coordinator adoption of that
 entrypoint, and durable Orca `launch.effective` receipts for post-dispatch
 audit. Do not mark this feature fully implemented until those are proven live.
 Fake CI providers are not live evidence.
+
+## Run contract enforcement corrections
+
+- Persist the typed contract by canonical run_id in the config home before
+  coordinator handoff. Refuse replacement by later settings, missing contracts,
+  cross-project usage, unavailable targets and mismatched Task role/Run identity.
+- `dispatch-role --reason quota-fallback` selects only the saved auto-mode
+  implement fallback, after a completed canonical primary implement quota receipt
+  in the same Run is verified. No Aichestra task scheduling is introduced.
+- Installed user config homes are trusted with package defaults, including when
+  passed explicitly as --repo-root. Wheel smoke exercises all three command
+  config boundaries, with no checkout imports or AICHESTRA_REPO_ROOT.

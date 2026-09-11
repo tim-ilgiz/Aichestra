@@ -55,7 +55,7 @@ role=tests → execution_target_id=X → Dispatch X
 ```
 
 Preferred enforcer: `aichestra dispatch-role --run --task --role` resolves
-the project binding and worker-starts only that exact target. That mapping
+the immutable Run contract and worker-starts only that exact target. That mapping
 also lives in POLICY_PACKAGE `role_dispatch_contract`. Durable
 `launch.effective` receipts remain required for post-dispatch audit; missing
 evidence fails closed. Fake CI is not live proof.
@@ -76,3 +76,8 @@ searches ancestors; verification readiness is checked before execution
 discovery. CI builds and installs a wheel outside the checkout. Update
 existing canonical tests/README, with focused coordinator-vs-implement
 and role-receipt tests rather than source-string assertions.
+
+Persist the role contract in the resolved config home before handoff. Dispatch
+reads that contract, validates canonical Task membership, and resolves only its
+exact target against currently enabled discovery. Quota fallback is an explicit
+reason guarded by primary-worker quota evidence; Orca still owns scheduling.

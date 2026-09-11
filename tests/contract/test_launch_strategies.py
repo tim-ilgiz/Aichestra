@@ -1174,6 +1174,7 @@ def test_prove_launch_refuses_foreign_project_as_config_root(tmp_path, monkeypat
     payload = prove_launch_by_candidate_id(
         "any",
         project_root=foreign,
+        repo_root=foreign,
     )
     assert payload["ok"] is False
     assert "config root" in payload["error"].lower() or "repo-root" in payload["error"].lower()

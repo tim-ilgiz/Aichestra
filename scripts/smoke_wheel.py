@@ -36,9 +36,23 @@ def main():
         assert settings["roles"]["implement"]["runtime"] == "cursor"
         assert settings["quota"]["mode"] == "auto"
         assert settings["quota"]["roles"]["implement"]["runtime"] == "cursor"
+        def rejected(*args):
+            result = subprocess.run([str(cli), *map(str, args)], cwd=project, env=env,
+                                    capture_output=True, text=True)
+            assert result.returncode != 0, result.stdout
+            return result
+        orchestration = rejected("orchestrate", "--prompt", "wheel boundary smoke")
+        assert "Configure verification" in orchestration.stderr, orchestration.stderr
+        for explicit in ([], ["--repo-root", env["AICHESTRA_CONFIG_HOME"]]):
+            proof = json.loads(rejected("prove-launch", "--candidate-id", "wheel-unknown",
+                                       "--project-root", project, *explicit).stdout)
+            assert "unknown candidate_id" in proof["error"], proof
+            dispatch = json.loads(rejected("dispatch-role", "--role", "tests", "--run", "wheel-unknown",
+                                          "--task", "t1", "--project-root", project, *explicit).stdout)
+            assert "Run contract missing" in dispatch["error"], dispatch
         location = run(python, "-c", "import aichestra; print(aichestra.__file__)").strip()
         assert Path(location).resolve().is_relative_to(env_dir.resolve())
-        print("Wheel installed and CLI verified outside checkout")
+        print("Wheel installed; config boundaries for orchestrate/prove-launch/dispatch-role verified outside checkout")
 
 
 if __name__ == "__main__":

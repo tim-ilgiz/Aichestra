@@ -882,6 +882,14 @@ class ModeCRunController:
         from aichestra.execution.launch_strategies import serialize_prepared_launch
 
         package = self._build_policy_package(run_id)
+        from aichestra.execution.run_contract import save_contract
+        from aichestra.repo import resolve_aichestra_config_root
+        try:
+            save_contract(resolve_aichestra_config_root(repo_root=package.aichestra_repo_root or None),
+                          run_id, package.project_root, package.role_dispatch_contract)
+        except (OSError, ValueError) as exc:
+            self._fail_gate(GateKind.ORCA_HANDOFF, detail=f"Cannot persist Run contract: {exc}")
+            return False
         self.state.metadata["mode_c_policy_package"] = package.to_dict()
         prove_invocation = prove_launch_invocation(
             project_root=package.project_root or "<root>",
@@ -1272,7 +1280,9 @@ class ModeCRunController:
                 "requires_launch_proof is true, prove-launch the candidate_id first "
                 "and Dispatch only the returned runnable target. The coordinator "
                 "chooses which Tasks to create and when; it MUST NOT choose a "
-                "different target."
+                "different target. Auto quota fallback uses dispatch-role --reason "
+                "quota-fallback, requiring a canonical completed primary implement "
+                "quota receipt in this Run."
             ),
             "bindings": bindings,
             "quota": {

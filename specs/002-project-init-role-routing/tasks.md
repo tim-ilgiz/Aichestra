@@ -30,7 +30,7 @@
 - [x] T011 Resolve role runtime/provider/model into an exact preparable target
 - [x] T012 Audit all canonical role dispatch receipts; fail closed on mismatch
 - [ ] T013 BLOCKED by T022: Same-Run configured auto quota retry is described by
-  `role_dispatch_contract.quota` / `aichestra dispatch-role`; Aichestra no longer
+  `role_dispatch_contract.quota` / `aichestra dispatch-role --reason quota-fallback`; Aichestra no longer
   auto-retries coding workers itself. Live automatic implement fallback still
   requires coordinator (or operator) to call dispatch-role for the fallback
   target, plus durable launch receipts where Orca provides them.
@@ -43,7 +43,7 @@
 - [x] T020 Remove machine-local IDE workspace and account metadata; ignore .idea
 - [x] T021 Complete regression tests and local installed-wheel smoke
 - [ ] T022 PARTIAL: `aichestra dispatch-role` provides policy-enforced
-  worker-start for the exact role binding (pre-dispatch pin without making
+  worker-start for the immutable Run role binding (pre-dispatch pin without making
   Aichestra a scheduler). Remaining: durable Orca `launch.effective` receipts
   for post-dispatch audit, and live coordinator adoption of dispatch-role.
   Fake CI is not live evidence. Do not mark this feature fully implemented
@@ -79,5 +79,16 @@
   package consistency asserts runnable↔execution_targets or
   provisionable↔candidates.
 - [x] T030 `aichestra dispatch-role --run --task --role`: resolve project
-  binding → prove if needed → Orca worker-start exact target. Coordinator
+  Run contract → prove if needed → Orca worker-start exact target. Coordinator
   still owns the DAG; this is the policy-enforced Dispatch adapter for T022.
+## Run contract and installed-package review corrections
+
+- [x] T031 Accept installed user config homes at prove-launch/dispatch-role boundaries.
+- [x] T032 Persist immutable Run contracts before handoff; enforce saved target
+  and canonical Task role/Run association before worker launch.
+- [x] T033 Add quota-fallback reason with same-Run primary quota receipt validation.
+- [x] T034 Extend isolated wheel smoke to orchestrate/prove-launch/dispatch-role
+  config boundaries and add contract drift / negative quota regressions.
+
+T013/T022 still require live coordinator adoption and durable Orca launch receipts;
+these deterministic corrections do not claim live integration acceptance.

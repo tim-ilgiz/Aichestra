@@ -811,7 +811,7 @@ class OrcaProvider(ProviderAdapter):
                 "mode=manual escalate/ask the operator to change roles via "
                 "`aichestra settings` and finish with worker_done failed if blocked; "
                 "if mode=auto, same-Run Dispatch of quota.roles.implement "
-                "execution_target_id via dispatch-role or Orca (never call Cursor/Codex outside Orca, "
+                "execution_target_id via dispatch-role --reason quota-fallback (requires canonical primary quota evidence), or Orca (never call Cursor/Codex outside Orca, "
                 "and never replace this coordinator). "
                 "Do not invent additional hard-coded phase→product maps beyond "
                 "role_dispatch_contract. "

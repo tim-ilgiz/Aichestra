@@ -444,6 +444,7 @@ def coordinator_rpc(monkeypatch, tmp_path):
 
 def _coordinator_controller(adapter, tmp_path):
     return ModeCRunController(bindings=WorkflowBindings(
+        aichestra_repo_root=str(tmp_path),
         execution_targets=fake_execution_targets(),
         orca=adapter, providers=[fake_codex().probe()], project_root=str(tmp_path),
         verification_enabled=True,

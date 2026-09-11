@@ -2,7 +2,7 @@
 
 Coordinator under Orca still owns the DAG (which Tasks to create and when).
 When a Task for a configured worker role is ready, call this entrypoint instead
-of inventing a worker-start agent. Aichestra resolves the project role binding
+of inventing a worker-start agent. Aichestra resolves the immutable Run binding
 to one exact ExecutionTarget, proves launch when required, then starts that
 target on the existing Orca Task.
 """
@@ -15,21 +15,23 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from aichestra.config.layering import resolve_config
-from aichestra.config.roles import ROLE_KEYS, load_role_bindings
+from aichestra.config.roles import ROLE_KEYS
 from aichestra.execution.launch_strategies import (
     LaunchContext,
     adapter_for,
+    abort_prepared,
     prove_launch,
     serialize_prepared_launch,
 )
-from aichestra.execution.roles import RoleBindingResolver
+from aichestra.execution.run_contract import load_contract, authorize_task
 from aichestra.execution.serialize import (
     ROLE_DISPATCH_OPERATION,
     resolve_mode_c_execution,
     serialize_execution_target,
+    safe_endpoint_for_context,
 )
 from aichestra.providers.orca import resolve_orca_binary
-from aichestra.repo import looks_like_aichestra_root, resolve_aichestra_config_root
+from aichestra.repo import trusted_config_root, resolve_aichestra_config_root
 
 RunFn = Callable[..., subprocess.CompletedProcess[str]]
 
@@ -67,13 +69,14 @@ def dispatch_role(
     task_id: str,
     project_root: str | Path,
     repo_root: str | Path | None = None,
+    reason: str = "primary",
     worktree: str = "current",
     binary: str | None = None,
     config: Mapping[str, Any] | None = None,
     targets=None,
     run: RunFn | None = None,
 ) -> dict[str, Any]:
-    """Resolve role → exact target → prove if needed → Orca worker-start.
+    """Resolve saved Run role → exact target → prove → Orca worker-start.
 
     Does not create Tasks or own the DAG. Fail closed if the role is unknown,
     the binding cannot be resolved, or Orca refuses same-Run worker-start.
@@ -120,10 +123,7 @@ def dispatch_role(
             "error": str(exc),
         })
 
-    trusted = bool(aichestra_root) and (
-        looks_like_aichestra_root(aichestra_root)
-        or (Path(aichestra_root) / "policies" / "defaults.json").is_file()
-    )
+    trusted = trusted_config_root(aichestra_root)
     if not trusted:
         return _payload({
             "ok": False,
@@ -141,21 +141,18 @@ def dispatch_role(
         else resolve_config(repo_root=aichestra_root, project_root=root)
     )
     try:
-        bindings = load_role_bindings(cfg)
-    except ValueError as exc:
-        return _payload({
-            "ok": False,
-            "operation": ROLE_DISPATCH_OPERATION,
-            "role": role_key,
-            "error": str(exc),
-        })
-    if role_key not in bindings:
-        return _payload({
-            "ok": False,
-            "operation": ROLE_DISPATCH_OPERATION,
-            "role": role_key,
-            "error": f"roles.{role_key} is not configured",
-        })
+        contract = load_contract(aichestra_root, rid, root)
+        if reason not in {"primary", "quota-fallback"}:
+            raise ValueError("unknown dispatch reason")
+        entry = contract["bindings"].get(role_key)
+        if reason == "quota-fallback":
+            if role_key != "implement" or contract["quota"]["mode"] != "auto":
+                raise ValueError("quota fallback requires implement and Run quota.mode=auto")
+            entry = contract["quota"]["roles"].get("implement")
+        if not entry:
+            raise ValueError(f"unknown role {role_key} in Run contract")
+    except (ValueError, KeyError, TypeError) as exc:
+        return {"ok": False, "operation": ROLE_DISPATCH_OPERATION, "error": str(exc)}
 
     if targets is None:
         try:
@@ -169,8 +166,16 @@ def dispatch_role(
             })
 
     try:
-        target = RoleBindingResolver(targets).resolve(role_key, bindings[role_key])
-    except ValueError as exc:
+        matches = [t for t in targets if t.id == entry["execution_target_id"]
+                   and t.runtime.id == entry["runtime"]
+                   and (t.provider.id if t.provider else None) == entry["provider"]
+                   and (t.model.id if t.model else None) == entry["model"]
+                   and (safe_endpoint_for_context(t.endpoint) or "").rstrip("/") == (entry.get("endpoint") or "").rstrip("/")
+                   and t.preparable]
+        if len(matches) != 1:
+            raise ValueError("Run contract target unavailable or disabled; refusing substitution")
+        target = matches[0]
+    except (ValueError, KeyError, TypeError) as exc:
         return _payload({
             "ok": False,
             "operation": ROLE_DISPATCH_OPERATION,
@@ -189,6 +194,29 @@ def dispatch_role(
         })
 
     run_fn = run if run is not None else subprocess.run
+    try:
+        authorize_task(orca_binary, run_fn, rid, tid, role_key, contract, reason)
+    except (ValueError, TypeError, KeyError, OSError, subprocess.SubprocessError) as exc:
+        return {"ok": False, "operation": ROLE_DISPATCH_OPERATION, "error": str(exc)}
+    use = run_fn(
+        [orca_binary, "orchestration", "run-use", "--id", rid, "--json"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if use.returncode != 0:
+        return _payload({
+            "ok": False,
+            "operation": ROLE_DISPATCH_OPERATION,
+            "role": role_key,
+            "run_id": rid,
+            "task_id": tid,
+            "error": f"orca run-use exited {use.returncode}",
+            "orca_stderr": (use.stderr or "")[:2000],
+            "execution_target": serialize_execution_target(target),
+        })
+
     wt = str(worktree or "current").strip() or "current"
     launch_ctx = LaunchContext(
         binary=orca_binary,
@@ -228,25 +256,6 @@ def dispatch_role(
             "operation": ROLE_DISPATCH_OPERATION,
             "role": role_key,
             "error": "ExecutionTarget is not dispatchable after launch proof",
-            "execution_target": serialize_execution_target(target),
-        })
-
-    use = run_fn(
-        [orca_binary, "orchestration", "run-use", "--id", rid, "--json"],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    if use.returncode != 0:
-        return _payload({
-            "ok": False,
-            "operation": ROLE_DISPATCH_OPERATION,
-            "role": role_key,
-            "run_id": rid,
-            "task_id": tid,
-            "error": f"orca run-use exited {use.returncode}",
-            "orca_stderr": (use.stderr or "")[:2000],
             "execution_target": serialize_execution_target(target),
         })
 
@@ -290,6 +299,8 @@ def dispatch_role(
         or _dig_id(start_payload, "id")
     )
     ok = start.returncode == 0 and bool(dispatch_id)
+    if not ok:
+        abort_prepared(prepared, launch_ctx)
     return _payload({
         "ok": ok,
         "operation": ROLE_DISPATCH_OPERATION,

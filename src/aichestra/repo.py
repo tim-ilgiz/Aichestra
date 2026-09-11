@@ -72,3 +72,13 @@ def resolve_aichestra_config_root(
 def _looks_like_root(path: Path) -> bool:
     hits = sum(1 for marker in _MARKERS if (path / marker).exists())
     return hits >= 2
+
+
+def trusted_config_root(path: Path | str) -> bool:
+    """Accept contributor config trees and the installed-package user home."""
+    from aichestra.config.paths import user_config_home
+
+    root = Path(path).resolve()
+    return (looks_like_aichestra_root(root)
+            or (root / "policies" / "defaults.json").is_file()
+            or root == user_config_home())

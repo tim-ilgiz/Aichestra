@@ -1331,7 +1331,7 @@ def prove_launch_by_candidate_id(
 
     from aichestra.config.layering import resolve_config
     from aichestra.providers.orca import resolve_orca_binary
-    from aichestra.repo import looks_like_aichestra_root, resolve_aichestra_config_root
+    from aichestra.repo import resolve_aichestra_config_root, trusted_config_root
 
     from .serialize import (
         LAUNCH_PROOF_OPERATION,
@@ -1371,20 +1371,7 @@ def prove_launch_by_candidate_id(
         config_root_error = None
 
     if targets is None:
-        # Discovery path: require a trusted Aichestra config tree. Never use the
-        # foreign target project itself or an empty user-home-only fallback.
-        trusted = bool(aichestra_root) and (
-            looks_like_aichestra_root(aichestra_root)
-            or (Path(aichestra_root) / "policies" / "defaults.json").is_file()
-        )
-        same_as_project = bool(aichestra_root) and (
-            Path(aichestra_root).resolve() == root.resolve()
-        )
-        if (
-            aichestra_root is None
-            or not trusted
-            or (same_as_project and not looks_like_aichestra_root(aichestra_root))
-        ):
+        if aichestra_root is None or not trusted_config_root(aichestra_root):
             return _payload({
                 "ok": False,
                 "operation": LAUNCH_PROOF_OPERATION,
@@ -1393,7 +1380,7 @@ def prove_launch_by_candidate_id(
                 or (
                     "Aichestra config root required for prove-launch: pass "
                     "--repo-root or set AICHESTRA_REPO_ROOT to the Aichestra "
-                    "clone; refusing foreign project or user-home-only config "
+                    "config home; refusing an unrecognized directory "
                     "as trusted config root"
                 ),
             })

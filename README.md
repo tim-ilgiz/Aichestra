@@ -131,8 +131,10 @@ Disabled or unresolved bindings fail with a settings error. Orca owns task
 creation; Aichestra emits a typed `role_dispatch_contract`
 (`role → execution_target_id`, with `requires_launch_proof` for provisionable
 candidates). Prefer `aichestra dispatch-role --run --task --role` to
-worker-start the exact bound target (policy-enforced adapter; not a second
-scheduler). Canonical task/worker receipts are audited for role, Run and
+worker-start the exact bound target. Before handoff, Aichestra persists an
+immutable contract by Run id in the config home. Later settings changes do not
+retarget that Run; unavailable or disabled targets fail closed. Missing contracts
+require a new Run. Task role and same-Run association are checked before launch. Canonical task/worker receipts are audited for role, Run and
 effective runtime/provider/model/endpoint. Missing or mismatched evidence
 fails the Run. An Orca version that omits durable `launch.effective` cannot
 fully close live post-dispatch audit. Full live role/quota acceptance remains
@@ -142,7 +144,10 @@ partial until coordinators adopt dispatch-role and receipts are proven live.
 `quota.roles.implement` is the coding-worker fallback. Auto mode does **not**
 replace the coordinator LLM; coordinator quota is a separate failure
 (`orchestration.coordinator`). Inner-task implement fallback must have a prior
-structured quota receipt. Live quota recovery via dispatch-role and durable
+structured primary-worker quota receipt. Use `dispatch-role --role implement
+--reason quota-fallback --run <run_id> --task <task_id> --project-root <root>`;
+this selects the Run contract fallback only in auto mode and checks canonical
+quota evidence before starting a worker. Live quota recovery via dispatch-role and durable
 receipts remain NOT VALIDATED end-to-end.
 
 From a project or subdirectory, use `aichestra orchestrate --prompt "..."`.
