@@ -96,6 +96,103 @@ def _snapshot_launch_effective(run_fn: RunFn, binary: str, dispatch_id: str) -> 
     return dict(effective) if isinstance(effective, dict) else None
 
 
+def _confirm_worker_release(
+    run_fn: RunFn,
+    binary: str,
+    dispatch_id: str,
+) -> tuple[bool, str | None]:
+    """Bounded exact-dispatch release confirmation.
+
+    Orca ``worker-release`` exit 0 is not proof the worker is free — states such
+    as ``release_pending`` / ``release_unknown`` require the same recovery +
+    ``worker-show`` confirmation used by ``OrcaAdapter._release_worker``.
+    """
+    from aichestra.providers.orca import _release_recovery_args
+
+    last_rc = 1
+    last_out = ""
+
+    def call(args: list[str]) -> tuple[Any, dict[str, Any]]:
+        nonlocal last_rc, last_out
+        result = run_fn(
+            [binary, *args],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        last_rc = int(getattr(result, "returncode", 1) or 0)
+        last_out = (
+            (getattr(result, "stderr", None) or getattr(result, "stdout", None) or "")
+        )[:500]
+        payload = _parse_json(getattr(result, "stdout", "") or "")
+        data = payload.get("result", payload)
+        return result, data if isinstance(data, dict) else {}
+
+    try:
+        result, data = call(
+            ["orchestration", "worker-release", "--dispatch", dispatch_id, "--json"]
+        )
+    except (OSError, TypeError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
+
+    state = (
+        data.get("state", "release_unknown")
+        if data.get("dispatchId", dispatch_id) == dispatch_id
+        else "release_unknown"
+    )
+    for _ in range(3):
+        if state not in {"release_pending", "release_unknown"}:
+            break
+        projection = data.get("projection")
+        action = projection.get("nextAction") if isinstance(projection, dict) else None
+        if action is None:
+            action = data.get("recovery")
+        args = _release_recovery_args(action, dispatch_id, binary)
+        if args is not None:
+            result, data = call(args)
+        # Recovery mutations alone cannot prove this dispatch exited.
+        inspection, exact = call(
+            ["orchestration", "worker-show", "--dispatch", dispatch_id, "--json"]
+        )
+        worker = exact.get("worker") or {}
+        exact_id = exact.get("dispatchId") or worker.get("dispatch_id")
+        if getattr(inspection, "returncode", 1) != 0 or exact_id != dispatch_id:
+            state = "release_unknown"
+            break
+        state = data.get("state", "release_unknown")
+        if data.get("dispatchId", dispatch_id) != dispatch_id:
+            state = "release_unknown"
+            break
+        if state not in {"released", "already_released"}:
+            data = exact
+            projection = exact.get("projection") or {}
+            if not isinstance(projection, dict):
+                projection = {}
+            resource = exact.get("terminalResource") or {}
+            observed = projection.get("terminalState", exact.get("terminalState"))
+            if (
+                observed is None
+                and isinstance(resource, dict)
+                and resource.get("releaseState") == "released"
+            ):
+                observed = "released"
+            state = observed or state
+            if state == "released":
+                result = inspection
+        if args is None:
+            # Automatic Orca recovery may have completed during inspection.
+            # Unknown instructions never authorize a mutation or blind retry.
+            break
+
+    released = state in {"released", "already_released"}
+    ok = bool(getattr(result, "returncode", 1) == 0 and released)
+    if ok:
+        return True, None
+    detail = last_out or f"worker-release state={state!r} exit={last_rc}"
+    return False, detail
+
+
 def dispatch_role(
     *,
     role: str,
@@ -379,13 +476,48 @@ def dispatch_role(
         "recorded_at": datetime.now(timezone.utc).isoformat(),
         **({"launch_effective": launch_effective} if launch_effective else {}),
     }
-    persisted = False
-    persist_error = None
     try:
         save_dispatch_role_receipt(aichestra_root, adoption)
-        persisted = True
     except (OSError, ValueError, TypeError) as exc:
-        persist_error = str(exc)
+        # Adoption receipt is required settle evidence. Never report ok after a
+        # successful worker-start if persistence failed — the Run cannot audit.
+        release_attempted = False
+        release_ok = False
+        release_detail = None
+        try:
+            release_attempted = True
+            release_ok, release_detail = _confirm_worker_release(
+                run_fn, orca_binary, dispatch_id
+            )
+        except (OSError, TypeError, subprocess.SubprocessError) as release_exc:
+            release_detail = str(release_exc)
+        abort_prepared(prepared, launch_ctx)
+        return _payload({
+            "ok": False,
+            "operation": ROLE_DISPATCH_OPERATION,
+            "role": role_key,
+            "run_id": rid,
+            "task_id": tid,
+            "dispatch_id": dispatch_id,
+            "execution_target_id": target.id,
+            "execution_target": serialize_execution_target(target),
+            "launch_proved": proved,
+            "launch_effective": launch_effective,
+            "worker_started": True,
+            "adoption_receipt_persisted": False,
+            "worker_release_attempted": release_attempted,
+            "worker_release_ok": release_ok,
+            "prepared_launch": serialize_prepared_launch(prepared),
+            "worker_argv": worker_argv[1:],
+            "orca_exit_code": start.returncode,
+            "orca_stdout": (start.stdout or "")[:4000],
+            "orca_stderr": (start.stderr or "")[:2000],
+            "error": (
+                "worker started but adoption receipt persistence failed: "
+                f"{exc}"
+                + (f"; release: {release_detail}" if release_detail else "")
+            ),
+        })
     return _payload({
         "ok": True,
         "operation": ROLE_DISPATCH_OPERATION,
@@ -397,11 +529,11 @@ def dispatch_role(
         "execution_target": serialize_execution_target(target),
         "launch_proved": proved,
         "launch_effective": launch_effective,
-        "adoption_receipt_persisted": persisted,
+        "worker_started": True,
+        "adoption_receipt_persisted": True,
         "prepared_launch": serialize_prepared_launch(prepared),
         "worker_argv": worker_argv[1:],
         "orca_exit_code": start.returncode,
         "orca_stdout": (start.stdout or "")[:4000],
         "orca_stderr": (start.stderr or "")[:2000],
-        **({"error": persist_error} if persist_error else {}),
     })
