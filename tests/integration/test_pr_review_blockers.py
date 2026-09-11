@@ -458,9 +458,17 @@ def test_production_run_status_audits_effective_role_receipts(monkeypatch, tmp_p
     import json
     from aichestra.providers.orca import OrcaProvider
     from aichestra.providers.base import ProviderTaskResult, ProviderSession
-    from tests.contract.test_role_bindings_policy import receipt
+    from aichestra.execution.run_contract import save_contract
+    from tests.contract.test_role_bindings_policy import adopted, receipt
     task, worker, payload = receipt()
     task["status"] = "completed"
+    target = fake_execution_targets()[0]
+    save_contract(tmp_path, "r1", tmp_path, {
+        "bindings": {"tests": {"execution_target_id": target.id}},
+        "quota": {"mode": "manual"},
+    })
+    from aichestra.execution.run_contract import save_dispatch_role_receipt
+    save_dispatch_role_receipt(tmp_path, adopted(task, worker, target))
     responses = {"run-show": {"run": {"id": "r1", "state": "active"}},
                  "task-list": {"tasks": [task]}, "worker-list": {"workers": [worker]},
                  "worker-show": payload}
@@ -471,7 +479,8 @@ def test_production_run_status_audits_effective_role_receipts(monkeypatch, tmp_p
     monkeypatch.setattr("aichestra.providers.orca.resolve_orca_binary", lambda: "orca")
     adapter = OrcaProvider()
     request = ProviderTaskRequest(prompt="status", role="run_status", cwd=str(tmp_path),
-                                  context={"run_id": "r1"}, role_targets={"tests": fake_execution_targets()[0]})
+                                  context={"run_id": "r1", "aichestra_repo_root": str(tmp_path)},
+                                  role_targets={"tests": target})
     result = adapter.execute_task(request)
     assert result.ok and result.metadata["role_audit"]["dispatches_checked"] == 1
     payload["launch"]["effective"]["agent"] = "cursor"

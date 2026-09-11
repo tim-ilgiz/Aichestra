@@ -1021,13 +1021,16 @@ class ModeCRunController:
                 "Coordinator running under Orca owns the concrete workflow/DAG, "
                 "task dependencies and ordering, and which Tasks to create. "
                 "POLICY_PACKAGE.role_dispatch_contract binds each worker role to "
-                "one exact execution_target_id. Prefer policy-enforced Dispatch via "
+                "one exact execution_target_id. Inner worker Dispatch MUST use "
+                "policy-enforced Dispatch via "
                 f"`{ROLE_DISPATCH_OPERATION}` / structured role_dispatch_invocation "
                 f"`{dispatch_display}` (create the Task first, then pass --run/--task/"
-                "--role). That entrypoint resolves the project binding, proves launch "
-                "when requires_launch_proof is true, and worker-starts only the bound "
-                "target. Direct Orca worker-start of bindings[role].execution_target_id "
-                "is allowed only for runnable targets already in execution_targets. "
+                "--role and --from this terminal). That entrypoint records a durable "
+                "dispatch-role adoption receipt, proves launch when "
+                "requires_launch_proof is true, and worker-starts only the bound "
+                "target. Direct Orca worker-start of an inner worker is not "
+                "sufficient: settle fails closed without a matching dispatch-role "
+                "receipt and canonical launch.effective. "
                 "The coordinator MUST NOT choose a different runtime or target. "
                 "Orca owns canonical Run/Task/Dispatch lifecycle, worker "
                 "lifecycle, terminal/worktree lifecycle, and messages/handoffs. "
@@ -1035,9 +1038,9 @@ class ModeCRunController:
                 "security, and deterministic gates/verification only. "
                 "Honor project-owned AGENTS/Spec Kit/Factory "
                 "instructions from project_context with stated precedence. "
-                "For inner workers, Dispatch only ExecutionTargets listed in "
-                "execution_targets (enabled, available, capable, allowed, and "
-                "runnable) unless using dispatch-role which may prove a candidate. "
+                "Canonical execution_targets are enabled, available, capable, "
+                "allowed, and runnable. Inner workers MUST use dispatch-role, "
+                "which may prove a candidate first. "
                 "execution_target_candidates are NOT directly dispatchable; "
                 f"promote a candidate only via `{LAUNCH_PROOF_OPERATION}` / "
                 f"structured launch_proof_invocation `{prove_display}` "
@@ -1331,15 +1334,16 @@ class ModeCRunController:
             "enforcer": "aichestra.dispatch_role",
             "dag_owner": "coordinator_under_orca",
             "rule": (
-                "For each Task whose role is a key in bindings, Dispatch the bound "
-                "target via aichestra dispatch-role (policy-enforced worker-start) "
-                "or Orca worker-start of the exact execution_target_id. When "
-                "requires_launch_proof is true, prove-launch the candidate_id first "
-                "and Dispatch only the returned runnable target. The coordinator "
+                "For each Task whose role is a key in bindings, the coordinator "
+                "MUST Dispatch the bound target via aichestra dispatch-role "
+                "(policy-enforced worker-start). Direct Orca worker-start of an "
+                "inner worker does not settle. When requires_launch_proof is true, "
+                "dispatch-role proves the candidate_id first. The coordinator "
                 "chooses which Tasks to create and when; it MUST NOT choose a "
                 "different target. Auto quota fallback uses dispatch-role --reason "
                 "quota-fallback, requiring a canonical completed primary implement "
-                "quota receipt in this Run."
+                "quota receipt in this Run. Post-dispatch audit requires matching "
+                "dispatch-role receipts and durable Orca launch.effective."
             ),
             "bindings": bindings,
             "quota": {
@@ -1736,7 +1740,12 @@ class ModeCRunController:
         if run_id and self.bindings.orca:
             result = self.bindings.orca.execute_task(ProviderTaskRequest(
                 prompt="Read canonical Run state", role="run_status", read_only=True,
-                context={"run_id": run_id, "quota_mode": self.bindings.quota_policy.get("mode", "manual")},
+                context={
+                    "run_id": run_id,
+                    "quota_mode": self.bindings.quota_policy.get("mode", "manual"),
+                    "aichestra_repo_root": self.bindings.aichestra_repo_root,
+                    "project_root": self.bindings.project_root,
+                },
                 cwd=self.bindings.project_root, role_targets=self._resolved_roles,
                 execution_target=self._bootstrap_target,
                 quota_target=self._quota_target,

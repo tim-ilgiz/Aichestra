@@ -11,19 +11,26 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from aichestra.config.layering import resolve_config
 from aichestra.config.roles import ROLE_KEYS, RoleBinding
+
 from aichestra.execution.launch_strategies import (
     LaunchContext,
     adapter_for,
     abort_prepared,
     prove_launch,
+    receipt_launch,
     serialize_prepared_launch,
 )
-from aichestra.execution.run_contract import load_contract, authorize_task
+from aichestra.execution.run_contract import (
+    authorize_task,
+    load_contract,
+    save_dispatch_role_receipt,
+)
 from aichestra.execution.roles import contract_endpoint_matches
 from aichestra.execution.serialize import (
     ROLE_DISPATCH_OPERATION,
@@ -60,6 +67,33 @@ def _dig_id(payload: Mapping[str, Any], *keys: str) -> str | None:
     if isinstance(cur, str) and cur.strip():
         return cur.strip()
     return None
+
+
+def _snapshot_launch_effective(run_fn: RunFn, binary: str, dispatch_id: str) -> dict[str, Any] | None:
+    """Best-effort worker-show snapshot. Settle audit still reads Orca."""
+    try:
+        show = run_fn(
+            [binary, "orchestration", "worker-show", "--dispatch", dispatch_id, "--json"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError, TypeError, KeyError, IndexError, ValueError):
+        return None
+    shown = _parse_json(getattr(show, "stdout", "") or "")
+    if getattr(show, "returncode", 1) != 0:
+        return None
+    data = shown.get("result", shown) if isinstance(shown.get("result"), dict) else shown
+    worker = data.get("worker") if isinstance(data, dict) else None
+    launch = (
+        receipt_launch(shown)
+        or receipt_launch(data if isinstance(data, dict) else {})
+        or receipt_launch({"worker": worker} if isinstance(worker, dict) else {})
+        or {}
+    )
+    effective = launch.get("effective") if isinstance(launch, dict) else None
+    return dict(effective) if isinstance(effective, dict) else None
 
 
 def dispatch_role(
@@ -315,8 +349,45 @@ def dispatch_role(
     ok = start.returncode == 0 and bool(dispatch_id)
     if not ok:
         abort_prepared(prepared, launch_ctx)
+        return _payload({
+            "ok": False,
+            "operation": ROLE_DISPATCH_OPERATION,
+            "role": role_key,
+            "run_id": rid,
+            "task_id": tid,
+            "dispatch_id": dispatch_id,
+            "execution_target_id": target.id,
+            "execution_target": serialize_execution_target(target),
+            "launch_proved": proved,
+            "prepared_launch": serialize_prepared_launch(prepared),
+            "worker_argv": worker_argv[1:],
+            "orca_exit_code": start.returncode,
+            "orca_stdout": (start.stdout or "")[:4000],
+            "orca_stderr": (start.stderr or "")[:2000],
+            "error": f"orca worker-start exited {start.returncode}",
+        })
+
+    launch_effective = _snapshot_launch_effective(run_fn, orca_binary, dispatch_id)
+    adoption = {
+        "operation": ROLE_DISPATCH_OPERATION,
+        "run_id": rid,
+        "task_id": tid,
+        "role": role_key,
+        "dispatch_id": dispatch_id,
+        "execution_target_id": target.id,
+        "reason": reason,
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+        **({"launch_effective": launch_effective} if launch_effective else {}),
+    }
+    persisted = False
+    persist_error = None
+    try:
+        save_dispatch_role_receipt(aichestra_root, adoption)
+        persisted = True
+    except (OSError, ValueError, TypeError) as exc:
+        persist_error = str(exc)
     return _payload({
-        "ok": ok,
+        "ok": True,
         "operation": ROLE_DISPATCH_OPERATION,
         "role": role_key,
         "run_id": rid,
@@ -325,14 +396,12 @@ def dispatch_role(
         "execution_target_id": target.id,
         "execution_target": serialize_execution_target(target),
         "launch_proved": proved,
+        "launch_effective": launch_effective,
+        "adoption_receipt_persisted": persisted,
         "prepared_launch": serialize_prepared_launch(prepared),
         "worker_argv": worker_argv[1:],
         "orca_exit_code": start.returncode,
         "orca_stdout": (start.stdout or "")[:4000],
         "orca_stderr": (start.stderr or "")[:2000],
-        **(
-            {"error": f"orca worker-start exited {start.returncode}"}
-            if not ok
-            else {}
-        ),
+        **({"error": persist_error} if persist_error else {}),
     })

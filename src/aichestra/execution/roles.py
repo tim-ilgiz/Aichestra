@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import hashlib
 
-from aichestra.config.roles import RoleBinding
+from aichestra.config.roles import ROLE_KEYS, RoleBinding
 from aichestra.execution.domain import ExecutionTarget
+from aichestra.execution.serialize import ROLE_DISPATCH_OPERATION
 
 
 class RoleBindingResolver:
@@ -211,14 +212,73 @@ def _task_role(task):
     return task.get("role") or task.get("task_title") or task.get("title")
 
 
+def _require_dispatch_role_adoption(
+    *,
+    run_id,
+    task_id,
+    role,
+    dispatch_id,
+    expected,
+    quota_target=None,
+    quota_mode="manual",
+    dispatch_role_receipts=(),
+):
+    """Inner workers MUST have been started via ``aichestra dispatch-role``.
+
+    Coordinator bootstrap (``mode_c_handoff``) is started by the Orca adapter,
+    not this entrypoint. A prompt that merely prefers dispatch-role is not
+    evidence; missing or mismatched receipts fail closed.
+    """
+    if role not in ROLE_KEYS:
+        return
+    match = None
+    for rec in dispatch_role_receipts or ():
+        if not isinstance(rec, dict):
+            continue
+        if (
+            rec.get("operation") == ROLE_DISPATCH_OPERATION
+            and rec.get("run_id") == run_id
+            and rec.get("task_id") == task_id
+            and rec.get("role") == role
+            and rec.get("dispatch_id") == dispatch_id
+        ):
+            match = rec
+            break
+    if match is None:
+        raise ValueError(
+            f"Dispatch {dispatch_id} has no dispatch-role adoption receipt"
+        )
+    recorded_target = match.get("execution_target_id")
+    expected_id = getattr(expected, "id", None)
+    quota_id = getattr(quota_target, "id", None) if quota_target is not None else None
+    reason = match.get("reason") or "primary"
+    if reason == "quota-fallback":
+        if not (
+            role == "implement"
+            and quota_mode == "auto"
+            and quota_id
+            and recorded_target == quota_id
+        ):
+            raise ValueError(
+                f"Dispatch {dispatch_id} adoption receipt target mismatch"
+            )
+        return
+    if expected_id and recorded_target != expected_id:
+        raise ValueError(
+            f"Dispatch {dispatch_id} adoption receipt target mismatch"
+        )
+
+
 def validate_role_receipts(run_id, tasks, workers, receipts, role_targets,
                            *, bootstrap_target=None, quota_target=None,
-                           quota_mode="manual"):
+                           quota_mode="manual", dispatch_role_receipts=None):
     """Audit canonical Orca receipts, never LLM summaries or prompt claims.
 
     Every worker must refer to a known same-Run task with a declared role.
     Unknown receipt schemas fail closed. Fallback needs a prior structured
     quota outcome for implement in the same Run, not generated output.
+    Inner worker Dispatches also require a matching Aichestra dispatch-role
+    adoption receipt; coordinator bootstrap does not.
     """
     from aichestra.execution.launch_strategies import extract_attested_binding
     task_map = {t.get("id") or t.get("taskId"): t for t in tasks}
@@ -249,6 +309,16 @@ def validate_role_receipts(run_id, tasks, workers, receipts, role_targets,
         expected = bootstrap_target if role == "mode_c_handoff" else role_targets.get(role)
         if expected is None:
             raise ValueError(f"Task {task_id} has undeclared role {role!r}")
+        _require_dispatch_role_adoption(
+            run_id=run_id,
+            task_id=task_id,
+            role=role,
+            dispatch_id=dispatch,
+            expected=expected,
+            quota_target=quota_target,
+            quota_mode=quota_mode,
+            dispatch_role_receipts=dispatch_role_receipts,
+        )
         from aichestra.execution.launch_strategies import (
             binding_matches_target,
             receipt_launch,

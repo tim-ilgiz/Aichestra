@@ -267,6 +267,10 @@ def test_coordinator_context_receives_capabilities_locality_policy(
     assert "Do not infer workers from raw providers" in prompt
     assert "Do not impose product-name phase routing" in prompt
     assert "enabled, available, capable, allowed, and runnable" in prompt
+    assert "Inner worker Dispatch MUST use" in prompt
+    assert "dispatch-role adoption receipt" in prompt
+    assert "Direct Orca worker-start of an inner worker is not" in prompt
+    assert "Prefer policy-enforced Dispatch" not in prompt
     assert "execution_target_candidates" in prompt
     assert "aichestra.prove_launch" in prompt
     assert "--repo-root" in prompt
@@ -284,6 +288,10 @@ def test_coordinator_context_receives_capabilities_locality_policy(
     assert "The coordinator owns the DAG: which Tasks to create and when" in adapter_src
     assert "role_dispatch_contract" in adapter_src
     assert "ROLE_DISPATCH_OPERATION" in adapter_src or "dispatch-role" in adapter_src
+    assert "inner worker Dispatch MUST use" in adapter_src
+    assert "dispatch-role adoption receipt" in adapter_src
+    assert "Prefer `" not in adapter_src
+    assert "For direct Orca worker-start" not in adapter_src
     assert "temporary legacy launch path" not in adapter_src
     assert "Unsupported targets MUST NOT be dispatched" in adapter_src
     assert "Target locality may be local, remote, or cloud" in adapter_src

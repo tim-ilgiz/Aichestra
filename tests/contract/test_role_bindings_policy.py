@@ -32,11 +32,26 @@ def receipt(dispatch="d1", role="tests", runtime="codex", model=None):
     return task, worker, payload
 
 
+def adopted(task, worker, target, reason="primary"):
+    return {
+        "operation": "aichestra.dispatch_role",
+        "run_id": task.get("run_id") or task.get("runId"),
+        "task_id": task.get("id") or task.get("taskId"),
+        "role": task.get("role") or task.get("task_title") or task.get("title"),
+        "dispatch_id": worker.get("dispatch_id") or worker.get("dispatchId"),
+        "execution_target_id": target.id,
+        "reason": reason,
+    }
+
+
 def test_canonical_receipts_enforce_role_model_and_run():
     target = replace(fake_execution_targets()[0], model=Model("pinned", "codex", available=True))
     task, worker, payload = receipt(model="pinned")
     def audit():
-        return validate_role_receipts("r1", [task], [worker], {"d1": payload}, {"tests": target})
+        return validate_role_receipts(
+            "r1", [task], [worker], {"d1": payload}, {"tests": target},
+            dispatch_role_receipts=[adopted(task, worker, target)],
+        )
     assert audit()["dispatches_checked"] == 1
     payload["launch"]["effective"]["model"] = "other"
     with pytest.raises(ValueError, match="violates binding"):
@@ -61,8 +76,10 @@ def test_validate_role_receipts_endpoint_v1_matches_launch_proof():
     payload["launch"]["effective"]["endpoint"] = (
         "https://models.example/api/v1?tenant=A"
     )
+    receipts = [adopted(task, worker, target)]
     assert validate_role_receipts(
-        "r1", [task], [worker], {"d1": payload}, {"tests": target}
+        "r1", [task], [worker], {"d1": payload}, {"tests": target},
+        dispatch_role_receipts=receipts,
     )["ok"]
 
     payload["launch"]["effective"]["endpoint"] = (
@@ -70,7 +87,8 @@ def test_validate_role_receipts_endpoint_v1_matches_launch_proof():
     )
     with pytest.raises(ValueError, match="violates binding"):
         validate_role_receipts(
-            "r1", [task], [worker], {"d1": payload}, {"tests": target}
+            "r1", [task], [worker], {"d1": payload}, {"tests": target},
+            dispatch_role_receipts=receipts,
         )
 
 
@@ -82,8 +100,14 @@ def test_fallback_receipt_requires_auto_exact_target_and_prior_quota():
     first.update(failure="quota", completed_at="2026-01-01T00:00:00Z")
     second["created_at"] = "2026-01-01T00:00:01Z"
     def audit(mode="auto"):
-        return validate_role_receipts("r1", [task], [first, second], {"d1": p1, "d2": p2},
-                                      {"implement": primary}, quota_target=fallback, quota_mode=mode)
+        return validate_role_receipts(
+            "r1", [task], [first, second], {"d1": p1, "d2": p2},
+            {"implement": primary}, quota_target=fallback, quota_mode=mode,
+            dispatch_role_receipts=[
+                adopted(task, first, primary),
+                adopted(task, second, fallback, reason="quota-fallback"),
+            ],
+        )
     assert audit()["ok"]
     with pytest.raises(ValueError):
         audit("manual")
@@ -124,8 +148,12 @@ def test_installed_orca_worker_shape_fails_without_effective_launch_evidence():
     payload = {"dispatch": {"id": "d", "task_id": "t", "run_id": "r"},
                "worker": {"dispatch_id": "d", "state": "succeeded",
                           "startOptions": {"agent": "codex"}}}
+    adoption = [adopted(task, worker, target)]
     with pytest.raises(ValueError, match="no effective launch binding"):
-        validate_role_receipts("r", [task], [worker], {"d": payload}, {"tests": target})
+        validate_role_receipts(
+            "r", [task], [worker], {"d": payload}, {"tests": target},
+            dispatch_role_receipts=adoption,
+        )
     # Live Orca 1.4+ nests durable launch.effective under startOptions.launch.
     payload["worker"]["startOptions"] = {
         "agent": "codex",
@@ -134,12 +162,18 @@ def test_installed_orca_worker_shape_fails_without_effective_launch_evidence():
             "effective": {"agent": "codex", "model": None},
         },
     }
-    assert validate_role_receipts("r", [task], [worker], {"d": payload}, {"tests": target})["ok"]
+    assert validate_role_receipts(
+        "r", [task], [worker], {"d": payload}, {"tests": target},
+        dispatch_role_receipts=adoption,
+    )["ok"]
     # Top-level launch.effective remains accepted.
     payload = {"dispatch": {"id": "d", "task_id": "t", "run_id": "r"},
                "worker": {"dispatch_id": "d", "state": "succeeded"},
                "launch": {"effective": {"agent": "codex"}}}
-    assert validate_role_receipts("r", [task], [worker], {"d": payload}, {"tests": target})["ok"]
+    assert validate_role_receipts(
+        "r", [task], [worker], {"d": payload}, {"tests": target},
+        dispatch_role_receipts=adoption,
+    )["ok"]
     # JSON twin start_options string (Orca worker-show) also counts.
     import json
     nested = {
@@ -149,7 +183,10 @@ def test_installed_orca_worker_shape_fails_without_effective_launch_evidence():
     payload = {"dispatch": {"id": "d", "task_id": "t", "run_id": "r"},
                "worker": {"dispatch_id": "d", "state": "succeeded",
                           "start_options": json.dumps(nested)}}
-    assert validate_role_receipts("r", [task], [worker], {"d": payload}, {"tests": target})["ok"]
+    assert validate_role_receipts(
+        "r", [task], [worker], {"d": payload}, {"tests": target},
+        dispatch_role_receipts=adoption,
+    )["ok"]
 
 
 def test_live_orca_worker_show_envelope_audits_start_options_launch():
@@ -187,6 +224,92 @@ def test_live_orca_worker_show_envelope_audits_start_options_launch():
         {},
         bootstrap_target=target,
     )["ok"]
+
+
+def test_inner_worker_requires_dispatch_role_adoption_receipt():
+    target = fake_execution_targets()[0]
+    task, worker, payload = receipt()
+    with pytest.raises(ValueError, match="dispatch-role adoption receipt"):
+        validate_role_receipts("r1", [task], [worker], {"d1": payload}, {"tests": target})
+    wrong = adopted(task, worker, target)
+    wrong["dispatch_id"] = "other"
+    with pytest.raises(ValueError, match="dispatch-role adoption receipt"):
+        validate_role_receipts(
+            "r1", [task], [worker], {"d1": payload}, {"tests": target},
+            dispatch_role_receipts=[wrong],
+        )
+    mismatch = adopted(task, worker, fake_execution_targets("cursor")[0])
+    with pytest.raises(ValueError, match="adoption receipt target mismatch"):
+        validate_role_receipts(
+            "r1", [task], [worker], {"d1": payload}, {"tests": target},
+            dispatch_role_receipts=[mismatch],
+        )
+    assert validate_role_receipts(
+        "r1", [task], [worker], {"d1": payload}, {"tests": target},
+        dispatch_role_receipts=[adopted(task, worker, target)],
+    )["ok"]
+
+
+def test_coordinator_bootstrap_does_not_require_dispatch_role_receipt():
+    target = fake_execution_targets()[0]
+    task, worker, payload = receipt(role="mode_c_handoff")
+    assert validate_role_receipts(
+        "r1", [task], [worker], {"d1": payload}, {},
+        bootstrap_target=target,
+    )["ok"]
+
+
+def test_live_inner_worker_dispatch_role_envelope_audits_launch_effective():
+    """Live Orca 1.4.200 (2026-09-11): coordinator-driven dispatch-role inner worker."""
+    target = fake_execution_targets("cursor")[0]
+    task = {
+        "id": "task_a04c1c7f110b",
+        "run_id": "run_46902f941734",
+        "task_title": "tests",
+        "status": "completed",
+    }
+    worker = {
+        "dispatchId": "ctx_fc0f8a58b7b5",
+        "taskId": "task_a04c1c7f110b",
+        "runId": "run_46902f941734",
+    }
+    payload = {
+        "dispatch": {
+            "id": "ctx_fc0f8a58b7b5",
+            "runId": "run_46902f941734",
+            "taskId": "task_a04c1c7f110b",
+            "status": "completed",
+            "creatorDispatchId": "ctx_45ea46610b16",
+        },
+        "worker": {
+            "dispatchId": "ctx_fc0f8a58b7b5",
+            "state": "succeeded",
+            "startOptions": {
+                "agent": "cursor",
+                "launch": {
+                    "requested": {"agent": "cursor", "model": None, "effort": None},
+                    "effective": {"agent": "cursor", "model": None, "effort": None},
+                },
+            },
+        },
+    }
+    adoption = adopted(task, worker, target)
+    assert validate_role_receipts(
+        "run_46902f941734",
+        [task],
+        [worker],
+        {"ctx_fc0f8a58b7b5": payload},
+        {"tests": target},
+        dispatch_role_receipts=[adoption],
+    )["ok"]
+    with pytest.raises(ValueError, match="dispatch-role adoption receipt"):
+        validate_role_receipts(
+            "run_46902f941734",
+            [task],
+            [worker],
+            {"ctx_fc0f8a58b7b5": payload},
+            {"tests": target},
+        )
 
 
 def test_provisionable_worker_contract_is_internally_consistent():
@@ -317,6 +440,12 @@ def test_dispatch_role_pins_exact_bound_target(tmp_path, monkeypatch):
     assert payload["operation"] == ROLE_DISPATCH_OPERATION
     assert payload["execution_target_id"] == target.id
     assert payload["dispatch_id"] == "d-pinned"
+    assert payload["adoption_receipt_persisted"] is True
+    from aichestra.execution.run_contract import load_dispatch_role_receipts
+    stored = load_dispatch_role_receipts(tmp_path, "run-1")
+    assert stored[0]["dispatch_id"] == "d-pinned"
+    assert stored[0]["role"] == "tests"
+    assert stored[0]["execution_target_id"] == target.id
     start = next(c for c in calls if "worker-start" in c)
     assert "--agent" in start
     assert start[start.index("--agent") + 1] == "cursor"

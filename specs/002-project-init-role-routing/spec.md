@@ -4,7 +4,7 @@
 
 **Created**: 2026-09-10
 
-**Status**: Partial; live Orca exact Dispatch binding is blocked
+**Status**: Implemented; live coordinator dispatch-role + `launch.effective` validated 2026-09-11
 
 **Input**: Global pip-installable Aichestra; `aichestra init` in a target project;
 Console settings CLI for coordinator LLM vs worker role bindings; Mode C
@@ -26,12 +26,12 @@ the coordinator.
   Aichestra MUST emit a typed role-dispatch contract
   (`role=R → exact execution_target_id=X`, with `state` /
   `requires_launch_proof` when the bound target is still a candidate).
-  Preferred enforcer is `aichestra dispatch-role` (policy-enforced
-  worker-start on an existing Task). Direct Orca Dispatch of X remains
-  allowed for runnable targets already in `execution_targets`. The
-  coordinator LLM MUST NOT interpret or substitute another target.
-  Durable `launch.effective` receipts for post-dispatch audit still depend
-  on Orca; missing evidence fails closed and is not claimed as live proof.
+  Inner worker Dispatch MUST use `aichestra dispatch-role` (policy-enforced
+  worker-start on an existing Task). Direct Orca Dispatch of an inner worker
+  role does not settle: Mode C fail-closes without a matching dispatch-role
+  adoption receipt and durable Orca `launch.effective`. Coordinator bootstrap
+  (`mode_c_handoff`) is started by the Orca adapter, not dispatch-role.
+  The coordinator LLM MUST NOT interpret or substitute another target.
 
 ## User stories
 
@@ -109,12 +109,11 @@ Coordinator quota is a different failure: fail closed and tell the operator
 to change `orchestration.coordinator`. `quota.roles.implement` MUST NOT
 replace the coordinator.
 
-Live inner-Dispatch quota switching uses `aichestra dispatch-role` (or
-direct Orca Dispatch of the exact `quota.roles.implement` target). Until
-coordinators adopt that entrypoint and Orca provides durable
-`launch.effective` receipts, Aichestra audits receipts after the fact and
-fails closed on mismatch; it does not claim soft-pass when evidence is
-missing.
+Live inner-Dispatch quota switching MUST use `aichestra dispatch-role`
+(or fail the Run). Direct Orca Dispatch of the exact
+`quota.roles.implement` target is not sufficient for settle. Missing
+dispatch-role adoption receipts or durable `launch.effective` fail closed;
+Aichestra does not claim soft-pass when evidence is missing.
 
 ### US5 — Verification deferred by default (P2)
 
@@ -168,12 +167,11 @@ still run when present. Language-aware verification is a follow-up.
 
 ## Known external blocker
 
-`aichestra dispatch-role` provides a policy-enforced Dispatch path that pins
-the immutable Run role binding to an exact ExecutionTarget without making Aichestra
-a second orchestrator. Remaining live gaps: coordinator adoption of that
-entrypoint, and durable Orca `launch.effective` receipts for post-dispatch
-audit. Do not mark this feature fully implemented until those are proven live.
-Fake CI providers are not live evidence.
+None for dispatch-role adoption or `launch.effective` on Orca 1.4.200.
+`aichestra dispatch-role` is the required inner-worker Dispatch path. Mode C
+settle fail-closes without matching adoption receipts and durable
+`launch.effective`. Live coordinator adoption was proven 2026-09-11 on run
+`run_46902f941734` (Orca 1.4.200). Fake CI providers are not that evidence.
 
 ## Run contract enforcement corrections
 

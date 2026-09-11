@@ -84,7 +84,7 @@ python -m aichestra research /path/to/target-project --query "auth"
 python -m aichestra prove-launch --project-root /path/to/target --candidate-id <id>
 python -m aichestra abort-launch --token <cleanup_lease>
 python -m aichestra dispatch-role --role tests --run <run_id> --task <task_id> \
-  --project-root /path/to/target
+  --from "<ORCA_TERMINAL_HANDLE>" --project-root /path/to/target
 
 # Staging diagnostics (typed, allowlist-gated)
 python -m aichestra staging STAGE_ALIAS --op uptime --dry-run
@@ -153,8 +153,10 @@ config — bindings are stored in the project; runtimes need not be copied into
 Disabled or unresolved bindings fail with a settings error. Orca owns task
 creation; Aichestra emits a typed `role_dispatch_contract`
 (`role → execution_target_id`, with `requires_launch_proof` for provisionable
-candidates). Prefer `aichestra dispatch-role --run --task --role` to
-worker-start the exact bound target. Before handoff, Aichestra persists an
+candidates). Inner worker Dispatch MUST use
+`aichestra dispatch-role --run --task --role --from <ORCA_TERMINAL_HANDLE>` to
+worker-start the exact bound target. Direct Orca worker-start of an inner
+worker does not settle. Before handoff, Aichestra persists an
 immutable contract by Run id in the config home. Later settings changes do not
 retarget that Run; unavailable or disabled targets fail closed. Missing contracts
 require a new Run, including with `--resume-run-id`: resume never creates a
@@ -166,9 +168,9 @@ Endpoint fingerprints distinguish tenant/query differences without storing the
 full URL in the coordinator contract. Task role and same-Run association are
 checked before launch. Canonical task/worker receipts are audited for role, Run and
 effective runtime/provider/model/endpoint. Missing or mismatched evidence
-fails the Run. An Orca version that omits durable `launch.effective` cannot
-fully close live post-dispatch audit. Full live role/quota acceptance remains
-partial until coordinators adopt dispatch-role and receipts are proven live.
+fails the Run. Inner workers also require a matching Aichestra dispatch-role
+adoption receipt (coordinator bootstrap does not). An Orca version that omits
+durable `launch.effective` cannot fully close live post-dispatch audit.
 
 `quota.mode=manual` stops and asks the operator to change settings and start a
 new Run with the remaining objective/context; it cannot retarget the old Run.
@@ -272,6 +274,7 @@ are rejected **before** execution. Production SSH has **no** integration path.
 | Windows live smoke | **NOT VALIDATED** until a real Windows smoke run |
 | Linux live smoke | **NOT VALIDATED** until a real Linux smoke run |
 | Live auto quota fallback via `dispatch-role` | **VALIDATED** on Orca 1.4.200 via durable `worker_done` `payload.failure=quota` (2026-09-11) |
+| Live coordinator `dispatch-role` adoption + `launch.effective` | **VALIDATED** on Orca 1.4.200 (2026-09-11), run `run_46902f941734` |
 
 Do not treat CI green as live OS smoke for Windows/Linux.
 
@@ -311,8 +314,8 @@ Mode C bootstraps one explicit coordinator from `orchestration.coordinator`
 provider fields do not select the coordinator. The coordinator reads project
 context, including scoped nested AGENTS.md, owns which Tasks to create and
 when, and must Dispatch each worker role through
-`role_dispatch_contract` exact `execution_target_id`s (prefer
-`aichestra dispatch-role`). It waits for outcomes
+`role_dispatch_contract` exact `execution_target_id`s (MUST use
+`aichestra dispatch-role`; direct Orca worker-start does not settle). It waits for outcomes
 and converges results before completing. At the implementation boundary it calls
 `orchestration ask --question AICHESTRA_GATE:maintenance`; Aichestra replies with
 TEST/DOC/ADR/SPEC decisions before Orca dispatches required writers. The

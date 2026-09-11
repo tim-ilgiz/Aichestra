@@ -10,8 +10,11 @@ role-dispatch contract; audit canonical Orca receipts after the fact;
 apply configured manual/auto quota to **implement workers only**; preflight
 verification; validate the installed wheel outside the checkout.
 
-Live Orca exact Dispatch pinning is out of Aichestra's control and remains
-blocked. This plan does not mark the feature fully implemented.
+Orca remains the only Mode C orchestration control plane. Coordinator under
+Orca owns the DAG. Inner worker Dispatch MUST go through
+`aichestra dispatch-role`; Aichestra audits adoption receipts and
+`launch.effective` after the fact. Live coordinator adoption was proven
+2026-09-11 on Orca 1.4.200 (run `run_46902f941734`).
 
 ## Technical approach
 
@@ -55,9 +58,10 @@ role=tests → execution_target_id=X → Dispatch X
 ```
 
 Preferred enforcer: `aichestra dispatch-role --run --task --role` resolves
-the immutable Run contract and worker-starts only that exact target. That mapping
-also lives in POLICY_PACKAGE `role_dispatch_contract`. Durable
-`launch.effective` receipts remain required for post-dispatch audit; missing
+the immutable Run contract and worker-starts only that exact target. Inner
+worker Dispatch MUST use that entrypoint. Direct Orca worker-start does not
+settle: Aichestra persists dispatch-role adoption receipts and audits them
+together with durable `launch.effective` on canonical worker-show. Missing
 evidence fails closed. Fake CI is not live proof.
 
 **Decision 3 — quota targets coding workers.** `quota.mode=auto` binds

@@ -767,22 +767,25 @@ class OrcaProvider(ProviderAdapter):
                 "ExecutionTargets:\n"
                 "The coordinator owns the DAG: which Tasks to create and when. "
                 "Aichestra owns POLICY_PACKAGE.role_dispatch_contract: each worker "
-                "role maps to one exact execution_target_id. Prefer "
+                "role maps to one exact execution_target_id. After Task create, "
+                "inner worker Dispatch MUST use "
                 f"`{ROLE_DISPATCH_OPERATION}` via structured role_dispatch_invocation "
-                f"`{dispatch_display}` after Task create (pass --run/--task/--role). "
-                "That entrypoint resolves the project binding, proves launch when "
-                "requires_launch_proof is true, and worker-starts only the bound "
-                "target — another target cannot be Dispatched through it. "
+                f"`{dispatch_display}` (pass --run/--task/--role and --from this "
+                "terminal). That entrypoint records a durable dispatch-role "
+                "adoption receipt, proves launch when requires_launch_proof is "
+                "true, and worker-starts only the bound target — another target "
+                "cannot be Dispatched through it. Direct Orca worker-start of an "
+                "inner worker role is not sufficient: Mode C settle fails closed "
+                "without a matching dispatch-role receipt and canonical "
+                "worker-show launch.effective. "
                 "The coordinator MUST NOT choose a different runtime or target for a "
                 "bound role. "
                 "The coordinator package includes canonical execution_targets "
-                "(runnable only), execution_target_candidates (non-dispatchable), "
+                "(enabled, available, capable, allowed, and runnable), "
+                "execution_target_candidates (non-dispatchable), "
                 "and execution_policy (execution_target_contract_version). "
-                "For direct Orca worker-start, Dispatch only a contracted "
-                "execution_target_id that also appears in execution_targets "
-                "(enabled, available, capable, allowed, and runnable). "
-                "When bindings[role].requires_launch_proof is true, prove-launch "
-                "candidate_id first (or use dispatch-role which proves then starts). "
+                "When bindings[role].requires_launch_proof is true, dispatch-role "
+                "proves candidate_id then starts — do not DIY prove+worker-start. "
                 "orca-existing-terminal targets include launch_ref; Dispatch that "
                 "handle — do not invent a terminal. "
                 "Candidates require aichestra.prove_launch via "
@@ -803,7 +806,7 @@ class OrcaProvider(ProviderAdapter):
                 "Never pass a raw terminal handle to abort-launch. "
                 "Target locality may be local, remote, or cloud according to ExecutionPolicy. "
                 "Do not infer workers from raw providers. "
-                "Every inner task must use its exact role (implement/research/tests/docs) as task-title. Canonical worker-show launch.effective receipts are audited; missing or mismatched evidence fails the Run. This audit is post-dispatch and is not a substitute for pinning Dispatch to execution_target_id via dispatch-role. "
+                "Every inner task must use its exact role (implement/research/tests/docs) as task-title. Canonical worker-show launch.effective receipts are audited together with dispatch-role adoption receipts; missing or mismatched evidence fails the Run. Direct Orca Dispatch is not a substitute for dispatch-role. "
                 "orchestration.coordinator is this coordinator LLM and is independent of roles.implement. "
                 "POLICY_PACKAGE.role_dispatch_contract.bindings is a typed binding: "
                 "for each child Task declare role in {implement,research,tests,docs} and "
@@ -819,8 +822,8 @@ class OrcaProvider(ProviderAdapter):
                 "`aichestra settings` and start a new Run with the remaining objective "
                 "and handoff context (the current Run contract is immutable); "
                 "finish with worker_done failed if blocked; "
-                "if mode=auto, same-Run Dispatch of quota.roles.implement "
-                "execution_target_id via dispatch-role --reason quota-fallback "
+                "if mode=auto, same-Run inner Dispatch of quota.roles.implement "
+                "MUST use dispatch-role --reason quota-fallback "
                 "(requires durable typed primary quota evidence: worker-show "
                 "`failure=quota`, `lastFailure.failure=quota`, or the settling "
                 "worker_done message `payload.failure=quota` via "
@@ -828,7 +831,7 @@ class OrcaProvider(ProviderAdapter):
                 "'{\"taskId\",\"dispatchId\",\"outcome\":\"failed\",\"failure\":\"quota\"}' "
                 "— never body/subject prose alone; Orca 1.4.200 lastFailure omits "
                 "the typed class even when the message payload stores it), "
-                "or Orca (never call Cursor/Codex outside Orca, "
+                "(never call Cursor/Codex outside Orca, "
                 "and never replace this coordinator). "
                 "Do not invent additional hard-coded phase→product maps beyond "
                 "role_dispatch_contract. "
@@ -1109,9 +1112,13 @@ class OrcaProvider(ProviderAdapter):
                 if not isinstance(dispatch, str) or not dispatch:
                     raise ValueError("Worker receipt missing dispatch id")
                 receipts[dispatch] = call(["orchestration", "worker-show", "--dispatch", dispatch, "--json"])
+            from aichestra.execution.run_contract import load_dispatch_role_receipts
+            home = _request_aichestra_repo_root(request)
+            adoption = load_dispatch_role_receipts(home, run_id) if home else []
             return validate_role_receipts(run_id, tasks, workers, receipts,
                 request.role_targets, bootstrap_target=request.execution_target,
-                quota_target=request.quota_target, quota_mode=request.context.get("quota_mode", "manual"))
+                quota_target=request.quota_target, quota_mode=request.context.get("quota_mode", "manual"),
+                dispatch_role_receipts=adoption)
         except (ValueError, TypeError, KeyError, AttributeError) as exc:
             return {"ok": False, "detail": str(exc)}
 

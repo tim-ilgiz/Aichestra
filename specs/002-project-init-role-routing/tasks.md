@@ -45,14 +45,14 @@
 - [x] T019 Add wheel-build/clean-venv/foreign-cwd CLI smoke to the OS matrix
 - [x] T020 Remove machine-local IDE workspace and account metadata; ignore .idea
 - [x] T021 Complete regression tests and local installed-wheel smoke
-- [ ] T022 PARTIAL: `aichestra dispatch-role` provides policy-enforced
-  worker-start for the immutable Run role binding (pre-dispatch pin without making
-  Aichestra a scheduler). Live probe (Orca 1.4.200): primary + quota-fallback
-  dispatch-role succeeded when typed `payload.failure=quota` was present
-  (T013). Remaining: durable Orca `launch.effective` receipts for post-dispatch
-  audit across the full Mode C coordinator path, and broader live coordinator
-  adoption of dispatch-role (not only operator-driven probes). Fake CI is not
-  live evidence. Do not mark this feature fully implemented while T022 is open.
+- [x] T022 LIVE VALIDATED (2026-09-11, Orca 1.4.200): Inner worker Dispatch
+  MUST use `aichestra dispatch-role`. Direct Orca worker-start does not settle.
+  Aichestra persists dispatch-role adoption receipts and audits them with
+  durable `startOptions.launch.effective`. Live coordinator (Cursor under Orca)
+  created tests Task `task_a04c1c7f110b` on run `run_46902f941734` and invoked
+  dispatch-role → `ctx_fc0f8a58b7b5` (cursor); worker-show
+  `launch.effective.agent=cursor`; production `validate_role_receipts` ok
+  (2 dispatches: coordinator bootstrap + inner). Fake CI is not this evidence.
 
 
 ## PR #2 REQUEST CHANGES (coordinator ≠ implement)
@@ -95,9 +95,10 @@
 - [x] T034 Extend isolated wheel smoke to orchestrate/prove-launch/dispatch-role
   config boundaries and add contract drift / negative quota regressions.
 
-T013 live validated via durable worker_done `payload.failure`; T022 still
-requires broader coordinator adoption and durable launch.effective audit
-coverage. These deterministic corrections do not claim T022 closed.
+T013 live validated via durable worker_done `payload.failure`; T022 live
+validated via coordinator-driven dispatch-role adoption receipts plus
+durable `launch.effective` (run `run_46902f941734`). These deterministic
+corrections remain in force.
 
 ## Resume / immutable target review corrections
 
@@ -132,8 +133,9 @@ coverage. These deterministic corrections do not claim T022 closed.
   missing the implement key (including empty `roles: {}`); explicit
   `quota.roles.implement` wins.
 
-T013 live validated via durable worker_done `payload.failure`; T022 still
-requires broader coordinator adoption and durable launch.effective audit.
+T013 live validated via durable worker_done `payload.failure`; T022 live
+validated via coordinator-driven dispatch-role and `launch.effective`
+(run `run_46902f941734`).
 
 ## Live Orca typed-quota readiness (2026-09-11)
 

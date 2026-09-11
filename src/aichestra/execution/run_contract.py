@@ -55,6 +55,77 @@ def load_contract(home, run_id, project_root):
         raise ValueError("Run contract missing or unreadable; start a new Mode C Run") from exc
 
 
+def _dispatch_role_receipts_path(home, run_id):
+    contract_path = _path(home, run_id)
+    return contract_path.with_name(f"{contract_path.stem}.dispatch-role.json")
+
+
+def save_dispatch_role_receipt(home, receipt: Mapping) -> dict:
+    """Append a durable coordinator-adoption receipt for one inner Dispatch.
+
+    This is policy evidence, not a scheduler: Orca still owns the Task/worker.
+    Duplicate ``dispatch_id`` rows are ignored (idempotent retry).
+    """
+    required = ("operation", "run_id", "task_id", "role", "dispatch_id", "execution_target_id")
+    row = {key: receipt.get(key) for key in required}
+    for key, value in row.items():
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"dispatch-role receipt missing {key}")
+        row[key] = value.strip()
+    reason = str(receipt.get("reason") or "primary").strip() or "primary"
+    if reason not in {"primary", "quota-fallback"}:
+        raise ValueError("unknown dispatch-role receipt reason")
+    row["reason"] = reason
+    recorded = receipt.get("recorded_at")
+    if isinstance(recorded, str) and recorded.strip():
+        row["recorded_at"] = recorded.strip()
+    else:
+        row["recorded_at"] = datetime.now(timezone.utc).isoformat()
+    effective = receipt.get("launch_effective")
+    if isinstance(effective, Mapping):
+        row["launch_effective"] = dict(effective)
+    path = _dispatch_role_receipts_path(home, row["run_id"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing: list = []
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("Malformed dispatch-role receipts; refusing to append") from exc
+        if not isinstance(loaded, list):
+            raise ValueError("Malformed dispatch-role receipts; refusing to append")
+        existing = loaded
+    if any(isinstance(item, Mapping) and item.get("dispatch_id") == row["dispatch_id"] for item in existing):
+        return row
+    existing.append(row)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(existing, sort_keys=True), encoding="utf-8")
+    tmp.replace(path)
+    return row
+
+
+def load_dispatch_role_receipts(home, run_id) -> list[dict]:
+    """Load Aichestra dispatch-role adoption receipts for a Run.
+
+    Missing file means no coordinator adoption yet (empty list), not a soft-pass.
+    """
+    path = _dispatch_role_receipts_path(home, run_id)
+    if not path.exists():
+        return []
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("dispatch-role receipts unreadable") from exc
+    if not isinstance(loaded, list):
+        raise ValueError("Malformed dispatch-role receipts")
+    rows = []
+    for item in loaded:
+        if not isinstance(item, Mapping):
+            raise ValueError("Malformed dispatch-role receipt row")
+        rows.append(dict(item))
+    return rows
+
+
 def _coordinator_terminal(call, run_id: str, from_handle: str | None) -> str | None:
     sender = (from_handle or "").strip()
     if sender:

@@ -212,8 +212,10 @@ def dispatch_role_invocation(
     task_id: str = "<task-id>",
     project_root: str = "<root>",
     repo_root: str | None = None,
+    from_handle: str | None = None,
 ) -> dict[str, Any]:
     """Trusted structured CLI for policy-enforced role Dispatch."""
+    handle = str(from_handle or "").strip() or "<ORCA_TERMINAL_HANDLE>"
     args = [
         "dispatch-role",
         "--role",
@@ -222,6 +224,8 @@ def dispatch_role_invocation(
         str(run_id or "<run-id>"),
         "--task",
         str(task_id or "<task-id>"),
+        "--from",
+        handle,
         "--repo-root",
         str(repo_root) if repo_root else "<aichestra_repo_root>",
         "--project-root",
