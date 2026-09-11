@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 from typing import Any, Mapping
-from urllib.parse import urlsplit
 
 from aichestra.machine_profiler import MachineProfile, profile_machine
 
@@ -24,6 +23,8 @@ from .model_providers import (
     PROVIDER_PROBE_REGISTRY,
     ModelProviderProbe,
     ProviderProbeRegistry,
+    is_openai_compatible_entry,
+    openai_compatible_probe,
 )
 from .runtimes import discover_agent_runtimes
 
@@ -68,6 +69,21 @@ def discover_execution_facts(
             provider_config,
             default_endpoints={"ollama": ollama_host},
         )
+        # Config-declared OpenAI-compatible backends without a named factory.
+        seen = {p.id for p in probes}
+        for name, entry in provider_config.items():
+            if name in seen or not isinstance(entry, Mapping):
+                continue
+            if not is_openai_compatible_entry(entry):
+                continue
+            endpoint = entry.get("endpoint")
+            probes.append(
+                openai_compatible_probe(
+                    name,
+                    endpoint=str(endpoint) if endpoint else None,
+                    config=entry,
+                )
+            )
     else:
         probes = list(provider_probes)
 
@@ -145,7 +161,9 @@ def discover_execution_facts(
 def provider_locality(
     entry: Mapping[str, Any], endpoint: str | None
 ) -> Locality:
-    """Explicit locality wins; otherwise infer from endpoint when present."""
+    """A remote endpoint cannot be relabelled as local by configuration."""
+    if endpoint and entry.get("locality") == "local":
+        return endpoint_locality(endpoint)
     if "locality" in entry:
         return Locality(entry["locality"])
     if endpoint:
@@ -154,10 +172,13 @@ def provider_locality(
 
 
 def endpoint_locality(endpoint: str) -> Locality:
-    host = urlsplit(endpoint).hostname
-    if host in {"localhost", "127.0.0.1", "::1"}:
-        return Locality.LOCAL
-    return Locality.REMOTE
+    from aichestra.local_runtime.http import validate_local_endpoint
+
+    try:
+        validate_local_endpoint(endpoint)
+    except ValueError:
+        return Locality.REMOTE
+    return Locality.LOCAL
 
 
 def _caps(entry: Mapping[str, Any]) -> ExecutionCapabilities:

@@ -258,8 +258,38 @@ class ExecutionTarget:
 
 
 @dataclass(frozen=True)
+class RuntimeModel:
+    """Normalized Orca inventory entry; id is opaque, never split by provider."""
+
+    id: str
+    available: bool = False
+    provider: str | None = None
+    efforts: tuple[str, ...] = ()
+    capabilities: ExecutionCapabilities = ExecutionCapabilities()
+
+
+@dataclass(frozen=True)
+class RuntimeCapability:
+    id: str
+    available: bool = False
+    models: tuple[RuntimeModel, ...] = ()
+
+
+@dataclass(frozen=True)
+class OrcaCapabilityCatalog:
+    """Internal adapter boundary, not a claimed Orca wire format or launch proof.
+
+    Production transport remains unavailable until Orca documents an inventory
+    contract. Account hints, local probes and config must never populate this.
+    """
+
+    runtimes: tuple[RuntimeCapability, ...] = ()
+
+
+@dataclass(frozen=True)
 class DiscoveryFacts:
     runtimes: tuple[AgentRuntime, ...] = ()
     providers: tuple[ModelProvider, ...] = ()
     models: tuple[Model, ...] = ()
     machine: MachineCapabilities = MachineCapabilities()
+    orca_catalog: OrcaCapabilityCatalog | None = None

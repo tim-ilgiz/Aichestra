@@ -93,8 +93,15 @@ def resolve_targets(
                 )
             )
         )
+        launch_key = LaunchBindingKey(
+            runtime.id, binding.provider, binding.model, endpoint
+        )
+        launch = launches.get(launch_key.as_tuple())
+        orca_native_available = bool(
+            launch and launch.proven and launch.strategy == LaunchStrategy.ORCA_NATIVE
+        )
         available = (
-            runtime.available
+            (runtime.available or orca_native_available)
             and (provider is None or provider.available)
             and (model is None or model.available)
         )
@@ -118,10 +125,6 @@ def resolve_targets(
         allowed = locality in policy.allowed_localities and (
             policy.allowed_targets is None or target_id in policy.allowed_targets
         )
-        launch_key = LaunchBindingKey(
-            runtime.id, binding.provider, binding.model, endpoint
-        )
-        launch = launches.get(launch_key.as_tuple())
         targets[target_id] = ExecutionTarget(
             id=target_id,
             runtime=runtime,

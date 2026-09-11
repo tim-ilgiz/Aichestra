@@ -325,6 +325,7 @@ def _ensure_gitignore_user_local(project_root: Path) -> None:
 _RUNTIME_LABELS = {
     "codex": "Codex",
     "cursor": "Cursor",
+    "claude": "Claude",
     "gemini": "Gemini",
     "opencode": "OpenCode",
     "ollama": "Ollama",
@@ -437,15 +438,33 @@ def _discovered_model_options(runtime: str, facts, layered) -> list[tuple[str, d
             {"runtime": runtime},
         )
     ]
-    from aichestra.execution.compatibility import load_compatibility_bindings
-    from aichestra.execution.targets import resolve_targets
-
-    for t in resolve_targets(facts, load_compatibility_bindings(layered)):
-        if t.runtime.id == runtime and t.model and t.enabled and t.available and t.capable:
-            label = f"{t.provider.id + '/' if t.provider else ''}{t.model.id}"
-            payload: dict[str, Any] = {"runtime": runtime, "model": t.model.id}
-            if t.provider:
-                payload["provider"] = t.provider.id
+    # Only the normalized Orca inventory may supply selectable model ids.
+    # Production leaves it absent until a documented transport is available.
+    catalog = facts.orca_catalog
+    if catalog is None or any(r.id == runtime and not r.enabled for r in facts.runtimes):
+        return options
+    execution = layered.get("execution", {})
+    provider_config = execution.get("model_providers", {})
+    seen = set()
+    for capability in catalog.runtimes:
+        if capability.id != runtime or not capability.available:
+            continue
+        for model in capability.models:
+            if not model.available:
+                continue
+            entry = provider_config.get(model.provider, {}) if model.provider else {}
+            if entry.get("enabled") is False:
+                continue
+            if entry.get("models", {}).get(model.id, {}).get("enabled") is False:
+                continue
+            key = (model.provider, model.id)
+            if key in seen:
+                continue
+            seen.add(key)
+            payload = {"runtime": runtime, "model": model.id}
+            if model.provider is not None:
+                payload["provider"] = model.provider
+            label = f"{model.provider} / {model.id}" if model.provider else model.id
             options.append((label, payload))
     return options
 
@@ -471,9 +490,15 @@ def interactive_settings(project_root, *, config=None, save=True):
     cfg = copy.deepcopy(config if config is not None else load_project_config(root))
     if not cfg:
         raise ValueError("Run aichestra init first")
-    layered = resolve_config(repo_root=resolve_aichestra_config_root(project_root=root), project_root=root)
-    facts = discover_execution_facts(layered)
-    runtimes = [r for r in facts.runtimes if r.available and r.enabled]
+    config_root = resolve_aichestra_config_root(project_root=root)
+
+    def refresh_discovery():
+        layered_cfg = resolve_config(repo_root=config_root, project_root=root)
+        facts_now = discover_execution_facts(layered_cfg)
+        runtimes_now = [r for r in facts_now.runtimes if r.available and r.enabled]
+        return layered_cfg, facts_now, runtimes_now
+
+    layered, facts, runtimes = refresh_discovery()
     empty = _radio_glyphs()[0]
 
     from aichestra import __version__
@@ -490,8 +515,14 @@ def interactive_settings(project_root, *, config=None, save=True):
         )
 
     def binding(role_label: str, current: Any = None):
+        nonlocal layered, facts, runtimes
+        layered, facts, runtimes = refresh_discovery()
         print()
         print(f"Editing: {role_label}")
+        if not runtimes:
+            print("  No available agent runtimes discovered.")
+            print("  Use Agents & Models → Add agent runtime, then retry.")
+            return None
         current_runtime = (
             current.get("runtime") if isinstance(current, Mapping) else None
         )
@@ -508,7 +539,9 @@ def interactive_settings(project_root, *, config=None, save=True):
         if len(options) == 1:
             print()
             print(
-                f"  No extra models were discovered for {_runtime_label(runtime)}."
+                "  Orca model catalog unavailable; add/manage models in Orca."
+                if facts.orca_catalog is None else
+                "  No selectable Orca catalog models; add/manage models in Orca."
             )
             print(
                 f"  {role_label} will use {_runtime_label(runtime)}'s default model."
@@ -525,6 +558,187 @@ def interactive_settings(project_root, *, config=None, save=True):
             compare=_same_binding,
         )
 
+    def providers_menu() -> None:
+        nonlocal layered, facts, runtimes
+        from aichestra.config.provider_setup import (
+            discover_orca_agent_hints,
+            list_registered_providers,
+            list_registered_runtimes,
+            register_agent_runtime,
+        )
+        from aichestra.execution.runtimes import DEFAULT_RUNTIME_BINARIES
+
+        def _status_mark(ok: bool) -> str:
+            yes, no = "✓", "✗"
+            encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+            try:
+                f"{yes}{no}".encode(encoding)
+                return yes if ok else no
+            except (LookupError, UnicodeEncodeError):
+                return "OK" if ok else "NO"
+
+        while True:
+            layered, facts, runtimes = refresh_discovery()
+            print()
+            print("Agents & Models (machine-local — not committed)")
+            print("  Policy selection only: runtime / provider / model.")
+            print("  Models, providers and credentials are managed only in Orca.")
+            print()
+            print(f"  {empty}  1. Discover from Orca")
+            print(f"  {empty}  2. Add agent runtime (Codex / Cursor / …)")
+            print(f"  {empty}  3. Manage models in Orca")
+            print(f"  {empty}  4. Show discovered")
+            print(f"  {empty}  0. Back")
+            print()
+            action = input("Enter number: ").strip()
+            if action == "0":
+                return
+            if action == "1":
+                hints = discover_orca_agent_hints()
+                if not hints:
+                    print()
+                    print(
+                        "  No Orca hints (Orca missing, or no accounts reported)."
+                    )
+                    print(
+                        "  Authenticate agents in Orca, or use "
+                        "Add agent runtime. Models are managed only in Orca."
+                    )
+                    continue
+                print()
+                print("  Account signals from Orca:")
+                for h in hints:
+                    mark = _status_mark(bool(h.get("available")))
+                    status = (
+                        "authenticated in Orca (launch not verified)"
+                        if h.get("available")
+                        else "not authenticated in Orca"
+                    )
+                    detail = str(h.get("detail") or "").strip()
+                    suffix = f" — {detail}" if detail else ""
+                    print(
+                        f"  {mark} {_runtime_label(h['runtime'])} ({h['runtime']}): "
+                        f"{status}{suffix}"
+                    )
+                options = [
+                    (
+                        f"{_runtime_label(h['runtime'])}: "
+                        f"{'enable' if h.get('available') else 'register anyway'} "
+                        f"({h.get('detail') or ''})",
+                        h["runtime"],
+                    )
+                    for h in hints
+                ]
+                picked = choose(
+                    "Enable which Orca-known agent runtime on this machine?",
+                    options,
+                    hint=(
+                        "Does not copy credentials; only registers the runtime id "
+                        "so role policy can select it."
+                    ),
+                )
+                if picked is None:
+                    continue
+                register_agent_runtime(picked, repo_root=config_root)
+                print(f"  Registered runtime {picked} from Orca account hint")
+                print("  Account authentication does not prove runtime launch or model availability.")
+                layered, facts, runtimes = refresh_discovery()
+            elif action == "2":
+                builtins = sorted(DEFAULT_RUNTIME_BINARIES)
+                options = [
+                    (f"{_runtime_label(rid)} ({rid})", rid) for rid in builtins
+                ]
+                options.append(("Custom runtime id…", "__custom__"))
+                picked = choose(
+                    "Which agent runtime to register?",
+                    options,
+                    hint=(
+                        "Extends the selectable runtime list on this machine "
+                        "(Codex, Cursor, Claude, Gemini, OpenCode, or custom)."
+                    ),
+                )
+                if picked is None:
+                    continue
+                if picked == "__custom__":
+                    print()
+                    picked = input("Runtime id: ").strip()
+                    binary = input("Binary name on PATH: ").strip()
+                    binaries = [binary] if binary else None
+                else:
+                    default_bin = DEFAULT_RUNTIME_BINARIES.get(picked, (picked,))
+                    print()
+                    print(
+                        f"  Default binary candidates: {', '.join(default_bin)}"
+                    )
+                    override = input(
+                        "Override binary (empty = defaults): "
+                    ).strip()
+                    binaries = [override] if override else None
+                register_agent_runtime(
+                    picked, binaries=binaries, repo_root=config_root
+                )
+                print(f"  Registered runtime {picked}")
+                layered, facts, runtimes = refresh_discovery()
+            elif action == "3":
+                print("  Add models and providers in Orca settings.")
+                print("  Orca model catalog unavailable: account hints do not list models.")
+                print("  Aichestra cannot import specific models until Orca exposes a catalog.")
+            elif action == "4":
+                print()
+                hints = discover_orca_agent_hints()
+                providers = list_registered_providers(layered)
+                rts = list_registered_runtimes(layered)
+                if hints:
+                    print("  Account signals from Orca:")
+                    for h in hints:
+                        mark = _status_mark(bool(h.get("available")))
+                        status = (
+                            "authenticated in Orca (launch not verified)"
+                            if h.get("available")
+                            else "not authenticated in Orca"
+                        )
+                        print(
+                            f"  {mark} {_runtime_label(h['runtime'])}: {status}"
+                        )
+                if providers:
+                    print("  Legacy local diagnostics (not an Orca model catalog):")
+                    for row in providers:
+                        matched = next(
+                            (p for p in facts.providers if p.id == row["id"]),
+                            None,
+                        )
+                        mark = _status_mark(bool(matched and matched.available))
+                        models = [
+                            m.id
+                            for m in facts.models
+                            if m.provider == row["id"]
+                        ]
+                        model_bit = (
+                            f" models={','.join(models)}" if models else ""
+                        )
+                        print(
+                            f"  {mark} {row['id']}: "
+                            f"endpoint={row.get('endpoint') or '-'}{model_bit}"
+                        )
+                if rts:
+                    print("  Registered agent runtimes:")
+                    for row in rts:
+                        bins = ",".join(row.get("binaries") or []) or "-"
+                        on_path = next(
+                            (r for r in facts.runtimes if r.id == row["id"]),
+                            None,
+                        )
+                        mark = _status_mark(bool(on_path and on_path.available))
+                        print(
+                            f"  {mark} {row['id']}: binaries={bins} "
+                            f"enabled={row.get('enabled')}"
+                        )
+                if not hints and not providers and not rts:
+                    print("  Nothing discovered or registered yet.")
+                    print(
+                        "  Try Discover from Orca. Add/manage models in Orca settings."
+                    )
+
     def print_main_menu() -> None:
         from aichestra.console_ui import box, use_pretty
 
@@ -538,8 +752,9 @@ def interactive_settings(project_root, *, config=None, save=True):
             ("5", "Documentation", _binding_summary(roles.get("docs"))),
             ("6", "Quota fallback", _quota_summary(cfg)),
             ("7", "Verification", _verification_summary(cfg)),
-            ("8", "Save", "write .aichestra/project.json"),
-            ("0", "Cancel", "discard unsaved edits"),
+            ("8", "Agents & Models", "Orca accounts / runtimes / models in Orca"),
+            ("9", "Save", "write .aichestra/project.json"),
+            ("0", "Cancel", "discard unsaved project edits"),
         ]
         print()
         if use_pretty():
@@ -547,6 +762,7 @@ def interactive_settings(project_root, *, config=None, save=True):
                 box(
                     [
                         "Pick a number to edit that role.",
+                        "Agents & Models writes machine-local config.",
                         "Save writes the project file.",
                     ],
                     title="Project settings",
@@ -566,7 +782,7 @@ def interactive_settings(project_root, *, config=None, save=True):
         action = input("Enter number: ").strip()
         if action == "0":
             return config if config is not None else load_project_config(root)
-        if action == "8":
+        if action == "9":
             from aichestra.orchestration.verification import require_verification_toggle
 
             known = _layered_known_runtimes(root, cfg)
@@ -577,7 +793,9 @@ def interactive_settings(project_root, *, config=None, save=True):
             if save:
                 save_project_config(root, cfg)
             return cfg
-        if action == "1":
+        if action == "8":
+            providers_menu()
+        elif action == "1":
             value = binding(
                 "Coordinator",
                 (cfg.get("orchestration") or {}).get("coordinator"),

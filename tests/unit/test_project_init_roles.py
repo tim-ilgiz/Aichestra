@@ -259,16 +259,18 @@ def test_settings_menu_uses_discovery_and_preserves_cancel(tmp_path, monkeypatch
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr("aichestra.execution.discovery.discover_execution_facts",
                         lambda _: DiscoveryFacts(runtimes=(AgentRuntime("cursor", available=True),)))
-    replies = iter(["2", "1", "8"])
+    replies = iter(["2", "1", "9"])
     monkeypatch.setattr("builtins.input", lambda _: next(replies))
     interactive_settings(tmp_path)
     assert load_project_config(tmp_path)["roles"]["implement"] == {"runtime": "cursor"}
     out = capsys.readouterr().out
     assert "1. Coordinator" in out
     assert "2. Coding" in out
+    assert "8. Agents & Models" in out
+    assert "9. Save" in out
     assert "1. Coordinator  2. Coding" not in out
     assert "Choose a runtime for Coding" in out
-    assert "No extra models were discovered for Cursor." in out
+    assert "Orca model catalog unavailable; add/manage models in Orca." in out
     assert "Coding will use Cursor's default model." in out
     before = load_project_config(tmp_path)
     replies = iter(["6", "2", "1", "0"])
@@ -296,7 +298,7 @@ def test_settings_menu_prompts_for_model_when_extras_exist(tmp_path, monkeypatch
             ),
         ],
     )
-    replies = iter(["2", "1", "2", "8"])
+    replies = iter(["2", "1", "2", "9"])
     monkeypatch.setattr("builtins.input", lambda _: next(replies))
     interactive_settings(tmp_path)
     assert load_project_config(tmp_path)["roles"]["implement"] == {

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from aichestra.local_runtime.ollama import OllamaRuntime
+from aichestra.local_runtime.http import local_urlopen
 
 
 @dataclass(frozen=True)
@@ -151,6 +152,100 @@ def _ollama_factory(
     return OllamaProviderProbe(endpoint=endpoint, config=config)
 
 
+class OpenAICompatibleProviderProbe:
+    """Unauthenticated OpenAI-compatible ``/v1/models`` discovery (local backends).
+
+    For LM Studio / local vLLM / similar. Aichestra MUST NOT attach Authorization
+    headers or read API keys — authenticated cloud providers are Orca's concern.
+    """
+
+    def __init__(
+        self,
+        *,
+        provider_id: str,
+        endpoint: str | None = None,
+        config: Mapping[str, Any] | None = None,
+    ) -> None:
+        cfg = dict(config or {})
+        self._id = (provider_id or str(cfg.get("id") or "openai")).strip()
+        raw = endpoint if endpoint is not None else cfg.get("endpoint")
+        self._endpoint = str(raw).rstrip("/") if raw else None
+        self._timeout = float(cfg.get("timeout_seconds") or 5)
+        self._loaded = False
+        self._payload = None
+
+    @property
+    def id(self) -> str:
+        return self._id
+
+    @property
+    def endpoint(self) -> str | None:
+        return self._endpoint
+
+    def is_reachable(self) -> bool:
+        return self._get_models_payload() is not None
+
+    def list_models(self) -> Sequence[DiscoveredModel]:
+        payload = self._get_models_payload()
+        if not isinstance(payload, Mapping):
+            return ()
+        data = payload.get("data")
+        if not isinstance(data, list):
+            return ()
+        out: list[DiscoveredModel] = []
+        for row in data:
+            if not isinstance(row, Mapping):
+                continue
+            model_id = str(row.get("id") or "").strip()
+            if not model_id:
+                continue
+            out.append(DiscoveredModel(id=model_id, capabilities=frozenset({"text"})))
+        return tuple(out)
+
+    def _get_models_payload(self) -> Mapping[str, Any] | None:
+        if not self._loaded:
+            self._loaded = True
+            self._payload = self._fetch_models_payload()
+        return self._payload
+
+    def _fetch_models_payload(self) -> Mapping[str, Any] | None:
+        import json
+        import urllib.error
+        import urllib.request
+
+        if not self._endpoint:
+            return None
+        url = f"{self._endpoint}/models"
+        # Accept either .../v1 or .../v1/ already; callers usually pass .../v1.
+        if not self._endpoint.endswith("/v1") and "/v1/" not in self._endpoint:
+            url = f"{self._endpoint}/v1/models"
+        headers = {"Accept": "application/json"}
+        try:
+            req = urllib.request.Request(url, headers=headers, method="GET")
+            with local_urlopen(req, timeout=self._timeout) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+            data = json.loads(body)
+            return data if isinstance(data, Mapping) else None
+        except (OSError, ValueError, urllib.error.URLError, TimeoutError):
+            return None
+
+
+def openai_compatible_probe(
+    provider_id: str,
+    *,
+    endpoint: str | None = None,
+    config: Mapping[str, Any] | None = None,
+) -> ModelProviderProbe:
+    return OpenAICompatibleProviderProbe(
+        provider_id=provider_id, endpoint=endpoint, config=config
+    )
+
+
+def is_openai_compatible_entry(entry: Mapping[str, Any]) -> bool:
+    style = str(entry.get("api_style") or entry.get("probe") or "").strip().lower()
+    return style in {"openai", "openai_compatible", "openai-compatible"}
+
+
 def default_provider_probe_registry() -> ProviderProbeRegistry:
     registry = ProviderProbeRegistry()
     registry.register("ollama", _ollama_factory)
@@ -164,7 +259,7 @@ PROVIDER_PROBE_REGISTRY = default_provider_probe_registry()
 def register_provider_probe(
     provider_id: str, factory: ProviderProbeFactory
 ) -> None:
-    """Public extension point for LM Studio / vLLM / OpenRouter / custom."""
+    """Extension point for local inference probes (LM Studio / vLLM / custom)."""
     PROVIDER_PROBE_REGISTRY.register(provider_id, factory)
 
 
