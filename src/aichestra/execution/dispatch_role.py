@@ -379,13 +379,65 @@ def dispatch_role(
         "recorded_at": datetime.now(timezone.utc).isoformat(),
         **({"launch_effective": launch_effective} if launch_effective else {}),
     }
-    persisted = False
-    persist_error = None
     try:
         save_dispatch_role_receipt(aichestra_root, adoption)
-        persisted = True
     except (OSError, ValueError, TypeError) as exc:
-        persist_error = str(exc)
+        # Adoption receipt is required settle evidence. Never report ok after a
+        # successful worker-start if persistence failed — the Run cannot audit.
+        release_attempted = False
+        release_ok = False
+        release_detail = None
+        try:
+            release_attempted = True
+            release = run_fn(
+                [
+                    orca_binary,
+                    "orchestration",
+                    "worker-release",
+                    "--dispatch",
+                    dispatch_id,
+                    "--json",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            release_ok = release.returncode == 0
+            if not release_ok:
+                release_detail = (
+                    (release.stderr or release.stdout or "")[:500]
+                    or f"worker-release exited {release.returncode}"
+                )
+        except (OSError, TypeError, subprocess.SubprocessError) as release_exc:
+            release_detail = str(release_exc)
+        abort_prepared(prepared, launch_ctx)
+        return _payload({
+            "ok": False,
+            "operation": ROLE_DISPATCH_OPERATION,
+            "role": role_key,
+            "run_id": rid,
+            "task_id": tid,
+            "dispatch_id": dispatch_id,
+            "execution_target_id": target.id,
+            "execution_target": serialize_execution_target(target),
+            "launch_proved": proved,
+            "launch_effective": launch_effective,
+            "worker_started": True,
+            "adoption_receipt_persisted": False,
+            "worker_release_attempted": release_attempted,
+            "worker_release_ok": release_ok,
+            "prepared_launch": serialize_prepared_launch(prepared),
+            "worker_argv": worker_argv[1:],
+            "orca_exit_code": start.returncode,
+            "orca_stdout": (start.stdout or "")[:4000],
+            "orca_stderr": (start.stderr or "")[:2000],
+            "error": (
+                "worker started but adoption receipt persistence failed: "
+                f"{exc}"
+                + (f"; release: {release_detail}" if release_detail else "")
+            ),
+        })
     return _payload({
         "ok": True,
         "operation": ROLE_DISPATCH_OPERATION,
@@ -397,11 +449,11 @@ def dispatch_role(
         "execution_target": serialize_execution_target(target),
         "launch_proved": proved,
         "launch_effective": launch_effective,
-        "adoption_receipt_persisted": persisted,
+        "worker_started": True,
+        "adoption_receipt_persisted": True,
         "prepared_launch": serialize_prepared_launch(prepared),
         "worker_argv": worker_argv[1:],
         "orca_exit_code": start.returncode,
         "orca_stdout": (start.stdout or "")[:4000],
         "orca_stderr": (start.stderr or "")[:2000],
-        **({"error": persist_error} if persist_error else {}),
     })

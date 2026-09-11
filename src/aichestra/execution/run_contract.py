@@ -12,13 +12,11 @@ from typing import Mapping
 
 from aichestra.execution.launch_strategies import extract_attested_binding, receipt_launch
 from aichestra.execution.roles import (
-    _parse_object,
     _task_role,
     _worker_record,
     contract_endpoint_matches,
-    last_failure_message_id,
-    receipt_failure_code,
     receipt_timestamp,
+    resolve_worker_failure,
 )
 from aichestra.providers.orca import _receipt_rows
 
@@ -55,16 +53,28 @@ def load_contract(home, run_id, project_root):
         raise ValueError("Run contract missing or unreadable; start a new Mode C Run") from exc
 
 
-def _dispatch_role_receipts_path(home, run_id):
+def _dispatch_role_receipts_dir(home, run_id):
+    """Immutable per-dispatch receipt directory for one Run."""
+    contract_path = _path(home, run_id)
+    return contract_path.with_name(f"{contract_path.stem}.dispatch-role")
+
+
+def _dispatch_role_receipts_legacy_path(home, run_id):
+    """Pre-directory shared JSON array (read-only migration)."""
     contract_path = _path(home, run_id)
     return contract_path.with_name(f"{contract_path.stem}.dispatch-role.json")
 
 
-def save_dispatch_role_receipt(home, receipt: Mapping) -> dict:
-    """Append a durable coordinator-adoption receipt for one inner Dispatch.
+def _dispatch_role_receipt_path(home, run_id, dispatch_id: str) -> Path:
+    digest = hashlib.sha256(dispatch_id.encode("utf-8")).hexdigest()
+    return _dispatch_role_receipts_dir(home, run_id) / f"{digest}.json"
 
-    This is policy evidence, not a scheduler: Orca still owns the Task/worker.
-    Duplicate ``dispatch_id`` rows are ignored (idempotent retry).
+
+def save_dispatch_role_receipt(home, receipt: Mapping) -> dict:
+    """Persist one immutable coordinator-adoption receipt for an inner Dispatch.
+
+    Each ``dispatch_id`` owns its own file created with exclusive create (``"x"``).
+    Parallel workers cannot clobber each other; duplicate saves are idempotent.
     """
     required = ("operation", "run_id", "task_id", "role", "dispatch_id", "execution_target_id")
     row = {key: receipt.get(key) for key in required}
@@ -84,45 +94,73 @@ def save_dispatch_role_receipt(home, receipt: Mapping) -> dict:
     effective = receipt.get("launch_effective")
     if isinstance(effective, Mapping):
         row["launch_effective"] = dict(effective)
-    path = _dispatch_role_receipts_path(home, row["run_id"])
+    path = _dispatch_role_receipt_path(home, row["run_id"], row["dispatch_id"])
     path.parent.mkdir(parents=True, exist_ok=True)
-    existing: list = []
-    if path.exists():
-        try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ValueError("Malformed dispatch-role receipts; refusing to append") from exc
-        if not isinstance(loaded, list):
-            raise ValueError("Malformed dispatch-role receipts; refusing to append")
-        existing = loaded
-    if any(isinstance(item, Mapping) and item.get("dispatch_id") == row["dispatch_id"] for item in existing):
+    try:
+        with path.open("x", encoding="utf-8") as stream:
+            json.dump(row, stream, sort_keys=True)
         return row
-    existing.append(row)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(existing, sort_keys=True), encoding="utf-8")
-    tmp.replace(path)
-    return row
+    except FileExistsError:
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("Malformed dispatch-role receipt; refusing overwrite") from exc
+        if not isinstance(existing, Mapping):
+            raise ValueError("Malformed dispatch-role receipt; refusing overwrite")
+        for key in required:
+            if existing.get(key) != row[key]:
+                raise ValueError(
+                    f"dispatch-role receipt for {row['dispatch_id']} already exists "
+                    "with different evidence"
+                )
+        if existing.get("reason") != row["reason"]:
+            raise ValueError(
+                f"dispatch-role receipt for {row['dispatch_id']} already exists "
+                "with different evidence"
+            )
+        return dict(existing)
 
 
 def load_dispatch_role_receipts(home, run_id) -> list[dict]:
     """Load Aichestra dispatch-role adoption receipts for a Run.
 
-    Missing file means no coordinator adoption yet (empty list), not a soft-pass.
+    Prefer per-dispatch files under ``<run-hash>.dispatch-role/``. A legacy
+    shared JSON array is still accepted read-only for in-flight Runs.
+    Missing storage means no coordinator adoption yet (empty list), not a soft-pass.
     """
-    path = _dispatch_role_receipts_path(home, run_id)
-    if not path.exists():
-        return []
-    try:
-        loaded = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ValueError("dispatch-role receipts unreadable") from exc
-    if not isinstance(loaded, list):
-        raise ValueError("Malformed dispatch-role receipts")
-    rows = []
-    for item in loaded:
-        if not isinstance(item, Mapping):
-            raise ValueError("Malformed dispatch-role receipt row")
-        rows.append(dict(item))
+    rows: list[dict] = []
+    directory = _dispatch_role_receipts_dir(home, run_id)
+    if directory.is_dir():
+        for path in sorted(directory.glob("*.json")):
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ValueError("dispatch-role receipts unreadable") from exc
+            if not isinstance(loaded, Mapping):
+                raise ValueError("Malformed dispatch-role receipt row")
+            rows.append(dict(loaded))
+    legacy = _dispatch_role_receipts_legacy_path(home, run_id)
+    if legacy.exists():
+        try:
+            loaded = json.loads(legacy.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("dispatch-role receipts unreadable") from exc
+        if not isinstance(loaded, list):
+            raise ValueError("Malformed dispatch-role receipts")
+        seen = {
+            item.get("dispatch_id")
+            for item in rows
+            if isinstance(item.get("dispatch_id"), str)
+        }
+        for item in loaded:
+            if not isinstance(item, Mapping):
+                raise ValueError("Malformed dispatch-role receipt row")
+            dispatch_id = item.get("dispatch_id")
+            if isinstance(dispatch_id, str) and dispatch_id in seen:
+                continue
+            rows.append(dict(item))
+            if isinstance(dispatch_id, str):
+                seen.add(dispatch_id)
     return rows
 
 
@@ -142,20 +180,13 @@ def _coordinator_terminal(call, run_id: str, from_handle: str | None) -> str | N
     return handle.strip() if isinstance(handle, str) and handle.strip() else None
 
 
-def _worker_done_payload_failure(
+def _load_worker_done_messages(
     call,
     run_id: str,
     *,
-    dispatch_id: str,
-    message_id: str | None,
     from_handle: str | None,
-) -> str | None:
-    """Typed failure from durable worker_done mail payload (read-only).
-
-    Orca 1.4.200 persists ``payload.failure`` on the worker_done message but
-    omits it from ``dispatch.lastFailure``. Never call run-use; use the Run
-    coordinator terminal with ``check --all``.
-    """
+) -> list | None:
+    """Read durable worker_done mail via check --all (never run-use)."""
     terminal = _coordinator_terminal(call, run_id, from_handle)
     if not terminal:
         return None
@@ -176,28 +207,7 @@ def _worker_done_payload_failure(
         return None
     data = payload.get("result", payload)
     messages = data.get("messages") if isinstance(data, Mapping) else None
-    if not isinstance(messages, list):
-        return None
-    for message in messages:
-        if not isinstance(message, Mapping):
-            continue
-        msg_id = message.get("id") or message.get("messageId")
-        body = _parse_object(message.get("payload"))
-        if not isinstance(body, Mapping):
-            continue
-        body_dispatch = body.get("dispatchId") or body.get("dispatch_id")
-        matched = (
-            (isinstance(message_id, str) and msg_id == message_id)
-            or body_dispatch == dispatch_id
-        )
-        if not matched:
-            continue
-        code = receipt_failure_code(body) or receipt_failure_code(
-            {"payload": message.get("payload")}
-        )
-        if code:
-            return code
-    return None
+    return messages if isinstance(messages, list) else None
 
 
 def authorize_task(
@@ -212,7 +222,7 @@ def authorize_task(
     from_handle: str | None = None,
 ):
     def call(*args):
-        result = run([binary, "orchestration", *args, "--json"],
+        result = run([binary, "orchestration", *args],
                      check=False, capture_output=True, text=True, timeout=120)
         if result.returncode:
             raise ValueError("Cannot read canonical Orca state")
@@ -242,6 +252,7 @@ def authorize_task(
     if workers is None:
         raise ValueError("Cannot enumerate quota evidence")
     primary = contract["bindings"]["implement"]
+    durable_messages = None
     for worker in workers:
         dispatch = worker.get("dispatch_id") or worker.get("dispatchId")
         if not isinstance(dispatch, str) or not dispatch:
@@ -259,15 +270,13 @@ def authorize_task(
         actual = extract_attested_binding({"effective": launch.get("effective", {})})
         completed = receipt_timestamp(row, "completed_at", "completedAt")
         ordered = bool(completed and completed <= datetime.now(timezone.utc))
-        failure = receipt_failure_code(row)
+        failure = resolve_worker_failure(row)
         if failure is None:
-            failure = _worker_done_payload_failure(
-                call,
-                run_id,
-                dispatch_id=dispatch,
-                message_id=last_failure_message_id(row),
-                from_handle=from_handle,
-            )
+            if durable_messages is None:
+                durable_messages = _load_worker_done_messages(
+                    call, run_id, from_handle=from_handle
+                ) or []
+            failure = resolve_worker_failure(row, durable_messages=durable_messages)
         if ((row.get("dispatch_id") or row.get("dispatchId") or data.get("dispatchId")) == dispatch
                 and (row.get("run_id") or row.get("runId")) == run_id
                 and (prior_task.get("run_id") or prior_task.get("runId")) == run_id

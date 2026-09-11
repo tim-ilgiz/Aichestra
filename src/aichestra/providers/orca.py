@@ -1115,10 +1115,45 @@ class OrcaProvider(ProviderAdapter):
             from aichestra.execution.run_contract import load_dispatch_role_receipts
             home = _request_aichestra_repo_root(request)
             adoption = load_dispatch_role_receipts(home, run_id) if home else []
+            # Same durable worker_done evidence authorize_task uses for quota.
+            durable_messages = None
+            handle = (
+                str(request.context.get("terminal_handle") or "").strip()
+                or str(request.context.get("coordinator_handle") or "").strip()
+            )
+            if not handle:
+                try:
+                    shown = call(["orchestration", "run-show", "--id", run_id, "--json"])
+                    data = shown.get("result", shown)
+                    run = data.get("run") if isinstance(data, dict) else None
+                    if isinstance(run, dict):
+                        raw = run.get("coordinator_handle") or run.get("coordinatorHandle")
+                        if isinstance(raw, str) and raw.strip():
+                            handle = raw.strip()
+                except (ValueError, TypeError, KeyError, AttributeError):
+                    handle = ""
+            if handle:
+                try:
+                    mail = call([
+                        "orchestration", "check",
+                        "--terminal", handle,
+                        "--run", run_id,
+                        "--all",
+                        "--types", "worker_done",
+                        "--json",
+                    ])
+                    if mail.get("ok") is not False:
+                        data = mail.get("result", mail)
+                        messages = data.get("messages") if isinstance(data, dict) else None
+                        if isinstance(messages, list):
+                            durable_messages = messages
+                except (ValueError, TypeError, KeyError, AttributeError):
+                    durable_messages = None
             return validate_role_receipts(run_id, tasks, workers, receipts,
                 request.role_targets, bootstrap_target=request.execution_target,
                 quota_target=request.quota_target, quota_mode=request.context.get("quota_mode", "manual"),
-                dispatch_role_receipts=adoption)
+                dispatch_role_receipts=adoption,
+                durable_messages=durable_messages)
         except (ValueError, TypeError, KeyError, AttributeError) as exc:
             return {"ok": False, "detail": str(exc)}
 

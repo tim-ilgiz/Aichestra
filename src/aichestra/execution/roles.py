@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+from typing import Mapping
 
 from aichestra.config.roles import ROLE_KEYS, RoleBinding
 from aichestra.execution.domain import ExecutionTarget
@@ -208,6 +209,66 @@ def last_failure_message_id(row):
     return None
 
 
+def failure_code_from_durable_messages(
+    dispatch_id,
+    messages,
+    *,
+    message_id: str | None = None,
+) -> str | None:
+    """Typed failure from durable worker_done mail payloads (Orca 1.4.200).
+
+    ``lastFailure`` may omit ``failure`` while the matching ``worker_done``
+    message still carries ``payload.failure``. Match by message id and/or
+    ``payload.dispatchId``.
+    """
+    if not isinstance(dispatch_id, str) or not dispatch_id:
+        return None
+    if not isinstance(messages, list):
+        return None
+    for message in messages:
+        if not isinstance(message, Mapping):
+            continue
+        msg_id = message.get("id") or message.get("messageId")
+        body = _parse_object(message.get("payload"))
+        if not isinstance(body, Mapping):
+            continue
+        body_dispatch = body.get("dispatchId") or body.get("dispatch_id")
+        matched = (
+            (isinstance(message_id, str) and message_id and msg_id == message_id)
+            or body_dispatch == dispatch_id
+        )
+        if not matched:
+            continue
+        code = receipt_failure_code(body) or receipt_failure_code(
+            {"payload": message.get("payload")}
+        )
+        if code:
+            return code
+    return None
+
+
+def resolve_worker_failure(worker_receipt, *, durable_messages=None) -> str | None:
+    """Canonical typed failure for pre-dispatch authorize and settle audit.
+
+    Prefer explicit fields on the worker/dispatch receipt; when those omit the
+    class (Orca 1.4.200 ``lastFailure``), fall back to durable ``worker_done``
+    message payloads passed by the caller.
+    """
+    if not isinstance(worker_receipt, Mapping):
+        return None
+    code = receipt_failure_code(worker_receipt)
+    if code:
+        return code
+    if durable_messages is None:
+        return None
+    dispatch = worker_receipt.get("dispatch_id") or worker_receipt.get("dispatchId")
+    return failure_code_from_durable_messages(
+        dispatch,
+        durable_messages,
+        message_id=last_failure_message_id(worker_receipt),
+    )
+
+
 def _task_role(task):
     return task.get("role") or task.get("task_title") or task.get("title")
 
@@ -271,7 +332,8 @@ def _require_dispatch_role_adoption(
 
 def validate_role_receipts(run_id, tasks, workers, receipts, role_targets,
                            *, bootstrap_target=None, quota_target=None,
-                           quota_mode="manual", dispatch_role_receipts=None):
+                           quota_mode="manual", dispatch_role_receipts=None,
+                           durable_messages=None):
     """Audit canonical Orca receipts, never LLM summaries or prompt claims.
 
     Every worker must refer to a known same-Run task with a declared role.
@@ -279,6 +341,10 @@ def validate_role_receipts(run_id, tasks, workers, receipts, role_targets,
     quota outcome for implement in the same Run, not generated output.
     Inner worker Dispatches also require a matching Aichestra dispatch-role
     adoption receipt; coordinator bootstrap does not.
+
+    ``durable_messages`` is the same worker_done mail evidence
+    ``authorize_task`` reads via ``check --all`` when ``lastFailure`` omits
+    a typed failure class (Orca 1.4.200).
     """
     from aichestra.execution.launch_strategies import extract_attested_binding
     task_map = {t.get("id") or t.get("taskId"): t for t in tasks}
@@ -355,7 +421,8 @@ def validate_role_receipts(run_id, tasks, workers, receipts, role_targets,
                 except (TypeError, ValueError):
                     return False
                 return (same_work and (w.get("run_id") or w.get("runId")) == run_id
-                        and receipt_failure_code(w) == "quota" and ordered)
+                        and resolve_worker_failure(w, durable_messages=durable_messages) == "quota"
+                        and ordered)
             if not (role == "implement" and quota_mode == "auto"
                     and quota_target is not None and matches(quota_target)
                     and any(quota_before(p) for p in prior)):
@@ -365,7 +432,7 @@ def validate_role_receipts(run_id, tasks, workers, receipts, role_targets,
                     if quota_before(p):
                         _, w = _worker_record(p)
                         superseded.add(w.get("task_id") or w.get("taskId"))
-        if receipt_failure_code(row) == "quota":
+        if resolve_worker_failure(row, durable_messages=durable_messages) == "quota":
             quota_tasks.add(task_id)
     dispatched_tasks = {(_worker_record(p)[1].get("task_id") or _worker_record(p)[1].get("taskId"))
                         for p in receipts.values()}

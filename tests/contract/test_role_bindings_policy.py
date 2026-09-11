@@ -877,3 +877,186 @@ def test_endpoint_identity_preserves_tenant_without_exposing_it():
     legacy = dict(entry)
     del legacy["endpoint_fingerprint"]
     assert not contract_endpoint_matches(legacy, target.endpoint)
+
+
+def test_settle_audit_accepts_orca_worker_done_payload_quota():
+    """Orca 1.4.200: lastFailure omits typed failure; worker_done payload.failure=quota
+    must authorize final validate_role_receipts the same way as authorize_task."""
+    import json
+    from aichestra.execution.roles import _worker_record, resolve_worker_failure
+
+    primary = fake_execution_targets("codex")[0]
+    fallback = fake_execution_targets("cursor")[0]
+    task = {"id": "t1", "run_id": "r1", "title": "implement", "status": "completed"}
+    primary_worker = {
+        "dispatchId": "d1",
+        "taskId": "t1",
+        "runId": "r1",
+        "completedAt": "2026-01-01T00:00:00Z",
+        "createdAt": "2026-01-01T00:00:00Z",
+        "lastFailure": json.dumps({
+            "provenance": "worker_report",
+            "outcome": "failed",
+            "messageId": "msg_1",
+            "subject": "primary implement quota",
+            "body": "hit provider quota",
+            "completedAt": "2026-01-01T00:00:00Z",
+        }),
+    }
+    primary_show = {
+        "worker": {
+            "dispatchId": "d1",
+            "taskId": "t1",
+            "runId": "r1",
+            "state": "failed",
+            "startOptions": {"launch": {"effective": {"agent": "codex"}}},
+        },
+        "dispatch": {**primary_worker, "id": "d1", "status": "failed"},
+    }
+    _, fallback_worker, fallback_show = receipt(
+        dispatch="d2", role="implement", runtime="cursor"
+    )
+    fallback_worker["created_at"] = "2026-01-01T00:00:01Z"
+    fallback_show["worker"]["created_at"] = "2026-01-01T00:00:01Z"
+    mail = [{
+        "id": "msg_1",
+        "type": "worker_done",
+        "payload": json.dumps({
+            "taskId": "t1",
+            "dispatchId": "d1",
+            "outcome": "failed",
+            "failure": "quota",
+        }),
+    }]
+    _, primary_row = _worker_record(primary_show)
+    assert resolve_worker_failure(primary_row) is None
+    assert resolve_worker_failure(primary_row, durable_messages=mail) == "quota"
+
+    adoption = [
+        adopted(task, {"dispatch_id": "d1"}, primary),
+        adopted(task, fallback_worker, fallback, reason="quota-fallback"),
+    ]
+    with pytest.raises(ValueError, match="violates binding"):
+        validate_role_receipts(
+            "r1",
+            [task],
+            [primary_worker, fallback_worker],
+            {"d1": primary_show, "d2": fallback_show},
+            {"implement": primary},
+            quota_target=fallback,
+            quota_mode="auto",
+            dispatch_role_receipts=adoption,
+        )
+    assert validate_role_receipts(
+        "r1",
+        [task],
+        [primary_worker, fallback_worker],
+        {"d1": primary_show, "d2": fallback_show},
+        {"implement": primary},
+        quota_target=fallback,
+        quota_mode="auto",
+        dispatch_role_receipts=adoption,
+        durable_messages=mail,
+    )["ok"]
+
+
+def test_dispatch_role_fails_when_adoption_receipt_persist_fails(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    from aichestra.execution.dispatch_role import dispatch_role
+    from aichestra.execution.roles import target_contract_entry
+    from aichestra.execution.run_contract import save_contract
+
+    monkeypatch.setenv("AICHESTRA_CONFIG_HOME", str(tmp_path))
+    target = fake_execution_targets("cursor")[0]
+    save_contract(
+        tmp_path,
+        "run-1",
+        tmp_path,
+        {"bindings": {"tests": target_contract_entry(target)}, "quota": {"mode": "manual"}},
+    )
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        if "task-list" in argv:
+            return SimpleNamespace(
+                returncode=0,
+                stdout='{"tasks":[{"id":"task-1","run_id":"run-1","role":"tests"}]}',
+                stderr="",
+            )
+        if "worker-start" in argv:
+            return SimpleNamespace(
+                returncode=0,
+                stdout='{"result":{"dispatchId":"d-persist-fail"}}',
+                stderr="",
+            )
+        if "worker-release" in argv:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps({"result": {"dispatchId": "d-persist-fail", "state": "released"}}),
+                stderr="",
+            )
+        if "worker-show" in argv:
+            return SimpleNamespace(returncode=1, stdout="", stderr="skip")
+        return SimpleNamespace(returncode=1, stdout="", stderr="unexpected")
+
+    def boom(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(
+        "aichestra.execution.dispatch_role.save_dispatch_role_receipt", boom
+    )
+    monkeypatch.setattr(
+        "aichestra.execution.dispatch_role.resolve_orca_binary", lambda: "orca-test"
+    )
+    monkeypatch.setattr(
+        "aichestra.execution.dispatch_role.trusted_config_root", lambda _p: True
+    )
+    monkeypatch.setattr(
+        "aichestra.execution.dispatch_role.resolve_aichestra_config_root",
+        lambda **_k: tmp_path,
+    )
+    result = dispatch_role(
+        role="tests",
+        run_id="run-1",
+        task_id="task-1",
+        project_root=tmp_path,
+        repo_root=tmp_path,
+        config={"roles": {"tests": {"runtime": "cursor"}}},
+        targets=fake_execution_targets("cursor"),
+        binary="orca-test",
+        run=fake_run,
+    )
+    assert result["ok"] is False
+    assert result["worker_started"] is True
+    assert result["adoption_receipt_persisted"] is False
+    assert result["dispatch_id"] == "d-persist-fail"
+    assert "adoption receipt persistence failed" in result["error"]
+    assert any("worker-release" in c for c in calls)
+
+
+def test_dispatch_role_receipts_are_per_dispatch_files(tmp_path):
+    from aichestra.execution.run_contract import (
+        _dispatch_role_receipt_path,
+        load_dispatch_role_receipts,
+        save_dispatch_role_receipt,
+    )
+
+    target = fake_execution_targets()[0]
+    task, w1, _ = receipt(dispatch="d-a")
+    _, w2, _ = receipt(dispatch="d-b")
+    a = save_dispatch_role_receipt(tmp_path, adopted(task, w1, target))
+    b = save_dispatch_role_receipt(tmp_path, adopted(task, w2, target))
+    again = save_dispatch_role_receipt(tmp_path, adopted(task, w1, target))
+    assert a["dispatch_id"] == "d-a"
+    assert b["dispatch_id"] == "d-b"
+    assert again["dispatch_id"] == "d-a"
+    path_a = _dispatch_role_receipt_path(tmp_path, "r1", "d-a")
+    path_b = _dispatch_role_receipt_path(tmp_path, "r1", "d-b")
+    assert path_a.is_file() and path_b.is_file()
+    assert path_a != path_b
+    assert path_a.parent == path_b.parent
+    assert path_a.parent.name.endswith(".dispatch-role")
+    loaded = load_dispatch_role_receipts(tmp_path, "r1")
+    assert {row["dispatch_id"] for row in loaded} == {"d-a", "d-b"}
