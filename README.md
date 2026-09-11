@@ -249,13 +249,17 @@ Interactive setup (recommended):
 aichestra settings
 ```
 
-Choose **Providers** to add:
+Choose **Agents & Models** to:
 
-* an **agent runtime** (Codex, Cursor, Claude, Gemini, OpenCode, or custom binary);
-* a **model provider** (Ollama, or any OpenAI-compatible endpoint such as LM Studio / vLLM / OpenRouter);
-* optional **hints from Orca** for agents already signed in there.
+* **Discover from Orca** — see which agent runtimes are authenticated there
+  (Codex, Cursor, Claude, Gemini, OpenCode, …) without copying credentials;
+* **Add agent runtime** — extend the selectable list (built-in or custom binary);
+* **Add local inference backend** — Ollama or a local OpenAI-compatible endpoint
+  (LM Studio / local vLLM). Cloud providers with API keys are **not** configured here.
 
-Provider endpoints are stored in machine-local config (not committed). API keys are never written — only an optional environment variable *name*.
+Endpoints for local backends live in machine-local config (not committed).
+Aichestra never stores API keys or env-var names for secrets — that stays with Orca
+and the agent runtime.
 
 A model provider alone is not a Mode C worker. Pairing with OpenCode (offered in the menu) lets discovered models be selected for roles; Orca still owns launch.
 
@@ -586,7 +590,7 @@ Configure agents and models:
 aichestra settings
 ```
 
-(Use the **Providers** item to add runtimes or LLM backends on this machine.)
+(Use **Agents & Models** to discover Orca agents or add local runtimes / backends.)
 
 Show project settings:
 

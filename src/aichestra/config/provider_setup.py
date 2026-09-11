@@ -1,7 +1,8 @@
-"""Machine-local registration helpers for interactive provider setup.
+"""Machine-local registration helpers for Agents & Models setup.
 
-Writes only to untracked machine-local config. Never stores API keys — only
-optional environment variable *names* for OpenAI-compatible backends.
+Writes only to untracked machine-local config. Aichestra records policy
+selection facts (runtime / local endpoint ids) — never API keys, tokens, or
+``api_key_env`` names. Authenticated cloud availability comes from Orca.
 """
 
 from __future__ import annotations
@@ -93,10 +94,15 @@ def register_openai_compatible_provider(
     provider_id: str,
     *,
     endpoint: str,
-    api_key_env: str | None = None,
     pair_opencode: bool = True,
     repo_root: Path | None = None,
 ) -> dict[str, Any]:
+    """Register a local OpenAI-compatible inference backend (no credentials).
+
+    Intended for LM Studio / local vLLM / similar. Authenticated remote
+    providers (OpenRouter, OpenAI, …) belong to Orca discovery — do not pass
+    API keys or env-var names here.
+    """
     pid = validate_provider_id(provider_id)
     endpoint = str(endpoint).strip().rstrip("/")
     if not endpoint:
@@ -106,12 +112,8 @@ def register_openai_compatible_provider(
         "endpoint": endpoint,
         "api_style": "openai",
         "configured": True,
+        "locality": "local",
     }
-    if api_key_env:
-        env_name = str(api_key_env).strip()
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", env_name):
-            raise ValueError("api_key_env must be a valid environment variable name")
-        entry["api_key_env"] = env_name
     patch: dict[str, Any] = {
         "execution": {"model_providers": {pid: entry}},
     }
@@ -166,7 +168,7 @@ def list_registered_providers(config: Mapping[str, Any] | None) -> list[dict[str
                 "api_style": entry.get("api_style") or (
                     "ollama" if pid == "ollama" else None
                 ),
-                "api_key_env": entry.get("api_key_env"),
+                "locality": entry.get("locality"),
             }
         )
     return out

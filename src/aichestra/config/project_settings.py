@@ -325,6 +325,7 @@ def _ensure_gitignore_user_local(project_root: Path) -> None:
 _RUNTIME_LABELS = {
     "codex": "Codex",
     "cursor": "Cursor",
+    "claude": "Claude",
     "gemini": "Gemini",
     "opencode": "OpenCode",
     "ollama": "Ollama",
@@ -494,7 +495,7 @@ def interactive_settings(project_root, *, config=None, save=True):
         print(f"Editing: {role_label}")
         if not runtimes:
             print("  No available agent runtimes discovered.")
-            print("  Use Providers → Add agent runtime, then retry.")
+            print("  Use Agents & Models → Add agent runtime, then retry.")
             return None
         current_runtime = (
             current.get("runtime") if isinstance(current, Mapping) else None
@@ -541,32 +542,130 @@ def interactive_settings(project_root, *, config=None, save=True):
         )
         from aichestra.execution.runtimes import DEFAULT_RUNTIME_BINARIES
 
+        def _status_mark(ok: bool) -> str:
+            yes, no = "✓", "✗"
+            encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+            try:
+                f"{yes}{no}".encode(encoding)
+                return yes if ok else no
+            except (LookupError, UnicodeEncodeError):
+                return "OK" if ok else "NO"
+
         while True:
             layered, facts, runtimes = refresh_discovery()
             print()
-            print("Providers (machine-local — not committed)")
-            print("  Adds inference backends and agent runtimes on this machine.")
-            print("  API keys are never stored; only optional env var names.")
+            print("Agents & Models (machine-local — not committed)")
+            print("  Policy selection only: runtime / provider / model.")
+            print("  Credentials and cloud auth live in Orca — never here.")
             print()
-            print(f"  {empty}  1. Add model provider (Ollama / OpenAI-compatible)")
-            print(f"  {empty}  2. Add agent runtime")
-            print(f"  {empty}  3. Import hints from Orca")
-            print(f"  {empty}  4. Show registered")
+            print(f"  {empty}  1. Discover from Orca")
+            print(f"  {empty}  2. Add agent runtime (Codex / Cursor / …)")
+            print(f"  {empty}  3. Add local inference backend")
+            print(f"  {empty}  4. Show discovered")
             print(f"  {empty}  0. Back")
             print()
             action = input("Enter number: ").strip()
             if action == "0":
                 return
             if action == "1":
+                hints = discover_orca_agent_hints()
+                if not hints:
+                    print()
+                    print(
+                        "  No Orca hints (Orca missing, or no accounts reported)."
+                    )
+                    print(
+                        "  Authenticate agents in Orca, or use "
+                        "Add agent runtime / Add local inference backend."
+                    )
+                    continue
+                print()
+                print("  Available through Orca:")
+                for h in hints:
+                    mark = _status_mark(bool(h.get("available")))
+                    status = (
+                        "available via Orca"
+                        if h.get("available")
+                        else "not authenticated in Orca"
+                    )
+                    detail = str(h.get("detail") or "").strip()
+                    suffix = f" — {detail}" if detail else ""
+                    print(
+                        f"  {mark} {_runtime_label(h['runtime'])} ({h['runtime']}): "
+                        f"{status}{suffix}"
+                    )
+                options = [
+                    (
+                        f"{_runtime_label(h['runtime'])}: "
+                        f"{'enable' if h.get('available') else 'register anyway'} "
+                        f"({h.get('detail') or ''})",
+                        h["runtime"],
+                    )
+                    for h in hints
+                ]
+                picked = choose(
+                    "Enable which Orca-known agent runtime on this machine?",
+                    options,
+                    hint=(
+                        "Does not copy credentials; only registers the runtime id "
+                        "so role policy can select it."
+                    ),
+                )
+                if picked is None:
+                    continue
+                register_agent_runtime(picked, repo_root=config_root)
+                print(f"  Enabled runtime {picked} from Orca hint")
+                layered, facts, runtimes = refresh_discovery()
+            elif action == "2":
+                builtins = sorted(DEFAULT_RUNTIME_BINARIES)
+                options = [
+                    (f"{_runtime_label(rid)} ({rid})", rid) for rid in builtins
+                ]
+                options.append(("Custom runtime id…", "__custom__"))
+                picked = choose(
+                    "Which agent runtime to register?",
+                    options,
+                    hint=(
+                        "Extends the selectable runtime list on this machine "
+                        "(Codex, Cursor, Claude, Gemini, OpenCode, or custom)."
+                    ),
+                )
+                if picked is None:
+                    continue
+                if picked == "__custom__":
+                    print()
+                    picked = input("Runtime id: ").strip()
+                    binary = input("Binary name on PATH: ").strip()
+                    binaries = [binary] if binary else None
+                else:
+                    default_bin = DEFAULT_RUNTIME_BINARIES.get(picked, (picked,))
+                    print()
+                    print(
+                        f"  Default binary candidates: {', '.join(default_bin)}"
+                    )
+                    override = input(
+                        "Override binary (empty = defaults): "
+                    ).strip()
+                    binaries = [override] if override else None
+                register_agent_runtime(
+                    picked, binaries=binaries, repo_root=config_root
+                )
+                print(f"  Registered runtime {picked}")
+                layered, facts, runtimes = refresh_discovery()
+            elif action == "3":
                 kind = choose(
-                    "What kind of model provider?",
+                    "What kind of local inference backend?",
                     [
                         ("Ollama (local)", "ollama"),
                         (
-                            "OpenAI-compatible (LM Studio / vLLM / OpenRouter / custom)",
+                            "Local OpenAI-compatible (LM Studio / local vLLM / custom)",
                             "openai",
                         ),
                     ],
+                    hint=(
+                        "For OpenRouter / OpenAI / Anthropic / cloud Gemini — "
+                        "use Discover from Orca. Do not configure API keys here."
+                    ),
                 )
                 if kind is None:
                     continue
@@ -593,32 +692,25 @@ def interactive_settings(project_root, *, config=None, save=True):
                         repo_root=config_root,
                     )
                     print(f"  Registered ollama @ {endpoint}")
+                    pid = "ollama"
                 else:
                     print()
                     pid = input(
-                        "Provider id (e.g. lmstudio, openrouter): "
+                        "Provider id (e.g. lmstudio, vllm): "
                     ).strip()
                     endpoint = input(
                         "Base endpoint (e.g. http://127.0.0.1:1234/v1): "
                     ).strip()
-                    env_name = input(
-                        "API key env var name (optional, empty to skip): "
-                    ).strip() or None
                     register_openai_compatible_provider(
                         pid,
                         endpoint=endpoint,
-                        api_key_env=env_name,
                         pair_opencode=bool(pair),
                         repo_root=config_root,
                     )
                     print(f"  Registered {pid} @ {endpoint}")
                 layered, facts, runtimes = refresh_discovery()
                 matched = next(
-                    (
-                        p
-                        for p in facts.providers
-                        if p.id == ("ollama" if kind == "ollama" else pid)
-                    ),
+                    (p for p in facts.providers if p.id == pid),
                     None,
                 )
                 if matched and matched.available:
@@ -628,89 +720,64 @@ def interactive_settings(project_root, *, config=None, save=True):
                     )
                 else:
                     print(
-                        "  Configured. Endpoint not reachable yet "
-                        "(or needs API key in the env var)."
+                        "  Configured. Local endpoint not reachable yet "
+                        "(start the backend, then rediscover)."
                     )
-            elif action == "2":
-                builtins = sorted(DEFAULT_RUNTIME_BINARIES)
-                options = [
-                    (f"{_runtime_label(rid)} ({rid})", rid) for rid in builtins
-                ]
-                options.append(("Custom runtime id…", "__custom__"))
-                picked = choose(
-                    "Which agent runtime to register?",
-                    options,
-                    hint="Registers binary discovery on this machine.",
-                )
-                if picked is None:
-                    continue
-                if picked == "__custom__":
-                    print()
-                    picked = input("Runtime id: ").strip()
-                    binary = input("Binary name on PATH: ").strip()
-                    binaries = [binary] if binary else None
-                else:
-                    default_bin = DEFAULT_RUNTIME_BINARIES.get(picked, (picked,))
-                    print()
-                    print(
-                        f"  Default binary candidates: {', '.join(default_bin)}"
-                    )
-                    override = input(
-                        "Override binary (empty = defaults): "
-                    ).strip()
-                    binaries = [override] if override else None
-                register_agent_runtime(
-                    picked, binaries=binaries, repo_root=config_root
-                )
-                print(f"  Registered runtime {picked}")
-                layered, facts, runtimes = refresh_discovery()
-            elif action == "3":
-                hints = discover_orca_agent_hints()
-                if not hints:
-                    print()
-                    print(
-                        "  No Orca hints (Orca missing, or no accounts reported)."
-                    )
-                    continue
-                options = [
-                    (
-                        f"{h['runtime']}: "
-                        f"{'available' if h.get('available') else 'seen'} — "
-                        f"{h.get('detail') or ''}",
-                        h["runtime"],
-                    )
-                    for h in hints
-                ]
-                picked = choose(
-                    "Enable which Orca-known agent runtime on this machine?",
-                    options,
-                    hint="Does not copy credentials; only registers the runtime id.",
-                )
-                if picked is None:
-                    continue
-                register_agent_runtime(picked, repo_root=config_root)
-                print(f"  Enabled runtime {picked} from Orca hint")
             elif action == "4":
                 print()
+                hints = discover_orca_agent_hints()
                 providers = list_registered_providers(layered)
                 rts = list_registered_runtimes(layered)
-                if not providers and not rts:
-                    print("  Nothing registered in machine-local yet.")
-                if providers:
-                    print("  Model providers:")
-                    for row in providers:
+                if hints:
+                    print("  Through Orca:")
+                    for h in hints:
+                        mark = _status_mark(bool(h.get("available")))
+                        status = (
+                            "available via Orca"
+                            if h.get("available")
+                            else "not authenticated in Orca"
+                        )
                         print(
-                            f"    - {row['id']}: endpoint={row.get('endpoint') or '-'} "
-                            f"enabled={row.get('enabled')}"
+                            f"  {mark} {_runtime_label(h['runtime'])}: {status}"
+                        )
+                if providers:
+                    print("  Local inference:")
+                    for row in providers:
+                        matched = next(
+                            (p for p in facts.providers if p.id == row["id"]),
+                            None,
+                        )
+                        mark = _status_mark(bool(matched and matched.available))
+                        models = [
+                            m.id
+                            for m in facts.models
+                            if m.provider == row["id"]
+                        ]
+                        model_bit = (
+                            f" models={','.join(models)}" if models else ""
+                        )
+                        print(
+                            f"  {mark} {row['id']}: "
+                            f"endpoint={row.get('endpoint') or '-'}{model_bit}"
                         )
                 if rts:
-                    print("  Agent runtimes:")
+                    print("  Registered agent runtimes:")
                     for row in rts:
                         bins = ",".join(row.get("binaries") or []) or "-"
+                        on_path = next(
+                            (r for r in facts.runtimes if r.id == row["id"]),
+                            None,
+                        )
+                        mark = _status_mark(bool(on_path and on_path.available))
                         print(
-                            f"    - {row['id']}: binaries={bins} "
+                            f"  {mark} {row['id']}: binaries={bins} "
                             f"enabled={row.get('enabled')}"
                         )
+                if not hints and not providers and not rts:
+                    print("  Nothing discovered or registered yet.")
+                    print(
+                        "  Try Discover from Orca, or add a local runtime / backend."
+                    )
 
     def print_main_menu() -> None:
         from aichestra.console_ui import box, use_pretty
@@ -725,7 +792,7 @@ def interactive_settings(project_root, *, config=None, save=True):
             ("5", "Documentation", _binding_summary(roles.get("docs"))),
             ("6", "Quota fallback", _quota_summary(cfg)),
             ("7", "Verification", _verification_summary(cfg)),
-            ("8", "Providers", "add runtimes / model backends (this machine)"),
+            ("8", "Agents & Models", "Orca discovery / runtimes / local backends"),
             ("9", "Save", "write .aichestra/project.json"),
             ("0", "Cancel", "discard unsaved project edits"),
         ]
@@ -735,7 +802,7 @@ def interactive_settings(project_root, *, config=None, save=True):
                 box(
                     [
                         "Pick a number to edit that role.",
-                        "Providers write machine-local config.",
+                        "Agents & Models writes machine-local config.",
                         "Save writes the project file.",
                     ],
                     title="Project settings",

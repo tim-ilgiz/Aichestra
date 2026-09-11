@@ -1,4 +1,4 @@
-"""Interactive / machine-local provider registration."""
+"""Interactive / machine-local Agents & Models registration."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from aichestra.config.layering import load_json, machine_local_path
+from aichestra.config.layering import load_json
 from aichestra.config.provider_setup import (
     discover_orca_agent_hints,
     register_agent_runtime,
@@ -40,7 +40,6 @@ def test_register_openai_compatible_writes_machine_local(tmp_path, monkeypatch):
     register_openai_compatible_provider(
         "lmstudio",
         endpoint="http://127.0.0.1:1234/v1",
-        api_key_env="LMSTUDIO_API_KEY",
         pair_opencode=True,
         repo_root=tmp_path / "cfg",
     )
@@ -48,9 +47,16 @@ def test_register_openai_compatible_writes_machine_local(tmp_path, monkeypatch):
     entry = data["execution"]["model_providers"]["lmstudio"]
     assert entry["api_style"] == "openai"
     assert entry["endpoint"] == "http://127.0.0.1:1234/v1"
-    assert entry["api_key_env"] == "LMSTUDIO_API_KEY"
+    assert "api_key_env" not in entry
     assert {"runtime": "opencode", "provider": "lmstudio"} in data["execution"]["bindings"]
     assert data["execution"]["runtimes"]["opencode"]["enabled"] is True
+
+
+def test_register_openai_compatible_rejects_api_key_env_kwarg():
+    import inspect
+
+    sig = inspect.signature(register_openai_compatible_provider)
+    assert "api_key_env" not in sig.parameters
 
 
 def test_register_ollama_preserves_existing_bindings(tmp_path, monkeypatch):
@@ -83,7 +89,7 @@ def test_register_ollama_preserves_existing_bindings(tmp_path, monkeypatch):
     assert {"runtime": "opencode", "provider": "ollama"} in bindings
 
 
-def test_openai_compatible_probe_lists_models(monkeypatch):
+def test_openai_compatible_probe_lists_models_without_auth(monkeypatch):
     payload = json.dumps({"data": [{"id": "qwen"}, {"id": "coder"}]}).encode()
 
     class Resp:
@@ -96,13 +102,15 @@ def test_openai_compatible_probe_lists_models(monkeypatch):
         def __exit__(self, *args):
             return False
 
-    monkeypatch.setattr(
-        "urllib.request.urlopen",
-        lambda *a, **k: Resp(),
-    )
+    def fake_urlopen(req, timeout=None):
+        assert "Authorization" not in dict(req.headers)
+        return Resp()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     probe = OpenAICompatibleProviderProbe(
         provider_id="lmstudio",
         endpoint="http://127.0.0.1:1234/v1",
+        config={"api_key_env": "SHOULD_BE_IGNORED"},
     )
     assert probe.is_reachable()
     assert [m.id for m in probe.list_models()] == ["qwen", "coder"]
@@ -176,7 +184,29 @@ def test_discover_orca_hints_maps_accounts(monkeypatch):
     assert hints["gemini"]["available"] is False
 
 
-def test_settings_providers_menu_registers_openai(tmp_path, monkeypatch):
+def test_register_agent_runtime_extends_builtin_list(tmp_path, monkeypatch):
+    path = Path(tmp_path / "machine.local.json")
+    monkeypatch.setattr(
+        "aichestra.config.provider_setup.machine_local_path",
+        lambda repo_root=None: path,
+    )
+    monkeypatch.setattr(
+        "aichestra.config.provider_setup.save_machine_local",
+        lambda data, repo_root=None: path.write_text(
+            json.dumps(data, indent=2) + "\n", encoding="utf-8"
+        )
+        or path,
+    )
+    register_agent_runtime("cursor", repo_root=tmp_path)
+    register_agent_runtime(
+        "acme-agent", binaries=["acme-cli"], repo_root=tmp_path
+    )
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["execution"]["runtimes"]["cursor"]["enabled"] is True
+    assert data["execution"]["runtimes"]["acme-agent"]["binaries"] == ["acme-cli"]
+
+
+def test_settings_agents_menu_registers_local_openai(tmp_path, monkeypatch):
     import sys
 
     from aichestra.config.project_settings import (
@@ -203,16 +233,15 @@ def test_settings_providers_menu_registers_openai(tmp_path, monkeypatch):
         )
         or machine,
     )
-    # 8 providers → 1 add model → 2 openai → pair yes → id/endpoint/env → back → save
+    # 8 Agents & Models → 3 local backend → 2 openai → pair yes → id/endpoint → back → save
     replies = iter(
         [
             "8",
-            "1",
+            "3",
             "2",
             "1",
             "lmstudio",
             "http://127.0.0.1:1234/v1",
-            "LMSTUDIO_API_KEY",
             "0",
             "9",
         ]
@@ -220,4 +249,6 @@ def test_settings_providers_menu_registers_openai(tmp_path, monkeypatch):
     monkeypatch.setattr("builtins.input", lambda _: next(replies))
     interactive_settings(tmp_path)
     data = json.loads(machine.read_text(encoding="utf-8"))
-    assert data["execution"]["model_providers"]["lmstudio"]["api_style"] == "openai"
+    entry = data["execution"]["model_providers"]["lmstudio"]
+    assert entry["api_style"] == "openai"
+    assert "api_key_env" not in entry

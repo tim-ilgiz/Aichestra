@@ -266,7 +266,7 @@ def test_settings_menu_uses_discovery_and_preserves_cancel(tmp_path, monkeypatch
     out = capsys.readouterr().out
     assert "1. Coordinator" in out
     assert "2. Coding" in out
-    assert "8. Providers" in out
+    assert "8. Agents & Models" in out
     assert "9. Save" in out
     assert "1. Coordinator  2. Coding" not in out
     assert "Choose a runtime for Coding" in out

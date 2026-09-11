@@ -152,10 +152,10 @@ def _ollama_factory(
 
 
 class OpenAICompatibleProviderProbe:
-    """Generic OpenAI-compatible ``/v1/models`` probe (LM Studio / vLLM / OpenRouter).
+    """Unauthenticated OpenAI-compatible ``/v1/models`` discovery (local backends).
 
-    Credentials are never read from config values — only from an optional
-    environment variable named by ``api_key_env``.
+    For LM Studio / local vLLM / similar. Aichestra MUST NOT attach Authorization
+    headers or read API keys — authenticated cloud providers are Orca's concern.
     """
 
     def __init__(
@@ -169,7 +169,6 @@ class OpenAICompatibleProviderProbe:
         self._id = (provider_id or str(cfg.get("id") or "openai")).strip()
         raw = endpoint if endpoint is not None else cfg.get("endpoint")
         self._endpoint = str(raw).rstrip("/") if raw else None
-        self._api_key_env = str(cfg.get("api_key_env") or "").strip() or None
         self._timeout = float(cfg.get("timeout_seconds") or 5)
 
     @property
@@ -202,7 +201,6 @@ class OpenAICompatibleProviderProbe:
 
     def _get_models_payload(self) -> Mapping[str, Any] | None:
         import json
-        import os
         import urllib.error
         import urllib.request
 
@@ -213,10 +211,6 @@ class OpenAICompatibleProviderProbe:
         if not self._endpoint.endswith("/v1") and "/v1/" not in self._endpoint:
             url = f"{self._endpoint}/v1/models"
         headers = {"Accept": "application/json"}
-        if self._api_key_env:
-            key = os.environ.get(self._api_key_env, "").strip()
-            if key:
-                headers["Authorization"] = f"Bearer {key}"
         try:
             req = urllib.request.Request(url, headers=headers, method="GET")
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:
@@ -256,7 +250,7 @@ PROVIDER_PROBE_REGISTRY = default_provider_probe_registry()
 def register_provider_probe(
     provider_id: str, factory: ProviderProbeFactory
 ) -> None:
-    """Public extension point for LM Studio / vLLM / OpenRouter / custom."""
+    """Extension point for local inference probes (LM Studio / vLLM / custom)."""
     PROVIDER_PROBE_REGISTRY.register(provider_id, factory)
 
 
